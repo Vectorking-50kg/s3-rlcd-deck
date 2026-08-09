@@ -1,0 +1,2 @@
+# Development-only diagnostics consumed by the HIL harness.
+CONFIG_DECK_DIAGNOSTIC_CONSOLE=y

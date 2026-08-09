@@ -1,0 +1,2 @@
+# Production builds must not mix diagnostics into the future Target bridge.
+# CONFIG_DECK_DIAGNOSTIC_CONSOLE is not set
