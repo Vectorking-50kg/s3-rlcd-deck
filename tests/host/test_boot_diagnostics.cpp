@@ -125,4 +125,26 @@ int main()
             "\"boot_event_count\":1,\"rtc_errors\":0,\"sensor_errors\":3}\n",
         "expected one complete peripheral_state JSON line"
     );
+
+    output.clear();
+    const deck_setup_diagnostic_info_t setup_info = {
+        true,
+        "no_wifi_config",
+        7,
+        "S3-RLCD-A1B2",
+        "192.168.4.1",
+        nullptr,
+    };
+    require(
+        deck_setup_diagnostics_emit(&setup_info, sink),
+        "expected the setup state event to be emitted"
+    );
+    require(
+        output ==
+            "{\"type\":\"setup_state\",\"active\":true,"
+            "\"reason\":\"no_wifi_config\",\"session_id\":7,"
+            "\"ssid\":\"S3-RLCD-A1B2\",\"address\":\"192.168.4.1\","
+            "\"error_stage\":\"\"}\n",
+        "expected setup diagnostics to omit the ephemeral password"
+    );
 }

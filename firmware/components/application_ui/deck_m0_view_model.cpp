@@ -35,7 +35,15 @@ const char *wifi_state_name(deck_wifi_state_t state)
 
 const char *setup_state_name(deck_setup_state_t state)
 {
-    return state == DECK_SETUP_ACTIVE ? "ACTIVE" : "IDLE";
+    switch (state) {
+        case DECK_SETUP_ACTIVE:
+            return "ACTIVE";
+        case DECK_SETUP_IDLE:
+            return "IDLE";
+        case DECK_SETUP_UNAVAILABLE:
+        default:
+            return "UNAVAILABLE";
+    }
 }
 
 bool same_text(const char *left, const char *right)
@@ -46,7 +54,7 @@ bool same_text(const char *left, const char *right)
     return strcmp(left, right) == 0;
 }
 
-bool data_is_available(deck_data_source_t source)
+bool data_is_available(uint8_t source)
 {
     return source == DECK_DATA_SIMULATED || source == DECK_DATA_VERIFIED;
 }
@@ -72,7 +80,11 @@ bool deck_m0_view_model_equal(const deck_m0_view_model_t *left, const deck_m0_vi
            left->key_event == right->key_event &&
            left->key_event_count == right->key_event_count && left->boot_event == right->boot_event &&
            left->boot_event_count == right->boot_event_count && left->wifi_state == right->wifi_state &&
-           left->setup_state == right->setup_state && left->refresh_count == right->refresh_count &&
+           left->setup_state == right->setup_state &&
+           memcmp(left->setup_ssid, right->setup_ssid, sizeof(left->setup_ssid)) == 0 &&
+           memcmp(left->setup_password, right->setup_password, sizeof(left->setup_password)) == 0 &&
+           memcmp(left->setup_address, right->setup_address, sizeof(left->setup_address)) == 0 &&
+           left->refresh_count == right->refresh_count &&
            left->uptime_seconds == right->uptime_seconds &&
            left->minimum_free_heap_bytes == right->minimum_free_heap_bytes;
 }
@@ -153,6 +165,28 @@ bool deck_m0_view_model_format(const deck_m0_view_model_t *model, char *buffer, 
         return false;
     }
 
+    char setup[192];
+    const int setup_size = model->setup_state == DECK_SETUP_ACTIVE
+                               ? snprintf(
+                                     setup,
+                                     sizeof(setup),
+                                     "Wi-Fi %s / Setup ACTIVE\nAP %s\nPASS %s\nHTTP http://%s",
+                                     wifi_state_name(model->wifi_state),
+                                     model->setup_ssid,
+                                     model->setup_password,
+                                     model->setup_address
+                                 )
+                               : snprintf(
+                                     setup,
+                                     sizeof(setup),
+                                     "Wi-Fi %s / Setup %s",
+                                     wifi_state_name(model->wifi_state),
+                                     setup_state_name(model->setup_state)
+                                 );
+    if (setup_size < 0 || static_cast<size_t>(setup_size) >= sizeof(setup)) {
+        return false;
+    }
+
     const int size = snprintf(
         buffer,
         buffer_size,
@@ -161,7 +195,7 @@ bool deck_m0_view_model_format(const deck_m0_view_model_t *model, char *buffer, 
         "RTC %s\n"
         "%s\n"
         "KEY %s #%" PRIu32 " / BOOT %s #%" PRIu32 "\n"
-        "Wi-Fi %s / Setup %s\n"
+        "%s\n"
         "刷新 %" PRIu32 " / 最低堆 %" PRIu32 " KiB\n"
         "Companion 配对 M1",
         source_suffix,
@@ -175,8 +209,7 @@ bool deck_m0_view_model_format(const deck_m0_view_model_t *model, char *buffer, 
         model->key_event_count,
         available && model->buttons_available ? button_event_name(model->boot_event) : "UNAVAILABLE",
         model->boot_event_count,
-        wifi_state_name(model->wifi_state),
-        setup_state_name(model->setup_state),
+        setup,
         model->refresh_count,
         model->minimum_free_heap_bytes / 1024U
     );

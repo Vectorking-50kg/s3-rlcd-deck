@@ -9,7 +9,9 @@ idf_component_register(
         esp_psram
         esp_system
         esp_timer
+        freertos
         health
+        setup_mode
 )
 
 target_compile_features(${COMPONENT_LIB} PRIVATE cxx_std_17)
