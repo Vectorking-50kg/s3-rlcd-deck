@@ -171,6 +171,20 @@ void explicit_stop_clears_ephemeral_credentials()
 
 void http_contract_is_read_only_and_labels_pairing_as_m1()
 {
+    size_t route_count = 0;
+    const deck_setup_http_route_spec_t *routes = deck_setup_http_routes(&route_count);
+    assert(routes != nullptr);
+    assert(route_count == 3);
+    assert(routes[0].route == DECK_SETUP_HTTP_PAGE);
+    assert(routes[0].method == DECK_SETUP_HTTP_GET);
+    assert(std::string(routes[0].path) == "/");
+    assert(routes[1].route == DECK_SETUP_HTTP_STATUS);
+    assert(routes[1].method == DECK_SETUP_HTTP_GET);
+    assert(std::string(routes[1].path) == "/api/status");
+    assert(routes[2].route == DECK_SETUP_HTTP_SCAN);
+    assert(routes[2].method == DECK_SETUP_HTTP_POST);
+    assert(std::string(routes[2].path) == "/api/scan");
+
     assert(deck_setup_http_route("GET", "/") == DECK_SETUP_HTTP_PAGE);
     assert(deck_setup_http_route("GET", "/api/status") == DECK_SETUP_HTTP_STATUS);
     assert(deck_setup_http_route("POST", "/api/scan") == DECK_SETUP_HTTP_SCAN);
@@ -212,6 +226,44 @@ void http_contract_is_read_only_and_labels_pairing_as_m1()
     deck_setup_mode_destroy(setup);
 }
 
+void production_scan_conversion_bounds_and_terminates_ssids()
+{
+    static constexpr uint8_t long_ssid[] =
+        "123456789012345678901234567890123456";
+    static constexpr uint8_t short_ssid[] = "Office";
+    const std::array<deck_setup_scan_observation_t, 2> observations = {{
+        {long_ssid, sizeof(long_ssid) - 1, -80, true},
+        {short_ssid, sizeof(short_ssid) - 1, -42, false},
+    }};
+    std::array<deck_setup_scan_result_t, 2> results{};
+    size_t result_count = 99;
+    assert(deck_setup_http_convert_scan_results(
+        observations.data(), observations.size(), results.data(), results.size(), &result_count
+    ));
+    assert(result_count == 2);
+    assert(std::strlen(results[0].ssid) == DECK_SETUP_SCAN_SSID_CAPACITY - 1);
+    assert(results[0].ssid[DECK_SETUP_SCAN_SSID_CAPACITY - 1] == '\0');
+    assert(results[0].rssi == -80);
+    assert(results[0].secure);
+    assert(std::string(results[1].ssid) == "Office");
+    assert(results[1].rssi == -42);
+    assert(!results[1].secure);
+
+    std::array<deck_setup_scan_result_t, 1> limited_results{};
+    assert(deck_setup_http_convert_scan_results(
+        observations.data(),
+        observations.size(),
+        limited_results.data(),
+        limited_results.size(),
+        &result_count
+    ));
+    assert(result_count == 1);
+
+    assert(!deck_setup_http_convert_scan_results(
+        nullptr, 1, results.data(), results.size(), &result_count
+    ));
+}
+
 }  // namespace
 
 int main()
@@ -223,5 +275,6 @@ int main()
     only_explicit_activity_refreshes_the_timeout();
     explicit_stop_clears_ephemeral_credentials();
     http_contract_is_read_only_and_labels_pairing_as_m1();
+    production_scan_conversion_bounds_and_terminates_ssids();
     return 0;
 }

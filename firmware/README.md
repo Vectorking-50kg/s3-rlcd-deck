@@ -104,5 +104,7 @@ the development Mac's Wi-Fi connection:
   --expect-display --expect-peripherals --expect-setup
 ```
 
-The live harness also rejects Task WDT, panic, Guru Meditation, and assertion logs even if
-all expected JSON diagnostic events were emitted.
+Setup active/inactive events are published only after the ESP-IDF Wi-Fi driver reports
+`WIFI_EVENT_AP_START`/`WIFI_EVENT_AP_STOP`; missing events and stop failures are errors.
+During this extended observation, the live harness also rejects Task WDT, panic, Guru
+Meditation, and assertion logs even if all expected JSON diagnostic events were emitted.

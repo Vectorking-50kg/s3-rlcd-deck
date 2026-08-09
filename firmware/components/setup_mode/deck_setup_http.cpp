@@ -19,6 +19,12 @@ constexpr char kPage[] =
     "fetch(path,{method});state.textContent=JSON.stringify(await r.json(),null,2)}"
     "scan.onclick=()=>load('POST','/api/scan');load()</script></body></html>";
 
+constexpr deck_setup_http_route_spec_t kRoutes[] = {
+    {DECK_SETUP_HTTP_PAGE, DECK_SETUP_HTTP_GET, "/"},
+    {DECK_SETUP_HTTP_STATUS, DECK_SETUP_HTTP_GET, "/api/status"},
+    {DECK_SETUP_HTTP_SCAN, DECK_SETUP_HTTP_POST, "/api/scan"},
+};
+
 class BufferWriter {
   public:
     BufferWriter(char *buffer, size_t capacity) : buffer_(buffer), capacity_(capacity), size_(0), ok_(true)
@@ -89,24 +95,65 @@ const char *reason_name(deck_setup_reason_t reason)
 
 }  // namespace
 
+const deck_setup_http_route_spec_t *deck_setup_http_routes(size_t *route_count)
+{
+    if (route_count == nullptr) {
+        return nullptr;
+    }
+    *route_count = sizeof(kRoutes) / sizeof(kRoutes[0]);
+    return kRoutes;
+}
+
 deck_setup_http_route_t deck_setup_http_route(const char *method, const char *path)
 {
     if (method == nullptr || path == nullptr) {
         return DECK_SETUP_HTTP_NOT_FOUND;
     }
-    if (std::strcmp(path, "/") == 0) {
-        return std::strcmp(method, "GET") == 0 ? DECK_SETUP_HTTP_PAGE
-                                                : DECK_SETUP_HTTP_METHOD_NOT_ALLOWED;
-    }
-    if (std::strcmp(path, "/api/status") == 0) {
-        return std::strcmp(method, "GET") == 0 ? DECK_SETUP_HTTP_STATUS
-                                                : DECK_SETUP_HTTP_METHOD_NOT_ALLOWED;
-    }
-    if (std::strcmp(path, "/api/scan") == 0) {
-        return std::strcmp(method, "POST") == 0 ? DECK_SETUP_HTTP_SCAN
-                                                 : DECK_SETUP_HTTP_METHOD_NOT_ALLOWED;
+    for (const deck_setup_http_route_spec_t &route : kRoutes) {
+        if (std::strcmp(path, route.path) != 0) {
+            continue;
+        }
+        const char *expected_method =
+            route.method == DECK_SETUP_HTTP_GET ? "GET" : "POST";
+        return std::strcmp(method, expected_method) == 0
+                   ? route.route
+                   : DECK_SETUP_HTTP_METHOD_NOT_ALLOWED;
     }
     return DECK_SETUP_HTTP_NOT_FOUND;
+}
+
+bool deck_setup_http_convert_scan_results(
+    const deck_setup_scan_observation_t *observations,
+    size_t observation_count,
+    deck_setup_scan_result_t *results,
+    size_t result_capacity,
+    size_t *result_count
+)
+{
+    if ((observations == nullptr && observation_count != 0) ||
+        (results == nullptr && result_capacity != 0) || result_count == nullptr) {
+        return false;
+    }
+    const size_t count = observation_count < result_capacity
+                             ? observation_count
+                             : result_capacity;
+    for (size_t index = 0; index < count; ++index) {
+        if (observations[index].ssid == nullptr && observations[index].ssid_size != 0) {
+            return false;
+        }
+        results[index] = {};
+        const size_t copy_size = observations[index].ssid_size < DECK_SETUP_SCAN_SSID_CAPACITY - 1
+                                     ? observations[index].ssid_size
+                                     : DECK_SETUP_SCAN_SSID_CAPACITY - 1;
+        if (copy_size != 0) {
+            std::memcpy(results[index].ssid, observations[index].ssid, copy_size);
+        }
+        results[index].ssid[copy_size] = '\0';
+        results[index].rssi = observations[index].rssi;
+        results[index].secure = observations[index].secure;
+    }
+    *result_count = count;
+    return true;
 }
 
 bool deck_setup_http_render_page(char *buffer, size_t buffer_size)

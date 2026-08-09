@@ -340,6 +340,25 @@ void setup_event(void *, const deck_setup_service_event_t *event)
 #endif
 }
 
+void start_setup_after_ui_ready()
+{
+    if (application_setup != nullptr) {
+        return;
+    }
+    // The transactional active Wi-Fi store is introduced by #6. Until then no
+    // persisted configuration is considered valid, so first boot enters Setup.
+    application_setup = deck_setup_service_start(false, setup_event, nullptr);
+#ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
+    if (application_setup == nullptr) {
+        static constexpr char error[] =
+            "{\"type\":\"setup_state\",\"active\":false,\"reason\":\"none\","
+            "\"session_id\":0,\"ssid\":\"\",\"address\":\"192.168.4.1\","
+            "\"error_stage\":\"start\"}\n";
+        write_stdout(nullptr, error, sizeof(error) - 1);
+    }
+#endif
+}
+
 void ui_event(void *, const deck_application_ui_event_t *event)
 {
     if (event == nullptr) {
@@ -352,6 +371,9 @@ void ui_event(void *, const deck_application_ui_event_t *event)
 #endif
         (void)release_display_resources();
         return;
+    }
+    if (event->state == DECK_APPLICATION_UI_READY) {
+        start_setup_after_ui_ready();
     }
 
 #ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
@@ -440,18 +462,6 @@ extern "C" void app_main(void)
         application_model_mutex = nullptr;
         return;
     }
-    // The transactional active Wi-Fi store is introduced by #6. Until then no
-    // persisted configuration is considered valid, so first boot enters Setup.
-    application_setup = deck_setup_service_start(false, setup_event, nullptr);
-#ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
-    if (application_setup == nullptr) {
-        static constexpr char error[] =
-            "{\"type\":\"setup_state\",\"active\":false,\"reason\":\"none\","
-            "\"session_id\":0,\"ssid\":\"\",\"address\":\"192.168.4.1\","
-            "\"error_stage\":\"start\"}\n";
-        write_stdout(nullptr, error, sizeof(error) - 1);
-    }
-#endif
     application_peripherals = deck_peripherals_start(peripheral_snapshot, nullptr);
 #ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
     if (application_peripherals == nullptr) {
