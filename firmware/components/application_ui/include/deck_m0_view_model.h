@@ -37,10 +37,13 @@ typedef struct {
     bool rtc_available;
     uint8_t rtc_hour;
     uint8_t rtc_minute;
+    uint32_t rtc_error_count;
+    bool sensor_available;
     int16_t raw_temperature_tenths_c;
     int16_t calibrated_temperature_tenths_c;
     uint16_t humidity_tenths_percent;
     uint32_t sensor_error_count;
+    bool buttons_available;
     deck_button_event_t key_event;
     uint32_t key_event_count;
     deck_button_event_t boot_event;

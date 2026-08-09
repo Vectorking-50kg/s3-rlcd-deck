@@ -196,6 +196,109 @@ with tempfile.TemporaryDirectory() as temporary_directory:
         text=True,
     )
 
+    peripheral_event = (
+        '{"type":"peripheral_state","rtc_available":true,"rtc_hour":9,'
+        '"rtc_minute":41,"sensor_available":true,'
+        '"raw_temperature_tenths_c":237,'
+        '"calibrated_temperature_tenths_c":197,'
+        '"humidity_tenths_percent":630,"buttons_available":true,'
+        '"key_event":"none",'
+        '"key_event_count":0,"boot_event":"none","boot_event_count":0,'
+        '"rtc_errors":0,"sensor_errors":0}\n'
+    )
+    peripheral_capture = pathlib.Path(temporary_directory) / "peripheral-console.log"
+    peripheral_capture.write_text(
+        display_capture.read_text(encoding="utf-8") + peripheral_event * 3,
+        encoding="utf-8",
+    )
+    peripheral_result = subprocess.run(
+        [
+            sys.executable,
+            str(HARNESS),
+            "--input-file",
+            str(peripheral_capture),
+            "--expect-display",
+            "--expect-peripherals",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    bad_peripheral_capture = pathlib.Path(temporary_directory) / "bad-peripheral-console.log"
+    bad_peripheral_capture.write_text(
+        display_capture.read_text(encoding="utf-8")
+        + peripheral_event.replace('"sensor_errors":0', '"sensor_errors":1') * 3,
+        encoding="utf-8",
+    )
+    bad_peripheral_result = subprocess.run(
+        [
+            sys.executable,
+            str(HARNESS),
+            "--input-file",
+            str(bad_peripheral_capture),
+            "--expect-peripherals",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    bad_calibration_capture = pathlib.Path(temporary_directory) / "bad-calibration-console.log"
+    bad_calibration_capture.write_text(
+        display_capture.read_text(encoding="utf-8")
+        + peripheral_event.replace(
+            '"calibrated_temperature_tenths_c":197',
+            '"calibrated_temperature_tenths_c":198',
+        )
+        * 3,
+        encoding="utf-8",
+    )
+    bad_calibration_result = subprocess.run(
+        [
+            sys.executable,
+            str(HARNESS),
+            "--input-file",
+            str(bad_calibration_capture),
+            "--expect-peripherals",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    button_event = (
+        peripheral_event.replace('"key_event":"none"', '"key_event":"long_press"')
+        .replace('"key_event_count":0', '"key_event_count":2')
+        .replace('"boot_event":"none"', '"boot_event":"long_press"')
+        .replace('"boot_event_count":0', '"boot_event_count":2')
+    )
+    button_capture = pathlib.Path(temporary_directory) / "button-console.log"
+    button_capture.write_text(
+        display_capture.read_text(encoding="utf-8") + button_event * 3,
+        encoding="utf-8",
+    )
+    button_result = subprocess.run(
+        [
+            sys.executable,
+            str(HARNESS),
+            "--input-file",
+            str(button_capture),
+            "--expect-peripherals",
+            "--expect-key-event",
+            "long_press",
+            "--minimum-key-events",
+            "2",
+            "--expect-boot-event",
+            "long_press",
+            "--minimum-boot-events",
+            "2",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
     reset_capture = pathlib.Path(temporary_directory) / "unexpected-reset.log"
     reset_capture.write_text(
         display_capture.read_text(encoding="utf-8")
@@ -238,6 +341,33 @@ display_expected = (
 )
 if display_result.stdout != display_expected:
     raise SystemExit(f"unexpected display harness output: {display_result.stdout!r}")
+
+if peripheral_result.returncode != 0:
+    print(peripheral_result.stdout, end="", file=sys.stderr)
+    print(peripheral_result.stderr, end="", file=sys.stderr)
+    raise SystemExit("expected the harness to accept three clean peripheral samples")
+
+peripheral_expected = (
+    display_expected
+    + "peripheral_state observed: rtc=09:41 raw_temperature=23.7C "
+    + "calibrated_temperature=19.7C humidity=63.0% samples=3\n"
+)
+if peripheral_result.stdout != peripheral_expected:
+    raise SystemExit(f"unexpected peripheral harness output: {peripheral_result.stdout!r}")
+
+if bad_peripheral_result.returncode == 0 or "sensor unavailable or invalid" not in bad_peripheral_result.stderr:
+    raise SystemExit("expected the peripheral harness to reject sensor I2C errors")
+
+if (
+    bad_calibration_result.returncode == 0
+    or "sensor unavailable or invalid" not in bad_calibration_result.stderr
+):
+    raise SystemExit("expected the peripheral harness to reject the wrong calibration offset")
+
+if button_result.returncode != 0:
+    print(button_result.stdout, end="", file=sys.stderr)
+    print(button_result.stderr, end="", file=sys.stderr)
+    raise SystemExit("expected the peripheral harness to accept physical button evidence")
 
 if reset_result.returncode == 0 or "unexpected reset" not in reset_result.stderr:
     raise SystemExit("expected the display harness to reject a second boot_ok event")

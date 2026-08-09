@@ -1,6 +1,7 @@
 #include "sdkconfig.h"
 
 #include "deck_application_ui.h"
+#include "deck_peripherals.h"
 #include "deck_boot_diagnostics.h"
 #include "deck_display.h"
 #include "deck_m0_view_model.h"
@@ -14,6 +15,8 @@ namespace {
 
 deck_rlcd_panel_t *application_panel = nullptr;
 deck_display_service_t *application_display = nullptr;
+deck_peripherals_t *application_peripherals = nullptr;
+deck_m0_view_model_t application_model{};
 
 }  // namespace
 
@@ -121,6 +124,24 @@ void display_start_error(const char *stage)
 
 namespace {
 
+struct ButtonEventMapping {
+    deck_button_event_t view;
+    deck_diagnostic_button_event_t diagnostic;
+};
+
+ButtonEventMapping map_button_event(deck_button_input_event_t event)
+{
+    switch (event) {
+        case DECK_BUTTON_INPUT_SHORT_PRESS:
+            return {DECK_BUTTON_SHORT_PRESS, DECK_DIAGNOSTIC_BUTTON_SHORT_PRESS};
+        case DECK_BUTTON_INPUT_LONG_PRESS:
+            return {DECK_BUTTON_LONG_PRESS, DECK_DIAGNOSTIC_BUTTON_LONG_PRESS};
+        case DECK_BUTTON_INPUT_NONE:
+        default:
+            return {DECK_BUTTON_NONE, DECK_DIAGNOSTIC_BUTTON_NONE};
+    }
+}
+
 bool release_display_resources()
 {
     if (application_display != nullptr) {
@@ -149,9 +170,12 @@ deck_m0_view_model_t make_initial_model(
         0,
         0,
         0,
+        false,
         0,
         0,
         0,
+        0,
+        false,
         DECK_BUTTON_NONE,
         0,
         DECK_BUTTON_NONE,
@@ -162,20 +186,53 @@ deck_m0_view_model_t make_initial_model(
         uptime_seconds,
         minimum_free_heap_bytes,
     };
-#ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
-    model.data_source = DECK_DATA_SIMULATED;
-    model.rtc_available = true;
-    model.rtc_hour = 12;
-    model.rtc_minute = 34;
-    model.raw_temperature_tenths_c = 234;
-    model.calibrated_temperature_tenths_c = 194;
-    model.humidity_tenths_percent = 456;
-    model.key_event = DECK_BUTTON_SHORT_PRESS;
-    model.key_event_count = 3;
-    model.boot_event = DECK_BUTTON_LONG_PRESS;
-    model.boot_event_count = 1;
-#endif
     return model;
+}
+
+void peripheral_snapshot(void *, const deck_peripheral_snapshot_t *snapshot)
+{
+    if (snapshot == nullptr) {
+        return;
+    }
+    application_model.data_source = DECK_DATA_VERIFIED;
+    application_model.rtc_available = snapshot->rtc_available;
+    application_model.rtc_hour = snapshot->rtc_hour;
+    application_model.rtc_minute = snapshot->rtc_minute;
+    application_model.rtc_error_count = snapshot->rtc_error_count;
+    application_model.sensor_available = snapshot->sensor_available;
+    application_model.raw_temperature_tenths_c = snapshot->raw_temperature_tenths_c;
+    application_model.calibrated_temperature_tenths_c =
+        snapshot->calibrated_temperature_tenths_c;
+    application_model.humidity_tenths_percent = snapshot->humidity_tenths_percent;
+    application_model.sensor_error_count = snapshot->sensor_error_count;
+    application_model.buttons_available = snapshot->buttons_available;
+    const ButtonEventMapping key_event = map_button_event(snapshot->key_event);
+    const ButtonEventMapping boot_event = map_button_event(snapshot->boot_event);
+    application_model.key_event = key_event.view;
+    application_model.key_event_count = snapshot->key_event_count;
+    application_model.boot_event = boot_event.view;
+    application_model.boot_event_count = snapshot->boot_event_count;
+    (void)deck_application_ui_update(&application_model);
+#ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
+    const deck_peripheral_diagnostic_info_t info = {
+        snapshot->rtc_available,
+        snapshot->rtc_hour,
+        snapshot->rtc_minute,
+        snapshot->sensor_available,
+        snapshot->raw_temperature_tenths_c,
+        snapshot->calibrated_temperature_tenths_c,
+        snapshot->humidity_tenths_percent,
+        snapshot->buttons_available,
+        key_event.diagnostic,
+        snapshot->key_event_count,
+        boot_event.diagnostic,
+        snapshot->boot_event_count,
+        snapshot->rtc_error_count,
+        snapshot->sensor_error_count,
+    };
+    const deck_diagnostic_sink_t sink = {write_stdout, nullptr};
+    (void)deck_peripheral_diagnostics_emit(&info, sink);
+#endif
 }
 
 void ui_event(void *, const deck_application_ui_event_t *event)
@@ -254,14 +311,14 @@ extern "C" void app_main(void)
         return;
     }
 
-    const deck_m0_view_model_t initial_model = make_initial_model(
+    application_model = make_initial_model(
         app->version,
         static_cast<uint64_t>(esp_timer_get_time() / 1'000'000),
         esp_get_minimum_free_heap_size()
     );
     if (!deck_application_ui_start(
             application_display,
-            &initial_model,
+            &application_model,
             ui_event,
             nullptr
         )) {
@@ -269,5 +326,13 @@ extern "C" void app_main(void)
         display_start_error("ui_start");
 #endif
         (void)release_display_resources();
+        return;
     }
+    application_peripherals = deck_peripherals_start(peripheral_snapshot, nullptr);
+#ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
+    if (application_peripherals == nullptr) {
+        static constexpr char error[] = "{\"type\":\"peripheral_error\",\"stage\":\"start\"}\n";
+        write_stdout(nullptr, error, sizeof(error) - 1);
+    }
+#endif
 }

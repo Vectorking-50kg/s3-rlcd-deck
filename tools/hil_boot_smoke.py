@@ -60,21 +60,74 @@ def valid_display_event(
     )
 
 
+def peripheral_event_has_fields(event: dict[str, Any]) -> bool:
+    required = {
+        "rtc_available": bool,
+        "rtc_hour": int,
+        "rtc_minute": int,
+        "sensor_available": bool,
+        "raw_temperature_tenths_c": int,
+        "calibrated_temperature_tenths_c": int,
+        "humidity_tenths_percent": int,
+        "buttons_available": bool,
+        "key_event": str,
+        "key_event_count": int,
+        "boot_event": str,
+        "boot_event_count": int,
+        "rtc_errors": int,
+        "sensor_errors": int,
+    }
+    if event.get("type") != "peripheral_state":
+        return False
+    return all(type(event.get(name)) is expected for name, expected in required.items())
+
+
+def valid_peripheral_event(event: dict[str, Any] | None) -> bool:
+    if event is None or not peripheral_event_has_fields(event):
+        return False
+    rtc_valid = not event["rtc_available"] or (
+        0 <= event["rtc_hour"] <= 23 and 0 <= event["rtc_minute"] <= 59
+    )
+    return (
+        rtc_valid
+        and event["sensor_available"]
+        and event["buttons_available"]
+        and -400 <= event["raw_temperature_tenths_c"] <= 1250
+        and -440 <= event["calibrated_temperature_tenths_c"] <= 1210
+        and event["calibrated_temperature_tenths_c"]
+        == event["raw_temperature_tenths_c"] - 40
+        and 0 <= event["humidity_tenths_percent"] <= 1000
+        and event["key_event"] in {"none", "short_press", "long_press"}
+        and event["key_event_count"] >= 0
+        and event["boot_event"] in {"none", "short_press", "long_press"}
+        and event["boot_event_count"] >= 0
+        and event["rtc_errors"] == 0
+        and event["sensor_errors"] == 0
+    )
+
+
 def diagnostic_events(
     lines: Iterable[str],
     expect_display: bool,
+    expect_peripherals: bool = False,
     display_deadline_seconds: float | None = None,
     monotonic: Any = time.monotonic,
 ) -> tuple[
     dict[str, Any] | None,
     dict[str, Any] | None,
     dict[str, Any] | None,
+    dict[str, Any] | None,
     int,
+    int,
+    bool,
 ]:
     boot = None
     display = None
     progress = None
+    peripheral = None
     boot_count = 0
+    peripheral_count = 0
+    peripheral_samples_valid = True
     observation_started = monotonic()
     for line in lines:
         candidate = line.strip()
@@ -96,9 +149,21 @@ def diagnostic_events(
                 or monotonic() - observation_started <= display_deadline_seconds
             ):
                 progress = event
-        if boot is not None and not expect_display:
+        elif peripheral_event_has_fields(event):
+            peripheral = event
+            peripheral_count += 1
+            peripheral_samples_valid = peripheral_samples_valid and valid_peripheral_event(event)
+        if boot is not None and not expect_display and not expect_peripherals:
             break
-    return boot, display, progress, boot_count
+    return (
+        boot,
+        display,
+        progress,
+        peripheral,
+        boot_count,
+        peripheral_count,
+        peripheral_samples_valid,
+    )
 
 
 def boot_event(lines: Iterable[str]) -> dict[str, Any] | None:
@@ -171,6 +236,33 @@ def parse_arguments() -> argparse.Namespace:
         action="store_true",
         help="Also require at least three clean full-frame completions and no reset.",
     )
+    parser.add_argument(
+        "--expect-peripherals",
+        action="store_true",
+        help="Also require at least three clean RTC/SHTC3 peripheral-state samples.",
+    )
+    parser.add_argument(
+        "--expect-key-event",
+        choices=("short_press", "long_press"),
+        help="Require the latest physical KEY event while observing peripherals.",
+    )
+    parser.add_argument(
+        "--minimum-key-events",
+        type=int,
+        default=0,
+        help="Require at least this many physical KEY events.",
+    )
+    parser.add_argument(
+        "--expect-boot-event",
+        choices=("short_press", "long_press"),
+        help="Require the latest physical BOOT event while observing peripherals.",
+    )
+    parser.add_argument(
+        "--minimum-boot-events",
+        type=int,
+        default=0,
+        help="Require at least this many physical BOOT events.",
+    )
     return parser.parse_args()
 
 
@@ -179,17 +271,30 @@ def main() -> int:
     if arguments.timeout <= 0:
         print("timeout must be greater than zero", file=sys.stderr)
         return 2
+    expects_buttons = (
+        arguments.expect_key_event is not None
+        or arguments.minimum_key_events > 0
+        or arguments.expect_boot_event is not None
+        or arguments.minimum_boot_events > 0
+    )
+    if arguments.minimum_key_events < 0 or arguments.minimum_boot_events < 0:
+        print("minimum button event counts must not be negative", file=sys.stderr)
+        return 2
+    if expects_buttons and not arguments.expect_peripherals:
+        print("button expectations require --expect-peripherals", file=sys.stderr)
+        return 2
 
     try:
         if arguments.input_file is not None:
             with arguments.input_file.open(encoding="utf-8", errors="replace") as capture:
-                event, display, progress, boot_count = diagnostic_events(
-                    capture, arguments.expect_display
+                event, display, progress, peripheral, boot_count, peripheral_count, peripheral_valid = diagnostic_events(
+                    capture, arguments.expect_display, arguments.expect_peripherals
                 )
         else:
-            event, display, progress, boot_count = diagnostic_events(
+            event, display, progress, peripheral, boot_count, peripheral_count, peripheral_valid = diagnostic_events(
                 serial_lines(arguments.port, arguments.timeout),
                 arguments.expect_display,
+                arguments.expect_peripherals,
                 display_deadline_seconds=(
                     DISPLAY_STABILITY_WINDOW_SECONDS
                     if arguments.expect_display
@@ -232,6 +337,46 @@ def main() -> int:
             "display_progress observed: "
             f"frames={progress['completed_frames']} timeouts={progress['transfer_timeouts']}"
         )
+    if arguments.expect_peripherals:
+        if peripheral_count < 3:
+            print(
+                f"peripheral smoke failed: observed {peripheral_count} peripheral_state samples (need 3)",
+                file=sys.stderr,
+            )
+            return 1
+        if not peripheral_valid or not valid_peripheral_event(peripheral):
+            print(
+                "peripheral smoke failed: sensor unavailable or invalid, RTC invalid, or I2C errors observed",
+                file=sys.stderr,
+            )
+            return 1
+        if (
+            arguments.expect_key_event is not None
+            and peripheral["key_event"] != arguments.expect_key_event
+        ) or peripheral["key_event_count"] < arguments.minimum_key_events:
+            print("peripheral smoke failed: KEY event evidence missing", file=sys.stderr)
+            return 1
+        if (
+            arguments.expect_boot_event is not None
+            and peripheral["boot_event"] != arguments.expect_boot_event
+        ) or peripheral["boot_event_count"] < arguments.minimum_boot_events:
+            print("peripheral smoke failed: BOOT event evidence missing", file=sys.stderr)
+            return 1
+        rtc = f"{peripheral['rtc_hour']:02d}:{peripheral['rtc_minute']:02d}" if peripheral["rtc_available"] else "--:--"
+        print(
+            "peripheral_state observed: "
+            f"rtc={rtc} "
+            f"raw_temperature={peripheral['raw_temperature_tenths_c'] / 10:.1f}C "
+            f"calibrated_temperature={peripheral['calibrated_temperature_tenths_c'] / 10:.1f}C "
+            f"humidity={peripheral['humidity_tenths_percent'] / 10:.1f}% "
+            f"samples={peripheral_count}"
+        )
+        if expects_buttons:
+            print(
+                "button evidence observed: "
+                f"key={peripheral['key_event']}#{peripheral['key_event_count']} "
+                f"boot={peripheral['boot_event']}#{peripheral['boot_event_count']}"
+            )
     return 0
 
 

@@ -30,6 +30,9 @@ bool deck_application_ui_start(
     void *event_context
 );
 
+/* Coalesces a cross-task model update for the sole LVGL owner. */
+bool deck_application_ui_update(const deck_m0_view_model_t *model);
+
 #ifdef __cplusplus
 }
 #endif

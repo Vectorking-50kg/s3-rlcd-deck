@@ -62,10 +62,14 @@ bool deck_m0_view_model_equal(const deck_m0_view_model_t *left, const deck_m0_vi
            left->data_source == right->data_source && left->rtc_available == right->rtc_available &&
            left->rtc_hour == right->rtc_hour &&
            left->rtc_minute == right->rtc_minute &&
+           left->rtc_error_count == right->rtc_error_count &&
+           left->sensor_available == right->sensor_available &&
            left->raw_temperature_tenths_c == right->raw_temperature_tenths_c &&
            left->calibrated_temperature_tenths_c == right->calibrated_temperature_tenths_c &&
            left->humidity_tenths_percent == right->humidity_tenths_percent &&
-           left->sensor_error_count == right->sensor_error_count && left->key_event == right->key_event &&
+           left->sensor_error_count == right->sensor_error_count &&
+           left->buttons_available == right->buttons_available &&
+           left->key_event == right->key_event &&
            left->key_event_count == right->key_event_count && left->boot_event == right->boot_event &&
            left->boot_event_count == right->boot_event_count && left->wifi_state == right->wifi_state &&
            left->setup_state == right->setup_state && left->refresh_count == right->refresh_count &&
@@ -93,17 +97,23 @@ bool deck_m0_view_model_format(const deck_m0_view_model_t *model, char *buffer, 
         rtc_state = "OK";
     }
 
-    char rtc[32];
+    char rtc[64];
     const int rtc_size = available && model->rtc_available
                              ? snprintf(
                                    rtc,
                                    sizeof(rtc),
-                                   "%02u:%02u / 状态 %s",
+                                   "%02u:%02u / 状态 %s / RTC ERR %" PRIu32,
                                    model->rtc_hour,
                                    model->rtc_minute,
-                                   rtc_state
+                                   rtc_state,
+                                   model->rtc_error_count
                                )
-                             : snprintf(rtc, sizeof(rtc), "--:-- / 状态 UNAVAILABLE");
+                             : snprintf(
+                                   rtc,
+                                   sizeof(rtc),
+                                   "--:-- / 状态 UNAVAILABLE / RTC ERR %" PRIu32,
+                                   model->rtc_error_count
+                               );
     if (rtc_size < 0 || static_cast<size_t>(rtc_size) >= sizeof(rtc)) {
         return false;
     }
@@ -115,7 +125,7 @@ bool deck_m0_view_model_format(const deck_m0_view_model_t *model, char *buffer, 
         "温度 RAW --.-C / CAL --.-C\n湿度 --.-%% / SENSOR ERR %" PRIu32,
         model->sensor_error_count
     );
-    if (available) {
+    if (available && model->sensor_available) {
         const int32_t raw_abs = model->raw_temperature_tenths_c < 0
                                     ? -static_cast<int32_t>(model->raw_temperature_tenths_c)
                                     : model->raw_temperature_tenths_c;
@@ -161,9 +171,9 @@ bool deck_m0_view_model_format(const deck_m0_view_model_t *model, char *buffer, 
         seconds,
         rtc,
         sensor,
-        button_event_name(model->key_event),
+        available && model->buttons_available ? button_event_name(model->key_event) : "UNAVAILABLE",
         model->key_event_count,
-        button_event_name(model->boot_event),
+        available && model->buttons_available ? button_event_name(model->boot_event) : "UNAVAILABLE",
         model->boot_event_count,
         wifi_state_name(model->wifi_state),
         setup_state_name(model->setup_state),

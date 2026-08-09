@@ -91,4 +91,38 @@ int main()
             "\"transfer_timeouts\":0,\"start_failures\":0,\"rejected_updates\":0}\n",
         "expected one complete display_progress JSON line"
     );
+
+    output.clear();
+    const deck_peripheral_diagnostic_info_t peripheral_info = {
+        false,
+        0,
+        0,
+        true,
+        237,
+        197,
+        630,
+        true,
+        DECK_DIAGNOSTIC_BUTTON_LONG_PRESS,
+        2,
+        DECK_DIAGNOSTIC_BUTTON_SHORT_PRESS,
+        1,
+        0,
+        3,
+    };
+    require(
+        deck_peripheral_diagnostics_emit(&peripheral_info, sink),
+        "expected the peripheral state event to be emitted"
+    );
+    require(
+        output ==
+            "{\"type\":\"peripheral_state\",\"rtc_available\":false,\"rtc_hour\":0,"
+            "\"rtc_minute\":0,\"sensor_available\":true,"
+            "\"raw_temperature_tenths_c\":237,"
+            "\"calibrated_temperature_tenths_c\":197,"
+            "\"humidity_tenths_percent\":630,\"buttons_available\":true,"
+            "\"key_event\":\"long_press\","
+            "\"key_event_count\":2,\"boot_event\":\"short_press\","
+            "\"boot_event_count\":1,\"rtc_errors\":0,\"sensor_errors\":3}\n",
+        "expected one complete peripheral_state JSON line"
+    );
 }

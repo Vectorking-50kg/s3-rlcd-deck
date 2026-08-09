@@ -11,6 +11,7 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wsign-conversion"
@@ -39,6 +40,7 @@ struct UiContext {
     uint8_t *draw_buffer_b;
     deck_application_ui_event_fn event_callback;
     void *event_context;
+    QueueHandle_t model_updates;
     int64_t last_tick_us;
     uint64_t last_model_second;
     bool presented_model_valid;
@@ -48,6 +50,10 @@ struct UiContext {
 };
 
 std::atomic_bool ui_started = false;
+std::atomic<QueueHandle_t> active_model_updates = nullptr;
+StaticQueue_t model_update_queue_storage{};
+uint8_t model_update_queue_buffer[sizeof(deck_m0_view_model_t)]{};
+QueueHandle_t model_update_queue = nullptr;
 
 uint64_t monotonic_ms()
 {
@@ -68,6 +74,7 @@ void notify(UiContext *context, deck_application_ui_state_t state)
 
 void fail_task(UiContext *context)
 {
+    active_model_updates.store(nullptr, std::memory_order_release);
     if (context->lv_display != nullptr) {
         lv_display_delete(context->lv_display);
         context->lv_display = nullptr;
@@ -143,6 +150,20 @@ bool present_model(UiContext *context)
     context->presented_model.firmware_version = context->firmware_version;
     context->presented_model_valid = true;
     return true;
+}
+
+void receive_model_update(UiContext *context)
+{
+    deck_m0_view_model_t updated{};
+    if (xQueueReceive(context->model_updates, &updated, 0) != pdTRUE) {
+        return;
+    }
+    updated.refresh_count = context->model.refresh_count;
+    updated.uptime_seconds = context->model.uptime_seconds;
+    updated.minimum_free_heap_bytes = context->model.minimum_free_heap_bytes;
+    context->model = updated;
+    context->model.firmware_version = context->firmware_version;
+    (void)present_model(context);
 }
 
 bool initialize_lvgl(UiContext *context)
@@ -240,6 +261,7 @@ void ui_task(void *task_context)
             );
         }
 
+        receive_model_update(context);
         update_model(context, static_cast<uint64_t>(now_us / 1'000'000));
         lv_timer_handler();
         vTaskDelay(pdMS_TO_TICKS(kUiPollMs));
@@ -278,10 +300,37 @@ bool deck_application_ui_start(
     context->model.firmware_version = context->firmware_version;
     context->event_callback = event_callback;
     context->event_context = event_context;
+    if (model_update_queue == nullptr) {
+        model_update_queue = xQueueCreateStatic(
+            1,
+            sizeof(deck_m0_view_model_t),
+            model_update_queue_buffer,
+            &model_update_queue_storage
+        );
+    } else {
+        (void)xQueueReset(model_update_queue);
+    }
+    context->model_updates = model_update_queue;
+    if (context->model_updates == nullptr) {
+        delete context;
+        ui_started.store(false, std::memory_order_release);
+        return false;
+    }
+    active_model_updates.store(context->model_updates, std::memory_order_release);
     if (xTaskCreatePinnedToCore(ui_task, "deck_ui", kUiStackBytes, context, kUiPriority, nullptr, 0) != pdPASS) {
+        active_model_updates.store(nullptr, std::memory_order_release);
         delete context;
         ui_started.store(false, std::memory_order_release);
         return false;
     }
     return true;
+}
+
+bool deck_application_ui_update(const deck_m0_view_model_t *model)
+{
+    if (model == nullptr || model->firmware_version == nullptr) {
+        return false;
+    }
+    QueueHandle_t updates = active_model_updates.load(std::memory_order_acquire);
+    return updates != nullptr && xQueueOverwrite(updates, model) == pdPASS;
 }
