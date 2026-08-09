@@ -30,6 +30,9 @@ with tempfile.TemporaryDirectory() as temporary_directory:
         capture.read_text(encoding="utf-8")
         + '{"type":"display_ready","width":400,"height":300,'
         '"frame_bytes":15000,"submitted_frames":1,"completed_frames":1,'
+        '"transfer_timeouts":0,"start_failures":0,"rejected_updates":0}\n'
+        + '{"type":"display_progress","width":400,"height":300,'
+        '"frame_bytes":15000,"submitted_frames":3,"completed_frames":3,'
         '"transfer_timeouts":0,"start_failures":0,"rejected_updates":0}\n',
         encoding="utf-8",
     )
@@ -39,6 +42,27 @@ with tempfile.TemporaryDirectory() as temporary_directory:
             str(HARNESS),
             "--input-file",
             str(display_capture),
+            "--expect-display",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    reset_capture = pathlib.Path(temporary_directory) / "unexpected-reset.log"
+    reset_capture.write_text(
+        display_capture.read_text(encoding="utf-8")
+        + '{"type":"boot_ok","firmware_version":"0.1.0-dev",'
+        '"reset_reason":"watchdog","uptime_ms":1,'
+        '"minimum_free_heap_bytes":120000}\n',
+        encoding="utf-8",
+    )
+    reset_result = subprocess.run(
+        [
+            sys.executable,
+            str(HARNESS),
+            "--input-file",
+            str(reset_capture),
             "--expect-display",
         ],
         check=False,
@@ -60,6 +84,13 @@ if display_result.returncode != 0:
     print(display_result.stderr, end="", file=sys.stderr)
     raise SystemExit("expected the harness to accept a completed display frame")
 
-display_expected = expected + "display_ready observed: frames=1 timeouts=0\n"
+display_expected = (
+    expected
+    + "display_ready observed: frames=1 timeouts=0\n"
+    + "display_progress observed: frames=3 timeouts=0\n"
+)
 if display_result.stdout != display_expected:
     raise SystemExit(f"unexpected display harness output: {display_result.stdout!r}")
+
+if reset_result.returncode == 0 or "unexpected reset" not in reset_result.stderr:
+    raise SystemExit("expected the display harness to reject a second boot_ok event")

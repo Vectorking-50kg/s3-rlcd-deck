@@ -23,7 +23,7 @@ def valid_boot_event(event: dict[str, Any]) -> bool:
     )
 
 
-def valid_display_event(event: dict[str, Any]) -> bool:
+def display_event_has_fields(event: dict[str, Any], event_type: str) -> bool:
     required = {
         "width": int,
         "height": int,
@@ -34,16 +34,22 @@ def valid_display_event(event: dict[str, Any]) -> bool:
         "start_failures": int,
         "rejected_updates": int,
     }
-    if event.get("type") != "display_ready" or not all(
+    return event.get("type") == event_type and all(
         isinstance(event.get(name), expected) for name, expected in required.items()
-    ):
+    )
+
+
+def valid_display_event(
+    event: dict[str, Any] | None, event_type: str, minimum_frames: int
+) -> bool:
+    if event is None or not display_event_has_fields(event, event_type):
         return False
     return (
         event["width"] == 400
         and event["height"] == 300
         and event["frame_bytes"] == 15000
-        and event["submitted_frames"] >= 1
-        and event["completed_frames"] >= 1
+        and event["submitted_frames"] >= minimum_frames
+        and event["completed_frames"] >= minimum_frames
         and event["completed_frames"] <= event["submitted_frames"]
         and event["transfer_timeouts"] == 0
         and event["start_failures"] == 0
@@ -53,9 +59,16 @@ def valid_display_event(event: dict[str, Any]) -> bool:
 
 def diagnostic_events(
     lines: Iterable[str], expect_display: bool
-) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+) -> tuple[
+    dict[str, Any] | None,
+    dict[str, Any] | None,
+    dict[str, Any] | None,
+    int,
+]:
     boot = None
     display = None
+    progress = None
+    boot_count = 0
     for line in lines:
         candidate = line.strip()
         if not candidate.startswith("{"):
@@ -65,12 +78,16 @@ def diagnostic_events(
         except json.JSONDecodeError:
             continue
         if valid_boot_event(event):
-            boot = event
-        elif valid_display_event(event):
+            if boot is None:
+                boot = event
+            boot_count += 1
+        elif display_event_has_fields(event, "display_ready"):
             display = event
-        if boot is not None and (not expect_display or display is not None):
+        elif display_event_has_fields(event, "display_progress"):
+            progress = event
+        if boot is not None and not expect_display:
             break
-    return boot, display
+    return boot, display, progress, boot_count
 
 
 def boot_event(lines: Iterable[str]) -> dict[str, Any] | None:
@@ -102,7 +119,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--expect-display",
         action="store_true",
-        help="Also require one successful full-frame display completion.",
+        help="Also require at least three clean full-frame completions and no reset.",
     )
     return parser.parse_args()
 
@@ -116,9 +133,11 @@ def main() -> int:
     try:
         if arguments.input_file is not None:
             with arguments.input_file.open(encoding="utf-8", errors="replace") as capture:
-                event, display = diagnostic_events(capture, arguments.expect_display)
+                event, display, progress, boot_count = diagnostic_events(
+                    capture, arguments.expect_display
+                )
         else:
-            event, display = diagnostic_events(
+            event, display, progress, boot_count = diagnostic_events(
                 serial_lines(arguments.port, arguments.timeout), arguments.expect_display
             )
     except (OSError, RuntimeError) as error:
@@ -128,18 +147,34 @@ def main() -> int:
     if event is None:
         print("boot smoke failed: no valid boot_ok event observed", file=sys.stderr)
         return 1
+    if boot_count != 1:
+        print(
+            f"boot smoke failed: observed {boot_count} boot_ok events (unexpected reset)",
+            file=sys.stderr,
+        )
+        return 1
 
     print(
         "boot_ok observed: "
         f"version={event['firmware_version']} reset_reason={event['reset_reason']}"
     )
     if arguments.expect_display:
-        if display is None:
+        if not valid_display_event(display, "display_ready", 1):
             print("display smoke failed: no valid display_ready event observed", file=sys.stderr)
             return 1
         print(
             "display_ready observed: "
             f"frames={display['completed_frames']} timeouts={display['transfer_timeouts']}"
+        )
+        if not valid_display_event(progress, "display_progress", 3):
+            print(
+                "display smoke failed: fewer than three clean completed frames observed",
+                file=sys.stderr,
+            )
+            return 1
+        print(
+            "display_progress observed: "
+            f"frames={progress['completed_frames']} timeouts={progress['transfer_timeouts']}"
         )
     return 0
 

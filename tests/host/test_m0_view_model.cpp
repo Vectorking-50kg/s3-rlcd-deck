@@ -113,6 +113,20 @@ void renders_unavailable_rtc_without_fabricating_time()
     assert(std::string(text).find("RTC --:-- / 状态 UNAVAILABLE") != std::string::npos);
 }
 
+void treats_unknown_data_sources_as_unavailable()
+{
+    deck_m0_view_model_t model = sample_model();
+    model.data_source = static_cast<deck_data_source_t>(99);
+    char text[768];
+    assert(deck_m0_view_model_format(&model, text, sizeof(text)));
+
+    const std::string page(text);
+    assert(page.find("M0 诊断 [UNAVAILABLE]") != std::string::npos);
+    assert(page.find("RTC --:-- / 状态 UNAVAILABLE") != std::string::npos);
+    assert(page.find("温度 RAW --.-C / CAL --.-C") != std::string::npos);
+    assert(page.find("湿度 --.-% / SENSOR ERR 2") != std::string::npos);
+}
+
 }  // namespace
 
 int main()
@@ -121,5 +135,6 @@ int main()
     equality_tracks_visible_state_only();
     every_chinese_page_character_is_in_the_font_manifest();
     renders_unavailable_rtc_without_fabricating_time();
+    treats_unknown_data_sources_as_unavailable();
     return 0;
 }

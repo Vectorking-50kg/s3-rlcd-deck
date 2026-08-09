@@ -220,15 +220,20 @@ void ui_task(void *task_context)
         const deck_display_result_t display_result =
             deck_display_service_poll(context->display_service, static_cast<uint64_t>(now_us / 1000));
         if (context->flush_waiting &&
-            (display_result == DECK_DISPLAY_COMPLETED || display_result == DECK_DISPLAY_TIMED_OUT)) {
+            (display_result == DECK_DISPLAY_COMPLETED || display_result == DECK_DISPLAY_RECOVERING ||
+             display_result == DECK_DISPLAY_START_FAILED)) {
             context->flush_waiting = false;
             lv_display_flush_ready(context->lv_display);
         }
-        if (!context->ready_emitted && display_result == DECK_DISPLAY_COMPLETED) {
-            context->ready_emitted = true;
-            notify(context, DECK_APPLICATION_UI_READY);
-        }
         if (display_result == DECK_DISPLAY_COMPLETED) {
+            if (!context->ready_emitted) {
+                context->ready_emitted = true;
+                notify(context, DECK_APPLICATION_UI_READY);
+            } else {
+                notify(context, DECK_APPLICATION_UI_FRAME_COMPLETED);
+            }
+        }
+        if (display_result == DECK_DISPLAY_COMPLETED || display_result == DECK_DISPLAY_RECOVERED) {
             (void)deck_display_service_submit(
                 context->display_service,
                 static_cast<uint64_t>(now_us / 1000)

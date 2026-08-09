@@ -5,16 +5,12 @@ project(deck_host_tests LANGUAGES CXX)
 enable_testing()
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
-set(DECK_M0_GLYPH_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/../../firmware/components/application_ui/assets/m0_glyphs.txt")
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${DECK_M0_GLYPH_MANIFEST}")
-file(READ "${DECK_M0_GLYPH_MANIFEST}" DECK_M0_GLYPHS)
-string(STRIP "${DECK_M0_GLYPHS}" DECK_M0_GLYPHS)
 set(DECK_M0_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
-file(MAKE_DIRECTORY "${DECK_M0_GENERATED_DIR}")
-configure_file(
+include("${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/DeckGlyphManifest.cmake")
+deck_configure_glyph_header(
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../firmware/components/application_ui/assets/m0_glyphs.txt"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../firmware/components/application_ui/deck_m0_glyphs.h.in"
     "${DECK_M0_GENERATED_DIR}/deck_m0_glyphs.h"
-    @ONLY
 )
 
 add_executable(

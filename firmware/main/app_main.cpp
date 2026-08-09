@@ -136,6 +136,48 @@ bool release_display_resources()
     return true;
 }
 
+deck_m0_view_model_t make_initial_model(
+    const char *firmware_version,
+    uint64_t uptime_seconds,
+    uint32_t minimum_free_heap_bytes
+)
+{
+    deck_m0_view_model_t model = {
+        firmware_version,
+        DECK_DATA_UNAVAILABLE,
+        false,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        DECK_BUTTON_NONE,
+        0,
+        DECK_BUTTON_NONE,
+        0,
+        DECK_WIFI_UNAVAILABLE,
+        DECK_SETUP_IDLE,
+        0,
+        uptime_seconds,
+        minimum_free_heap_bytes,
+    };
+#ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
+    model.data_source = DECK_DATA_SIMULATED;
+    model.rtc_available = true;
+    model.rtc_hour = 12;
+    model.rtc_minute = 34;
+    model.raw_temperature_tenths_c = 234;
+    model.calibrated_temperature_tenths_c = 194;
+    model.humidity_tenths_percent = 456;
+    model.key_event = DECK_BUTTON_SHORT_PRESS;
+    model.key_event_count = 3;
+    model.boot_event = DECK_BUTTON_LONG_PRESS;
+    model.boot_event_count = 1;
+#endif
+    return model;
+}
+
 void ui_event(void *, const deck_application_ui_event_t *event)
 {
     if (event == nullptr) {
@@ -162,7 +204,11 @@ void ui_event(void *, const deck_application_ui_event_t *event)
         event->display.rejected_updates,
     };
     const deck_diagnostic_sink_t sink = {write_stdout, nullptr};
-    deck_display_diagnostics_emit(&info, sink);
+    if (event->state == DECK_APPLICATION_UI_READY) {
+        deck_display_diagnostics_emit(&info, sink);
+    } else {
+        deck_display_progress_diagnostics_emit(&info, sink);
+    }
 #endif
 }
 
@@ -208,26 +254,11 @@ extern "C" void app_main(void)
         return;
     }
 
-    const deck_m0_view_model_t initial_model = {
+    const deck_m0_view_model_t initial_model = make_initial_model(
         app->version,
-        DECK_DATA_SIMULATED,
-        true,
-        12,
-        34,
-        234,
-        194,
-        456,
-        0,
-        DECK_BUTTON_SHORT_PRESS,
-        3,
-        DECK_BUTTON_LONG_PRESS,
-        1,
-        DECK_WIFI_UNAVAILABLE,
-        DECK_SETUP_IDLE,
-        0,
         static_cast<uint64_t>(esp_timer_get_time() / 1'000'000),
-        esp_get_minimum_free_heap_size(),
-    };
+        esp_get_minimum_free_heap_size()
+    );
     if (!deck_application_ui_start(
             application_display,
             &initial_model,

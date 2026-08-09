@@ -11,6 +11,7 @@ extern "C" {
 
 typedef enum {
     DECK_APPLICATION_UI_READY = 0,
+    DECK_APPLICATION_UI_FRAME_COMPLETED,
     DECK_APPLICATION_UI_FAILED,
 } deck_application_ui_state_t;
 

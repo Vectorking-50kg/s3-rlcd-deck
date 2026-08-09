@@ -35,6 +35,10 @@ typedef struct {
 
 bool deck_boot_diagnostics_emit(const deck_boot_info_t *info, deck_diagnostic_sink_t sink);
 bool deck_display_diagnostics_emit(const deck_display_ready_info_t *info, deck_diagnostic_sink_t sink);
+bool deck_display_progress_diagnostics_emit(
+    const deck_display_ready_info_t *info,
+    deck_diagnostic_sink_t sink
+);
 
 #ifdef __cplusplus
 }

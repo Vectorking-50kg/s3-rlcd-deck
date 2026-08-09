@@ -117,12 +117,13 @@ void owns_the_frame_until_async_completion()
     assert(panel.frame_size == DECK_DISPLAY_FRAME_BYTES);
     assert(panel.frame[74] == 0xfd);
 
-    assert(deck_display_service_update(display, top_left, &white, 1) == DECK_DISPLAY_UPDATED);
+    assert(deck_display_service_update(display, top_left, &white, 1) == DECK_DISPLAY_IN_FLIGHT);
     assert(panel.frame[74] == 0xfd);
     assert(deck_display_service_submit(display, 110) == DECK_DISPLAY_IN_FLIGHT);
 
     panel.complete();
     assert(deck_display_service_poll(display, 111) == DECK_DISPLAY_COMPLETED);
+    assert(deck_display_service_update(display, top_left, &white, 1) == DECK_DISPLAY_UPDATED);
     assert(deck_display_service_submit(display, 112) == DECK_DISPLAY_SUBMITTED);
     assert(panel.frame[74] == 0xff);
     panel.complete();
@@ -137,7 +138,7 @@ void owns_the_frame_until_async_completion()
     assert(deck_display_service_destroy(display));
 }
 
-void counts_a_timeout_once_and_accepts_late_completion()
+void restores_the_last_successful_frame_after_a_timeout()
 {
     FakePanel panel;
     const deck_display_panel_adapter_t adapter = {start_transfer, &panel};
@@ -156,7 +157,7 @@ void counts_a_timeout_once_and_accepts_late_completion()
 
     assert(deck_display_service_update(display, top_left, &white, 1) == DECK_DISPLAY_UPDATED);
     assert(deck_display_service_submit(display, 200) == DECK_DISPLAY_SUBMITTED);
-    assert(deck_display_service_update(display, bottom_left, &black, 1) == DECK_DISPLAY_UPDATED);
+    assert(deck_display_service_update(display, bottom_left, &black, 1) == DECK_DISPLAY_IN_FLIGHT);
     assert(deck_display_service_poll(display, 249) == DECK_DISPLAY_IN_FLIGHT);
     assert(deck_display_service_poll(display, 250) == DECK_DISPLAY_TIMED_OUT);
     assert(panel.completed_frame[74] == 0xfd);
@@ -164,13 +165,57 @@ void counts_a_timeout_once_and_accepts_late_completion()
     assert(deck_display_service_metrics(display).transfer_timeouts == 1);
 
     panel.complete();
-    assert(deck_display_service_poll(display, 301) == DECK_DISPLAY_COMPLETED);
-    assert(deck_display_service_submit(display, 302) == DECK_DISPLAY_SUBMITTED);
+    assert(deck_display_service_poll(display, 301) == DECK_DISPLAY_RECOVERING);
+    assert(panel.frame[74] == 0xfd);
+    assert(!deck_display_service_destroy(display));
+
+    assert(deck_display_service_update(display, bottom_left, &black, 1) == DECK_DISPLAY_UPDATED);
+    assert(deck_display_service_poll(display, 350) == DECK_DISPLAY_IN_FLIGHT);
+    assert(deck_display_service_poll(display, 351) == DECK_DISPLAY_TIMED_OUT);
+    assert(deck_display_service_poll(display, 400) == DECK_DISPLAY_IN_FLIGHT);
+    panel.complete();
+    assert(deck_display_service_poll(display, 401) == DECK_DISPLAY_RECOVERED);
+    assert(deck_display_service_submit(display, 402) == DECK_DISPLAY_SUBMITTED);
     assert(panel.frame[74] == 0xff);
     assert(panel.frame[0] == 0x7f);
     panel.complete();
-    assert(deck_display_service_poll(display, 303) == DECK_DISPLAY_COMPLETED);
-    assert(deck_display_service_metrics(display).completed_frames == 3);
+    assert(deck_display_service_poll(display, 403) == DECK_DISPLAY_COMPLETED);
+    const deck_display_metrics_t metrics = deck_display_service_metrics(display);
+    assert(metrics.submitted_frames == 4);
+    assert(metrics.completed_frames == 4);
+    assert(metrics.transfer_timeouts == 2);
+    assert(metrics.recovery_submissions == 1);
+    assert(metrics.recovered_frames == 1);
+    assert(deck_display_service_destroy(display));
+}
+
+void reports_a_recovery_start_failure_once()
+{
+    FakePanel panel;
+    const deck_display_panel_adapter_t adapter = {start_transfer, &panel};
+    deck_display_service_t *display = deck_display_service_create(adapter, 50);
+    assert(display != nullptr);
+
+    const uint16_t black = 0x0000;
+    const uint16_t white = 0xffff;
+    const deck_display_area_t top_left = {0, 0, 0, 0};
+    assert(deck_display_service_update(display, top_left, &black, 1) == DECK_DISPLAY_UPDATED);
+    assert(deck_display_service_submit(display, 0) == DECK_DISPLAY_SUBMITTED);
+    panel.complete();
+    assert(deck_display_service_poll(display, 1) == DECK_DISPLAY_COMPLETED);
+
+    assert(deck_display_service_update(display, top_left, &white, 1) == DECK_DISPLAY_UPDATED);
+    assert(deck_display_service_submit(display, 10) == DECK_DISPLAY_SUBMITTED);
+    assert(deck_display_service_poll(display, 60) == DECK_DISPLAY_TIMED_OUT);
+    panel.complete();
+    panel.accept_transfer = false;
+    assert(deck_display_service_poll(display, 61) == DECK_DISPLAY_START_FAILED);
+    assert(deck_display_service_poll(display, 62) == DECK_DISPLAY_UNCHANGED);
+
+    const deck_display_metrics_t metrics = deck_display_service_metrics(display);
+    assert(metrics.start_failures == 1);
+    assert(metrics.recovery_submissions == 0);
+    assert(metrics.recovered_frames == 0);
     assert(deck_display_service_destroy(display));
 }
 
@@ -223,7 +268,8 @@ int main()
     rejects_invalid_areas_without_touching_the_frame();
     reports_unchanged_when_pixels_match_the_frame();
     owns_the_frame_until_async_completion();
-    counts_a_timeout_once_and_accepts_late_completion();
+    restores_the_last_successful_frame_after_a_timeout();
+    reports_a_recovery_start_failure_once();
     keeps_a_dirty_frame_when_starting_the_transfer_fails();
     refuses_to_destroy_an_in_flight_transfer();
     return 0;

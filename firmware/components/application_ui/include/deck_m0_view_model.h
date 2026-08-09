@@ -26,7 +26,8 @@ typedef enum {
 } deck_setup_state_t;
 
 typedef enum {
-    DECK_DATA_SIMULATED = 0,
+    DECK_DATA_UNAVAILABLE = 0,
+    DECK_DATA_SIMULATED,
     DECK_DATA_VERIFIED,
 } deck_data_source_t;
 

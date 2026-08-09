@@ -1,0 +1,8 @@
+function(deck_configure_glyph_header manifest template output)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${manifest}")
+    file(READ "${manifest}" DECK_M0_GLYPHS)
+    string(STRIP "${DECK_M0_GLYPHS}" DECK_M0_GLYPHS)
+    get_filename_component(output_directory "${output}" DIRECTORY)
+    file(MAKE_DIRECTORY "${output_directory}")
+    configure_file("${template}" "${output}" @ONLY)
+endfunction()

@@ -46,6 +46,11 @@ bool same_text(const char *left, const char *right)
     return strcmp(left, right) == 0;
 }
 
+bool data_is_available(deck_data_source_t source)
+{
+    return source == DECK_DATA_SIMULATED || source == DECK_DATA_VERIFIED;
+}
+
 }  // namespace
 
 bool deck_m0_view_model_equal(const deck_m0_view_model_t *left, const deck_m0_view_model_t *right)
@@ -77,18 +82,19 @@ bool deck_m0_view_model_format(const deck_m0_view_model_t *model, char *buffer, 
     const uint64_t hours = model->uptime_seconds / 3600U;
     const uint64_t minutes = model->uptime_seconds / 60U % 60U;
     const uint64_t seconds = model->uptime_seconds % 60U;
-    const int32_t raw_abs = model->raw_temperature_tenths_c < 0
-                                ? -static_cast<int32_t>(model->raw_temperature_tenths_c)
-                                : model->raw_temperature_tenths_c;
-    const int32_t calibrated_abs = model->calibrated_temperature_tenths_c < 0
-                                       ? -static_cast<int32_t>(model->calibrated_temperature_tenths_c)
-                                       : model->calibrated_temperature_tenths_c;
-    const char raw_sign = model->raw_temperature_tenths_c < 0 ? '-' : '+';
-    const char calibrated_sign = model->calibrated_temperature_tenths_c < 0 ? '-' : '+';
+    const bool available = data_is_available(model->data_source);
+    const char *source_suffix = " [UNAVAILABLE]";
+    const char *rtc_state = "UNAVAILABLE";
+    if (model->data_source == DECK_DATA_SIMULATED) {
+        source_suffix = " [SIM]";
+        rtc_state = "SIMULATED";
+    } else if (model->data_source == DECK_DATA_VERIFIED) {
+        source_suffix = "";
+        rtc_state = "OK";
+    }
+
     char rtc[32];
-    const char *source_suffix = model->data_source == DECK_DATA_SIMULATED ? " [SIM]" : "";
-    const char *rtc_state = model->data_source == DECK_DATA_SIMULATED ? "SIMULATED" : "OK";
-    const int rtc_size = model->rtc_available
+    const int rtc_size = available && model->rtc_available
                              ? snprintf(
                                    rtc,
                                    sizeof(rtc),
@@ -102,14 +108,48 @@ bool deck_m0_view_model_format(const deck_m0_view_model_t *model, char *buffer, 
         return false;
     }
 
+    char sensor[160];
+    int sensor_size = snprintf(
+        sensor,
+        sizeof(sensor),
+        "温度 RAW --.-C / CAL --.-C\n湿度 --.-%% / SENSOR ERR %" PRIu32,
+        model->sensor_error_count
+    );
+    if (available) {
+        const int32_t raw_abs = model->raw_temperature_tenths_c < 0
+                                    ? -static_cast<int32_t>(model->raw_temperature_tenths_c)
+                                    : model->raw_temperature_tenths_c;
+        const int32_t calibrated_abs = model->calibrated_temperature_tenths_c < 0
+                                           ? -static_cast<int32_t>(model->calibrated_temperature_tenths_c)
+                                           : model->calibrated_temperature_tenths_c;
+        const char raw_sign = model->raw_temperature_tenths_c < 0 ? '-' : '+';
+        const char calibrated_sign = model->calibrated_temperature_tenths_c < 0 ? '-' : '+';
+        sensor_size = snprintf(
+            sensor,
+            sizeof(sensor),
+            "温度 RAW %c%d.%dC / CAL %c%d.%dC\n湿度 %u.%u%% / SENSOR ERR %" PRIu32,
+            raw_sign,
+            static_cast<int>(raw_abs / 10),
+            static_cast<int>(raw_abs % 10),
+            calibrated_sign,
+            static_cast<int>(calibrated_abs / 10),
+            static_cast<int>(calibrated_abs % 10),
+            static_cast<unsigned>(model->humidity_tenths_percent / 10U),
+            static_cast<unsigned>(model->humidity_tenths_percent % 10U),
+            model->sensor_error_count
+        );
+    }
+    if (sensor_size < 0 || static_cast<size_t>(sensor_size) >= sizeof(sensor)) {
+        return false;
+    }
+
     const int size = snprintf(
         buffer,
         buffer_size,
         "S3 RLCD Deck / M0 诊断%s\n"
         "FW %s / UP %02" PRIu64 ":%02" PRIu64 ":%02" PRIu64 "\n"
         "RTC %s\n"
-        "温度 RAW %c%d.%dC / CAL %c%d.%dC\n"
-        "湿度 %u.%u%% / SENSOR ERR %" PRIu32 "\n"
+        "%s\n"
         "KEY %s #%" PRIu32 " / BOOT %s #%" PRIu32 "\n"
         "Wi-Fi %s / Setup %s\n"
         "刷新 %" PRIu32 " / 最低堆 %" PRIu32 " KiB\n"
@@ -120,15 +160,7 @@ bool deck_m0_view_model_format(const deck_m0_view_model_t *model, char *buffer, 
         minutes,
         seconds,
         rtc,
-        raw_sign,
-        static_cast<int>(raw_abs / 10),
-        static_cast<int>(raw_abs % 10),
-        calibrated_sign,
-        static_cast<int>(calibrated_abs / 10),
-        static_cast<int>(calibrated_abs % 10),
-        static_cast<unsigned>(model->humidity_tenths_percent / 10U),
-        static_cast<unsigned>(model->humidity_tenths_percent % 10U),
-        model->sensor_error_count,
+        sensor,
         button_event_name(model->key_event),
         model->key_event_count,
         button_event_name(model->boot_event),

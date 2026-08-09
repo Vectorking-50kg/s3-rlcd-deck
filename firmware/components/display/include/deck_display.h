@@ -57,6 +57,8 @@ typedef enum {
     DECK_DISPLAY_SUBMITTED,
     DECK_DISPLAY_IN_FLIGHT,
     DECK_DISPLAY_COMPLETED,
+    DECK_DISPLAY_RECOVERING,
+    DECK_DISPLAY_RECOVERED,
     DECK_DISPLAY_TIMED_OUT,
     DECK_DISPLAY_START_FAILED,
     DECK_DISPLAY_INVALID_ARGUMENT,
@@ -69,14 +71,18 @@ typedef struct {
     uint32_t transfer_timeouts;
     uint32_t start_failures;
     uint32_t rejected_updates;
+    uint32_t recovery_submissions;
+    uint32_t recovered_frames;
 } deck_display_metrics_t;
 
 /*
- * The service owns one logical 1bpp working framebuffer plus bounded immutable
- * transfer and last-successful snapshots. Updates are merged into the working frame
- * while a transfer is in flight. The panel adapter must invoke done exactly once for
- * every accepted transfer, even if completion arrives after the configured timeout.
- * Destroy refuses to release the service while that callback is still outstanding.
+ * The service owns one mutable 1bpp logical framebuffer and one immutable
+ * last-successful recovery snapshot. A candidate transfer makes the logical frame
+ * immutable until callback; higher-level ViewModels may continue to coalesce meanwhile.
+ * After a timed-out candidate completes late, the service retransmits the snapshot before
+ * accepting the candidate as current. Updates may merge into the logical frame during
+ * that recovery transfer. The panel adapter must invoke done exactly once for every
+ * accepted transfer, even after timeout. Destroy refuses while a callback is outstanding.
  */
 deck_display_service_t *deck_display_service_create(
     deck_display_panel_adapter_t adapter,
