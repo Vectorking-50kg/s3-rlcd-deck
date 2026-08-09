@@ -7,7 +7,9 @@ idf_component_register(
     REQUIRES display esp_system esp_timer heap lvgl__lvgl
 )
 
-file(READ "${CMAKE_CURRENT_SOURCE_DIR}/assets/m0_glyphs.txt" DECK_M0_GLYPHS)
+set(DECK_M0_GLYPH_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/assets/m0_glyphs.txt")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${DECK_M0_GLYPH_MANIFEST}")
+file(READ "${DECK_M0_GLYPH_MANIFEST}" DECK_M0_GLYPHS)
 string(STRIP "${DECK_M0_GLYPHS}" DECK_M0_GLYPHS)
 set(DECK_M0_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 file(MAKE_DIRECTORY "${DECK_M0_GENERATED_DIR}")
