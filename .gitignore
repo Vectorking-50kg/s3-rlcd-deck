@@ -1,0 +1,52 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editor and IDE local files
+.vscode/*
+.idea/
+*.swp
+*.swo
+
+# ESP-IDF build output and generated files
+build/
+sdkconfig
+sdkconfig.old
+sdkconfig.*
+dependencies.lock
+managed_components/
+
+# ESP-IDF tooling and Python virtual environments
+.espressif/
+venv/
+.venv/
+env/
+ENV/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+.clangd/
+
+# C/C++ build artifacts
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.elf
+*.bin
+*.hex
+*.map
+*.uf2
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+*.orig
