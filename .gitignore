@@ -16,6 +16,9 @@ sdkconfig.old
 sdkconfig.*
 dependencies.lock
 managed_components/
+!firmware/sdkconfig.defaults
+!firmware/sdkconfig.defaults.*
+!firmware/dependencies.lock
 
 # ESP-IDF tooling and Python virtual environments
 .espressif/

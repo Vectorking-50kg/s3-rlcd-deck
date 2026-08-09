@@ -1,0 +1,11 @@
+menu "Deck health"
+
+    config DECK_DIAGNOSTIC_CONSOLE
+        bool "Emit development diagnostics on the console"
+        default n
+        help
+            Emit machine-readable JSON Lines diagnostics for development and
+            hardware-in-loop tests. Production configurations must leave this
+            disabled so diagnostics never enter the future Target bridge.
+
+endmenu

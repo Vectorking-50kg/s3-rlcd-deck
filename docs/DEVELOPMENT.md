@@ -731,8 +731,8 @@ serial_rx → fixed blocks → serial_router
 
 V1 使用 ESP32-S3 USB Serial/JTAG 的单 CDC 通道作为目标串口桥：
 
-- 目标串口流不与 ESP-IDF console 日志混用。
-- 固件诊断走 Web/内存诊断环。
+- 发布固件的目标串口流不与 ESP-IDF console 日志混用；发布配置关闭 ESP-IDF console。
+- 发布固件诊断走 Web/内存诊断环。开发/HIL 构建可临时启用结构化 USB `boot_ok`，仅用于启动验收，并在发布配置中关闭。
 - 目标 UART 不使用 U0TXD；USB console/ROM 输出不会通过 GPIO17 注入目标设备。
 - USB sink 独立任务处理，不能从 UART RX 同步写 USB。
 - 电脑未打开端口时只允许 USB sink 自身丢弃。
@@ -848,7 +848,7 @@ Companion 保存脱敏轮转日志，默认保留 7 天或最多 50 MiB：
 - Provider 响应只记录状态码、耗时、schema 版本和脱敏错误。
 - 支持导出脱敏诊断包。
 
-ESP32 只维护小型内存诊断环，通过已登录的 System 页面读取。
+ESP32 发布固件只维护小型内存诊断环，通过已登录的 System 页面读取。开发/HIL 构建允许启用不含凭据或用户数据的结构化 USB 启动事件。
 
 ## 15. 开发环境
 
