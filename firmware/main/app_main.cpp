@@ -4,9 +4,10 @@
 
 #include "deck_boot_diagnostics.h"
 
+#include <fcntl.h>
 #include <stdio.h>
+#include <unistd.h>
 
-#include "driver/usb_serial_jtag.h"
 #include "esp_app_desc.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -60,11 +61,35 @@ void write_stdout(void *, const char *data, size_t size)
     fflush(stdout);
 }
 
-void wait_for_diagnostic_host()
+bool diagnostic_host_ready()
+{
+    constexpr char ready_message[] = "DECK_HIL_READY\n";
+    static size_t matched = 0;
+    char input[16];
+    const ssize_t size = read(STDIN_FILENO, input, sizeof(input));
+    for (ssize_t index = 0; index < size; ++index) {
+        if (input[index] == ready_message[matched]) {
+            ++matched;
+            if (matched == sizeof(ready_message) - 1) {
+                return true;
+            }
+        } else {
+            matched = input[index] == ready_message[0] ? 1 : 0;
+        }
+    }
+    return false;
+}
+
+void wait_for_diagnostic_host_ready()
 {
     constexpr int64_t timeout_us = 10'000'000;
+    const int current_flags = fcntl(STDIN_FILENO, F_GETFL);
+    if (current_flags >= 0) {
+        fcntl(STDIN_FILENO, F_SETFL, current_flags | O_NONBLOCK);
+    }
+
     const int64_t deadline = esp_timer_get_time() + timeout_us;
-    while (!usb_serial_jtag_is_connected() && esp_timer_get_time() < deadline) {
+    while (!diagnostic_host_ready() && esp_timer_get_time() < deadline) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
@@ -76,7 +101,7 @@ void wait_for_diagnostic_host()
 extern "C" void app_main(void)
 {
 #ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
-    wait_for_diagnostic_host();
+    wait_for_diagnostic_host_ready();
     const esp_app_desc_t *app = esp_app_get_description();
     const deck_boot_info_t info = {
         app->version,

@@ -34,6 +34,10 @@ fi
 build_directory="$repository_root/build/$variant"
 defaults="sdkconfig.defaults;sdkconfig.defaults.$variant"
 
+# Generated sdkconfig files are disposable. Recreate them from the committed defaults on
+# every invocation so a variant cannot retain values from an older baseline.
+cmake -E remove -f "$build_directory/sdkconfig" "$build_directory/sdkconfig.old"
+
 exec idf.py \
     -C "$repository_root/firmware" \
     -B "$build_directory" \

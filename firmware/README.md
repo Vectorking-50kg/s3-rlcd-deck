@@ -5,8 +5,8 @@ The firmware baseline is ESP-IDF 6.0.2 with LVGL locked to the 9.4 release line.
 ## Build variants
 
 Development builds enable the machine-readable diagnostics consumed by HIL tests. At
-startup they wait up to ten seconds for a USB Serial/JTAG host before emitting the one-shot
-event, so a post-flash monitor cannot race the event:
+startup they wait up to ten seconds for the harness's `DECK_HIL_READY` serial handshake
+before emitting the one-shot event, so a post-flash monitor cannot race the event:
 
 ```bash
 ./tools/idf.sh dev build
@@ -41,5 +41,5 @@ With exactly one Deck connected and its serial port free:
 ```
 
 The script builds, flashes only the generated bootloader/partition/application regions,
-performs the normal post-flash reset, and waits for one `boot_ok` JSON Line. It never
+performs a software-watchdog reset, and waits for one `boot_ok` JSON Line. It never
 erases the whole Flash, writes eFuses, or changes irreversible security settings.

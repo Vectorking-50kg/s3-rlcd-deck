@@ -8,6 +8,8 @@ import time
 from collections.abc import Iterable
 from typing import Any
 
+HIL_READY = b"DECK_HIL_READY\n"
+
 
 def boot_event(lines: Iterable[str]) -> dict[str, Any] | None:
     for line in lines:
@@ -39,6 +41,8 @@ def serial_lines(port: str, timeout_seconds: float) -> Iterable[str]:
 
     deadline = time.monotonic() + timeout_seconds
     with serial.Serial(port=port, baudrate=115200, timeout=0.25) as connection:
+        connection.write(HIL_READY)
+        connection.flush()
         while time.monotonic() < deadline:
             raw_line = connection.readline()
             if raw_line:

@@ -30,7 +30,7 @@ fi
         --port "$port" \
         --baud 460800 \
         --before no-reset \
-        --after hard-reset \
+        --after watchdog-reset \
         write-flash @flash_args
 )
 
