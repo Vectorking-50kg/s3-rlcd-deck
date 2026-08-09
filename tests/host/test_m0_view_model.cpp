@@ -11,6 +11,7 @@ deck_m0_view_model_t sample_model()
 {
     return {
         "0.2.0-dev",
+        DECK_DATA_SIMULATED,
         true,
         12,
         34,
@@ -63,10 +64,10 @@ void formats_every_required_diagnostic_field()
     assert(deck_m0_view_model_format(&model, text, sizeof(text)));
 
     const std::string page(text);
-    assert(page.find("S3 RLCD Deck / M0 诊断") != std::string::npos);
+    assert(page.find("S3 RLCD Deck / M0 诊断 [SIM]") != std::string::npos);
     assert(page.find("FW 0.2.0-dev") != std::string::npos);
     assert(page.find("UP 00:12:34") != std::string::npos);
-    assert(page.find("RTC 12:34") != std::string::npos);
+    assert(page.find("RTC 12:34 / 状态 SIMULATED") != std::string::npos);
     assert(page.find("温度 RAW +23.4C / CAL +19.4C") != std::string::npos);
     assert(page.find("湿度 45.6% / SENSOR ERR 2") != std::string::npos);
     assert(page.find("KEY 短按 #3 / BOOT 长按 #1") != std::string::npos);
@@ -82,6 +83,10 @@ void equality_tracks_visible_state_only()
     assert(deck_m0_view_model_equal(&first, &second));
 
     ++second.refresh_count;
+    assert(!deck_m0_view_model_equal(&first, &second));
+
+    second = first;
+    second.data_source = DECK_DATA_VERIFIED;
     assert(!deck_m0_view_model_equal(&first, &second));
 }
 

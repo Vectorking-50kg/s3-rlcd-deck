@@ -5,6 +5,16 @@ project(deck_host_tests LANGUAGES CXX)
 enable_testing()
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/../../firmware/components/application_ui/assets/m0_glyphs.txt" DECK_M0_GLYPHS)
+string(STRIP "${DECK_M0_GLYPHS}" DECK_M0_GLYPHS)
+set(DECK_M0_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+file(MAKE_DIRECTORY "${DECK_M0_GENERATED_DIR}")
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../firmware/components/application_ui/deck_m0_glyphs.h.in"
+    "${DECK_M0_GENERATED_DIR}/deck_m0_glyphs.h"
+    @ONLY
+)
+
 add_executable(
     test_boot_diagnostics
     test_boot_diagnostics.cpp
@@ -40,7 +50,9 @@ target_compile_features(test_m0_view_model PRIVATE cxx_std_17)
 target_compile_options(test_m0_view_model PRIVATE -Wall -Wextra -Werror -Wconversion -Wsign-conversion)
 target_include_directories(
     test_m0_view_model
-    PRIVATE ../../firmware/components/application_ui/include
+    PRIVATE
+        ../../firmware/components/application_ui/include
+        "${DECK_M0_GENERATED_DIR}"
 )
 add_test(NAME m0_view_model COMMAND test_m0_view_model)
 

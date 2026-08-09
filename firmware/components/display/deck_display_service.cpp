@@ -12,7 +12,9 @@
 
 struct deck_display_service {
     deck_display_panel_adapter_t adapter;
-    uint8_t *frame;
+    uint8_t *working_frame;
+    uint8_t *transfer_frame;
+    uint8_t *committed_frame;
     uint32_t timeout_ms;
     uint64_t transfer_started_ms;
     std::atomic_bool transfer_completed;
@@ -24,11 +26,14 @@ struct deck_display_service {
 
 namespace {
 
-uint8_t *allocate_frame()
+uint8_t *allocate_frame(bool dma_capable)
 {
 #ifdef ESP_PLATFORM
-    return static_cast<uint8_t *>(heap_caps_malloc(DECK_DISPLAY_FRAME_BYTES, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
+    const uint32_t capabilities =
+        dma_capable ? MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL : MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+    return static_cast<uint8_t *>(heap_caps_malloc(DECK_DISPLAY_FRAME_BYTES, capabilities));
 #else
+    (void)dma_capable;
     return new (std::nothrow) uint8_t[DECK_DISPLAY_FRAME_BYTES];
 #endif
 }
@@ -103,35 +108,39 @@ deck_display_service_t *deck_display_service_create(
         return nullptr;
     }
 
-    auto *display = new (std::nothrow) deck_display_service_t{
-        adapter,
-        allocate_frame(),
-        transfer_timeout_ms,
-        0,
-        false,
-        false,
-        false,
-        false,
-        {},
-    };
+    auto *display = new (std::nothrow) deck_display_service_t{};
     if (display == nullptr) {
         return nullptr;
     }
-    if (display->frame == nullptr) {
-        delete display;
+    display->adapter = adapter;
+    display->timeout_ms = transfer_timeout_ms;
+    display->working_frame = allocate_frame(false);
+    display->transfer_frame = allocate_frame(true);
+    display->committed_frame = allocate_frame(false);
+    if (display->working_frame == nullptr || display->transfer_frame == nullptr ||
+        display->committed_frame == nullptr) {
+        (void)deck_display_service_destroy(display);
         return nullptr;
     }
-    std::memset(display->frame, 0xff, DECK_DISPLAY_FRAME_BYTES);
+    std::memset(display->working_frame, 0xff, DECK_DISPLAY_FRAME_BYTES);
+    std::memset(display->transfer_frame, 0xff, DECK_DISPLAY_FRAME_BYTES);
+    std::memset(display->committed_frame, 0xff, DECK_DISPLAY_FRAME_BYTES);
     return display;
 }
 
-void deck_display_service_destroy(deck_display_service_t *display)
+bool deck_display_service_destroy(deck_display_service_t *display)
 {
     if (display == nullptr) {
-        return;
+        return true;
     }
-    free_frame(display->frame);
+    if (display->in_flight) {
+        return false;
+    }
+    free_frame(display->working_frame);
+    free_frame(display->transfer_frame);
+    free_frame(display->committed_frame);
     delete display;
+    return true;
 }
 
 deck_display_result_t deck_display_service_update(
@@ -144,13 +153,8 @@ deck_display_result_t deck_display_service_update(
     if (display == nullptr) {
         return DECK_DISPLAY_INVALID_ARGUMENT;
     }
-    if (display->in_flight) {
-        ++display->metrics.rejected_updates;
-        return DECK_DISPLAY_IN_FLIGHT;
-    }
-
     const deck_display_pack_result_t result =
-        deck_display_pack_rgb565(display->frame, DECK_DISPLAY_FRAME_BYTES, area, pixels, pixel_count);
+        deck_display_pack_rgb565(display->working_frame, DECK_DISPLAY_FRAME_BYTES, area, pixels, pixel_count);
     if (result == DECK_DISPLAY_PACK_INVALID_ARGUMENT) {
         ++display->metrics.rejected_updates;
         return DECK_DISPLAY_INVALID_ARGUMENT;
@@ -176,10 +180,11 @@ deck_display_result_t deck_display_service_submit(deck_display_service_t *displa
         return DECK_DISPLAY_UNCHANGED;
     }
 
+    std::memcpy(display->transfer_frame, display->working_frame, DECK_DISPLAY_FRAME_BYTES);
     display->transfer_completed.store(false, std::memory_order_relaxed);
     if (!display->adapter.start_transfer(
             display->adapter.context,
-            display->frame,
+            display->transfer_frame,
             DECK_DISPLAY_FRAME_BYTES,
             transfer_done,
             display
@@ -191,6 +196,7 @@ deck_display_result_t deck_display_service_submit(deck_display_service_t *displa
     display->in_flight = true;
     display->timeout_reported = false;
     display->transfer_started_ms = now_ms;
+    display->dirty = false;
     ++display->metrics.submitted_frames;
     return DECK_DISPLAY_SUBMITTED;
 }
@@ -206,7 +212,7 @@ deck_display_result_t deck_display_service_poll(deck_display_service_t *display,
     if (display->transfer_completed.exchange(false, std::memory_order_acq_rel)) {
         display->in_flight = false;
         display->timeout_reported = false;
-        display->dirty = false;
+        std::memcpy(display->committed_frame, display->transfer_frame, DECK_DISPLAY_FRAME_BYTES);
         ++display->metrics.completed_frames;
         return DECK_DISPLAY_COMPLETED;
     }

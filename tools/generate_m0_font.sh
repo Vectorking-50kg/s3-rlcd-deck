@@ -5,12 +5,18 @@ set -euo pipefail
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source_font="firmware/managed_components/lvgl__lvgl/scripts/built_in_font/SourceHanSansSC-Normal.otf"
 output="firmware/components/application_ui/assets/lv_font_deck_m0_16.c"
-glyphs='诊断状态温度湿度短按长刷新最低堆配对'
+glyph_manifest="firmware/components/application_ui/assets/m0_glyphs.txt"
 
 cd "$repository_root"
 
 if [[ ! -f "$source_font" ]]; then
     echo "LVGL managed dependency is missing; run ./tools/idf.sh dev reconfigure first." >&2
+    exit 1
+fi
+
+glyphs="$(tr -d '\r\n' < "$glyph_manifest")"
+if [[ -z "$glyphs" ]]; then
+    echo "M0 glyph manifest is empty: $glyph_manifest" >&2
     exit 1
 fi
 

@@ -25,8 +25,14 @@ typedef enum {
     DECK_SETUP_ACTIVE,
 } deck_setup_state_t;
 
+typedef enum {
+    DECK_DATA_SIMULATED = 0,
+    DECK_DATA_VERIFIED,
+} deck_data_source_t;
+
 typedef struct {
     const char *firmware_version;
+    deck_data_source_t data_source;
     bool rtc_available;
     uint8_t rtc_hour;
     uint8_t rtc_minute;

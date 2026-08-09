@@ -34,14 +34,18 @@ failure, ViewModel equality, diagnostic text, and the Chinese glyph manifest.
 
 ## Display architecture
 
-The `display` module owns one 15 KiB 1bpp framebuffer behind a narrow C-compatible
-interface. LVGL renders RGB565 into two 400×24 partial buffers; its sole owner task packs
-those areas directly into the full framebuffer. The panel adapter holds that framebuffer
-until ESP-IDF reports the asynchronous SPI transfer complete. A timeout records an error
-without reusing the in-flight memory or rebooting the Deck.
+The `display` module exposes a narrow C-compatible interface and owns 45 KiB of bounded
+1bpp state: one 15 KiB logical working framebuffer, one immutable 15 KiB DMA snapshot,
+and one 15 KiB last-successful snapshot. LVGL renders RGB565 into two 400×24 partial
+buffers (19.2 KiB each); its sole owner task packs those areas directly into the working
+frame. Updates continue to merge there while the panel holds the DMA snapshot. After a
+late completion, the latest merged frame is submitted automatically. A timeout records an
+error, retains the last-successful snapshot, and never reuses or destroys in-flight memory.
 
 The M0 page uses a checked-in 1bpp font subset generated from the Source Han Sans SC copy
-in the locked LVGL dependency. Regenerate it after resolving managed dependencies with:
+in the locked LVGL dependency. `application_ui/assets/m0_glyphs.txt` is the single source
+of truth for its Chinese glyph set. Regenerate the font after resolving managed
+dependencies with:
 
 ```bash
 ./tools/generate_m0_font.sh

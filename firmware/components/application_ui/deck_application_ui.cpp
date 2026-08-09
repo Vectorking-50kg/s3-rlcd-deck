@@ -44,6 +44,7 @@ struct UiContext {
     bool presented_model_valid;
     bool flush_waiting;
     bool ready_emitted;
+    bool lvgl_initialized;
 };
 
 std::atomic_bool ui_started = false;
@@ -67,13 +68,24 @@ void notify(UiContext *context, deck_application_ui_state_t state)
 
 void fail_task(UiContext *context)
 {
-    notify(context, DECK_APPLICATION_UI_FAILED);
+    if (context->lv_display != nullptr) {
+        lv_display_delete(context->lv_display);
+        context->lv_display = nullptr;
+        context->page_label = nullptr;
+    }
     if (context->draw_buffer_a != nullptr) {
         heap_caps_free(context->draw_buffer_a);
+        context->draw_buffer_a = nullptr;
     }
     if (context->draw_buffer_b != nullptr) {
         heap_caps_free(context->draw_buffer_b);
+        context->draw_buffer_b = nullptr;
     }
+    if (context->lvgl_initialized) {
+        lv_deinit();
+        context->lvgl_initialized = false;
+    }
+    notify(context, DECK_APPLICATION_UI_FAILED);
     ui_started.store(false, std::memory_order_release);
     delete context;
     vTaskDelete(nullptr);
@@ -136,6 +148,7 @@ bool present_model(UiContext *context)
 bool initialize_lvgl(UiContext *context)
 {
     lv_init();
+    context->lvgl_initialized = true;
     context->draw_buffer_a = static_cast<uint8_t *>(heap_caps_malloc(kDrawBufferBytes, MALLOC_CAP_SPIRAM));
     context->draw_buffer_b = static_cast<uint8_t *>(heap_caps_malloc(kDrawBufferBytes, MALLOC_CAP_SPIRAM));
     if (context->draw_buffer_a == nullptr || context->draw_buffer_b == nullptr) {
@@ -214,6 +227,12 @@ void ui_task(void *task_context)
         if (!context->ready_emitted && display_result == DECK_DISPLAY_COMPLETED) {
             context->ready_emitted = true;
             notify(context, DECK_APPLICATION_UI_READY);
+        }
+        if (display_result == DECK_DISPLAY_COMPLETED) {
+            (void)deck_display_service_submit(
+                context->display_service,
+                static_cast<uint64_t>(now_us / 1000)
+            );
         }
 
         update_model(context, static_cast<uint64_t>(now_us / 1'000'000));

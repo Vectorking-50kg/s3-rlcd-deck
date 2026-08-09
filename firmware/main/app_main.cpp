@@ -10,6 +10,13 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 
+namespace {
+
+deck_rlcd_panel_t *application_panel = nullptr;
+deck_display_service_t *application_display = nullptr;
+
+}  // namespace
+
 #ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
 
 #include <fcntl.h>
@@ -99,31 +106,6 @@ void wait_for_diagnostic_host_ready()
     }
 }
 
-void ui_event(void *, const deck_application_ui_event_t *event)
-{
-    if (event == nullptr) {
-        return;
-    }
-    if (event->state == DECK_APPLICATION_UI_FAILED) {
-        static constexpr char error[] = "{\"type\":\"display_error\",\"stage\":\"ui\"}\n";
-        write_stdout(nullptr, error, sizeof(error) - 1);
-        return;
-    }
-
-    const deck_display_ready_info_t info = {
-        DECK_DISPLAY_WIDTH,
-        DECK_DISPLAY_HEIGHT,
-        DECK_DISPLAY_FRAME_BYTES,
-        event->display.submitted_frames,
-        event->display.completed_frames,
-        event->display.transfer_timeouts,
-        event->display.start_failures,
-        event->display.rejected_updates,
-    };
-    const deck_diagnostic_sink_t sink = {write_stdout, nullptr};
-    deck_display_diagnostics_emit(&info, sink);
-}
-
 void display_start_error(const char *stage)
 {
     char line[128];
@@ -136,6 +118,55 @@ void display_start_error(const char *stage)
 }  // namespace
 
 #endif
+
+namespace {
+
+bool release_display_resources()
+{
+    if (application_display != nullptr) {
+        if (!deck_display_service_destroy(application_display)) {
+            return false;
+        }
+        application_display = nullptr;
+    }
+    if (application_panel != nullptr) {
+        deck_rlcd_panel_destroy(application_panel);
+        application_panel = nullptr;
+    }
+    return true;
+}
+
+void ui_event(void *, const deck_application_ui_event_t *event)
+{
+    if (event == nullptr) {
+        return;
+    }
+    if (event->state == DECK_APPLICATION_UI_FAILED) {
+#ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
+        static constexpr char error[] = "{\"type\":\"display_error\",\"stage\":\"ui\"}\n";
+        write_stdout(nullptr, error, sizeof(error) - 1);
+#endif
+        (void)release_display_resources();
+        return;
+    }
+
+#ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
+    const deck_display_ready_info_t info = {
+        DECK_DISPLAY_WIDTH,
+        DECK_DISPLAY_HEIGHT,
+        DECK_DISPLAY_FRAME_BYTES,
+        event->display.submitted_frames,
+        event->display.completed_frames,
+        event->display.transfer_timeouts,
+        event->display.start_failures,
+        event->display.rejected_updates,
+    };
+    const deck_diagnostic_sink_t sink = {write_stdout, nullptr};
+    deck_display_diagnostics_emit(&info, sink);
+#endif
+}
+
+}  // namespace
 
 extern "C" void app_main(void)
 {
@@ -152,32 +183,34 @@ extern "C" void app_main(void)
     deck_boot_diagnostics_emit(&info, sink);
 #endif
 
-    deck_rlcd_panel_t *panel = deck_rlcd_panel_create();
-    if (panel == nullptr) {
+    application_panel = deck_rlcd_panel_create();
+    if (application_panel == nullptr) {
 #ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
         display_start_error("panel_create");
 #endif
         return;
     }
-    if (!deck_rlcd_panel_initialize(panel)) {
+    if (!deck_rlcd_panel_initialize(application_panel)) {
 #ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
         display_start_error("panel_initialize");
 #endif
-        deck_rlcd_panel_destroy(panel);
+        (void)release_display_resources();
         return;
     }
 
-    deck_display_service_t *display = deck_display_service_create(deck_rlcd_panel_adapter(panel), 100);
-    if (display == nullptr) {
+    application_display =
+        deck_display_service_create(deck_rlcd_panel_adapter(application_panel), 100);
+    if (application_display == nullptr) {
 #ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
         display_start_error("service_create");
 #endif
-        deck_rlcd_panel_destroy(panel);
+        (void)release_display_resources();
         return;
     }
 
     const deck_m0_view_model_t initial_model = {
         app->version,
+        DECK_DATA_SIMULATED,
         true,
         12,
         34,
@@ -196,19 +229,14 @@ extern "C" void app_main(void)
         esp_get_minimum_free_heap_size(),
     };
     if (!deck_application_ui_start(
-            display,
+            application_display,
             &initial_model,
-#ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
             ui_event,
-#else
-            nullptr,
-#endif
             nullptr
         )) {
 #ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
         display_start_error("ui_start");
 #endif
-        deck_display_service_destroy(display);
-        deck_rlcd_panel_destroy(panel);
+        (void)release_display_resources();
     }
 }

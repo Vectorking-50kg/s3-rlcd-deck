@@ -1,4 +1,5 @@
 #include "deck_m0_view_model.h"
+#include "deck_m0_glyphs.h"
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -53,7 +54,8 @@ bool deck_m0_view_model_equal(const deck_m0_view_model_t *left, const deck_m0_vi
         return left == right;
     }
     return same_text(left->firmware_version, right->firmware_version) &&
-           left->rtc_available == right->rtc_available && left->rtc_hour == right->rtc_hour &&
+           left->data_source == right->data_source && left->rtc_available == right->rtc_available &&
+           left->rtc_hour == right->rtc_hour &&
            left->rtc_minute == right->rtc_minute &&
            left->raw_temperature_tenths_c == right->raw_temperature_tenths_c &&
            left->calibrated_temperature_tenths_c == right->calibrated_temperature_tenths_c &&
@@ -84,8 +86,17 @@ bool deck_m0_view_model_format(const deck_m0_view_model_t *model, char *buffer, 
     const char raw_sign = model->raw_temperature_tenths_c < 0 ? '-' : '+';
     const char calibrated_sign = model->calibrated_temperature_tenths_c < 0 ? '-' : '+';
     char rtc[32];
+    const char *source_suffix = model->data_source == DECK_DATA_SIMULATED ? " [SIM]" : "";
+    const char *rtc_state = model->data_source == DECK_DATA_SIMULATED ? "SIMULATED" : "OK";
     const int rtc_size = model->rtc_available
-                             ? snprintf(rtc, sizeof(rtc), "%02u:%02u / 状态 OK", model->rtc_hour, model->rtc_minute)
+                             ? snprintf(
+                                   rtc,
+                                   sizeof(rtc),
+                                   "%02u:%02u / 状态 %s",
+                                   model->rtc_hour,
+                                   model->rtc_minute,
+                                   rtc_state
+                               )
                              : snprintf(rtc, sizeof(rtc), "--:-- / 状态 UNAVAILABLE");
     if (rtc_size < 0 || static_cast<size_t>(rtc_size) >= sizeof(rtc)) {
         return false;
@@ -94,7 +105,7 @@ bool deck_m0_view_model_format(const deck_m0_view_model_t *model, char *buffer, 
     const int size = snprintf(
         buffer,
         buffer_size,
-        "S3 RLCD Deck / M0 诊断\n"
+        "S3 RLCD Deck / M0 诊断%s\n"
         "FW %s / UP %02" PRIu64 ":%02" PRIu64 ":%02" PRIu64 "\n"
         "RTC %s\n"
         "温度 RAW %c%d.%dC / CAL %c%d.%dC\n"
@@ -103,6 +114,7 @@ bool deck_m0_view_model_format(const deck_m0_view_model_t *model, char *buffer, 
         "Wi-Fi %s / Setup %s\n"
         "刷新 %" PRIu32 " / 最低堆 %" PRIu32 " KiB\n"
         "Companion 配对 M1",
+        source_suffix,
         model->firmware_version,
         hours,
         minutes,
@@ -131,5 +143,5 @@ bool deck_m0_view_model_format(const deck_m0_view_model_t *model, char *buffer, 
 
 const char *deck_m0_required_glyphs(void)
 {
-    return "诊断状态温度湿度短按长刷新最低堆配对";
+    return DECK_M0_REQUIRED_GLYPHS;
 }

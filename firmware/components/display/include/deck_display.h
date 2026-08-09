@@ -72,15 +72,17 @@ typedef struct {
 } deck_display_metrics_t;
 
 /*
- * The service owns one full 1bpp framebuffer. Callers may update it only while no
- * transfer is in flight. The panel adapter must invoke done exactly once for every
- * accepted transfer, even if completion arrives after the configured timeout.
+ * The service owns one logical 1bpp working framebuffer plus bounded immutable
+ * transfer and last-successful snapshots. Updates are merged into the working frame
+ * while a transfer is in flight. The panel adapter must invoke done exactly once for
+ * every accepted transfer, even if completion arrives after the configured timeout.
+ * Destroy refuses to release the service while that callback is still outstanding.
  */
 deck_display_service_t *deck_display_service_create(
     deck_display_panel_adapter_t adapter,
     uint32_t transfer_timeout_ms
 );
-void deck_display_service_destroy(deck_display_service_t *display);
+bool deck_display_service_destroy(deck_display_service_t *display);
 deck_display_result_t deck_display_service_update(
     deck_display_service_t *display,
     deck_display_area_t area,
