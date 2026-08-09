@@ -41,5 +41,5 @@ fi
 "$IDF_PYTHON_ENV_PATH/bin/python" \
     "$repository_root/tools/hil_boot_smoke.py" \
     --port "$port" \
-    --timeout 20 \
+    --timeout 30 \
     "${expect_display[@]}"

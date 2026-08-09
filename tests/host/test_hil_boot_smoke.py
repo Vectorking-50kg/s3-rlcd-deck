@@ -1,3 +1,4 @@
+import importlib.util
 import pathlib
 import subprocess
 import sys
@@ -6,6 +7,58 @@ import tempfile
 
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[2]
 HARNESS = REPOSITORY_ROOT / "tools" / "hil_boot_smoke.py"
+
+module_spec = importlib.util.spec_from_file_location("deck_hil_boot_smoke", HARNESS)
+if module_spec is None or module_spec.loader is None:
+    raise SystemExit("failed to load the HIL harness module")
+harness_module = importlib.util.module_from_spec(module_spec)
+module_spec.loader.exec_module(harness_module)
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+class FakeSerial:
+    def __init__(self, clock: FakeClock) -> None:
+        self.clock = clock
+        self.writes: list[bytes] = []
+
+    def __enter__(self) -> "FakeSerial":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def write(self, data: bytes) -> None:
+        self.writes.append(data)
+
+    def flush(self) -> None:
+        return None
+
+    def readline(self) -> bytes:
+        self.clock.now += 0.25
+        return b""
+
+
+fake_clock = FakeClock()
+fake_serial = FakeSerial(fake_clock)
+list(
+    harness_module.serial_lines(
+        "fake-port",
+        1.6,
+        serial_factory=lambda **_: fake_serial,
+        monotonic=fake_clock.monotonic,
+    )
+)
+if len(fake_serial.writes) < 3 or any(
+    write != harness_module.HIL_READY for write in fake_serial.writes
+):
+    raise SystemExit("expected the live harness to repeat the ready handshake")
 
 
 with tempfile.TemporaryDirectory() as temporary_directory:

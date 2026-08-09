@@ -9,6 +9,7 @@ from collections.abc import Iterable
 from typing import Any
 
 HIL_READY = b"DECK_HIL_READY\n"
+HIL_READY_INTERVAL_SECONDS = 0.5
 
 
 def valid_boot_event(event: dict[str, Any]) -> bool:
@@ -94,17 +95,28 @@ def boot_event(lines: Iterable[str]) -> dict[str, Any] | None:
     return diagnostic_events(lines, False)[0]
 
 
-def serial_lines(port: str, timeout_seconds: float) -> Iterable[str]:
-    try:
-        import serial
-    except ImportError as error:
-        raise RuntimeError("live HIL requires pyserial from the ESP-IDF environment") from error
+def serial_lines(
+    port: str,
+    timeout_seconds: float,
+    serial_factory: Any | None = None,
+    monotonic: Any = time.monotonic,
+) -> Iterable[str]:
+    if serial_factory is None:
+        try:
+            import serial
+        except ImportError as error:
+            raise RuntimeError("live HIL requires pyserial from the ESP-IDF environment") from error
+        serial_factory = serial.Serial
 
-    deadline = time.monotonic() + timeout_seconds
-    with serial.Serial(port=port, baudrate=115200, timeout=0.25) as connection:
-        connection.write(HIL_READY)
-        connection.flush()
-        while time.monotonic() < deadline:
+    deadline = monotonic() + timeout_seconds
+    with serial_factory(port=port, baudrate=115200, timeout=0.25) as connection:
+        next_ready = 0.0
+        while monotonic() < deadline:
+            now = monotonic()
+            if now >= next_ready:
+                connection.write(HIL_READY)
+                connection.flush()
+                next_ready = now + HIL_READY_INTERVAL_SECONDS
             raw_line = connection.readline()
             if raw_line:
                 yield raw_line.decode("utf-8", errors="replace")

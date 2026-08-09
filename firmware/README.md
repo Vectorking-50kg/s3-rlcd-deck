@@ -71,7 +71,8 @@ performs a software-watchdog reset, and waits for one `boot_ok` JSON Line. It ne
 erases the whole Flash, writes eFuses, or changes irreversible security settings.
 
 For the RLCD ticket, require the boot event plus at least three clean completed full
-frames during the 20-second observation window:
+frames during a 20-second stability window followed by 10 seconds of reset-detection
+grace:
 
 ```bash
 ./tools/hil_boot_smoke.sh /dev/cu.usbmodemXXXX --expect-display
@@ -80,5 +81,7 @@ frames during the 20-second observation window:
 `display_ready` is emitted only after the first panel IO completion callback;
 `display_progress` then reports later completions. The harness rejects wrong
 resolution/frame size, fewer than three frames, any timeout/start failure/rejected update,
-or a second `boot_ok` indicating an unexpected reset. Landscape orientation, black/white
-appearance, mirroring, and clipping still require observing the physical Deck screen.
+or a second `boot_ok` indicating an unexpected reset. It repeats the HIL handshake every
+500 ms so a reboot late in the observation window cannot hide behind the firmware's
+startup wait. Landscape orientation, black/white appearance, mirroring, and clipping
+still require observing the physical Deck screen.
