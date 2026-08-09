@@ -1,7 +1,15 @@
 idf_component_register(
     SRCS "app_main.cpp"
     INCLUDE_DIRS "."
-    PRIV_REQUIRES esp_app_format esp_psram esp_system esp_timer health
+    PRIV_REQUIRES
+        application_ui
+        board_support
+        display
+        esp_app_format
+        esp_psram
+        esp_system
+        esp_timer
+        health
 )
 
 target_compile_features(${COMPONENT_LIB} PRIVATE cxx_std_17)

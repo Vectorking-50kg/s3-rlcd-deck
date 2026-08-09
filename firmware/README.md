@@ -28,6 +28,25 @@ Each variant owns an isolated generated `sdkconfig` and build directory. The com
 
 Host tests exercise firmware behavior through public C-compatible interfaces and replay captured HIL console data without requiring a Deck.
 
+The display tests cover the 400×300 landscape bit mapping, bounds checks, unchanged
+frames, asynchronous frame ownership, late completion after timeout, transfer-start
+failure, ViewModel equality, diagnostic text, and the Chinese glyph manifest.
+
+## Display architecture
+
+The `display` module owns one 15 KiB 1bpp framebuffer behind a narrow C-compatible
+interface. LVGL renders RGB565 into two 400×24 partial buffers; its sole owner task packs
+those areas directly into the full framebuffer. The panel adapter holds that framebuffer
+until ESP-IDF reports the asynchronous SPI transfer complete. A timeout records an error
+without reusing the in-flight memory or rebooting the Deck.
+
+The M0 page uses a checked-in 1bpp font subset generated from the Source Han Sans SC copy
+in the locked LVGL dependency. Regenerate it after resolving managed dependencies with:
+
+```bash
+./tools/generate_m0_font.sh
+```
+
 ## Safe boot smoke test
 
 With exactly one Deck connected and its serial port free:
@@ -43,3 +62,14 @@ With exactly one Deck connected and its serial port free:
 The script builds, flashes only the generated bootloader/partition/application regions,
 performs a software-watchdog reset, and waits for one `boot_ok` JSON Line. It never
 erases the whole Flash, writes eFuses, or changes irreversible security settings.
+
+For the RLCD ticket, require both the boot event and the first completed full frame:
+
+```bash
+./tools/hil_boot_smoke.sh /dev/cu.usbmodemXXXX --expect-display
+```
+
+`display_ready` is emitted only after the panel IO completion callback and is rejected by
+the harness if the resolution/frame size is wrong or any first-frame timeout, start
+failure, or rejected update occurred. Landscape orientation and visual appearance still
+require observing the physical Deck screen.
