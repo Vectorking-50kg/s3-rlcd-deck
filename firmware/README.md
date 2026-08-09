@@ -4,13 +4,15 @@ The firmware baseline is ESP-IDF 6.0.2 with LVGL locked to the 9.4 release line.
 
 ## Build variants
 
-Development builds enable the machine-readable diagnostics consumed by HIL tests:
+Development builds enable the machine-readable diagnostics consumed by HIL tests. At
+startup they wait up to ten seconds for a USB Serial/JTAG host before emitting the one-shot
+event, so a post-flash monitor cannot race the event:
 
 ```bash
 ./tools/idf.sh dev build
 ```
 
-Release builds explicitly disable that console:
+Release builds disable both the development diagnostic channel and the ESP-IDF console:
 
 ```bash
 ./tools/idf.sh release build

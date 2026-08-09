@@ -6,9 +6,12 @@
 
 #include <stdio.h>
 
+#include "driver/usb_serial_jtag.h"
 #include "esp_app_desc.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 namespace {
 
@@ -57,6 +60,15 @@ void write_stdout(void *, const char *data, size_t size)
     fflush(stdout);
 }
 
+void wait_for_diagnostic_host()
+{
+    constexpr int64_t timeout_us = 10'000'000;
+    const int64_t deadline = esp_timer_get_time() + timeout_us;
+    while (!usb_serial_jtag_is_connected() && esp_timer_get_time() < deadline) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
 }  // namespace
 
 #endif
@@ -64,6 +76,7 @@ void write_stdout(void *, const char *data, size_t size)
 extern "C" void app_main(void)
 {
 #ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
+    wait_for_diagnostic_host();
     const esp_app_desc_t *app = esp_app_get_description();
     const deck_boot_info_t info = {
         app->version,
