@@ -3,6 +3,7 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+from collections.abc import Iterator
 
 
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -24,8 +25,17 @@ class FakeClock:
 
 
 class FakeSerial:
-    def __init__(self, clock: FakeClock) -> None:
+    def __init__(
+        self,
+        clock: FakeClock,
+        failed_writes: int = 0,
+        fatal_write: bool = False,
+    ) -> None:
         self.clock = clock
+        self.failed_writes = failed_writes
+        self.fatal_write = fatal_write
+        self.timeout = 0.25
+        self.write_timeout = 0.25
         self.writes: list[bytes] = []
 
     def __enter__(self) -> "FakeSerial":
@@ -35,30 +45,114 @@ class FakeSerial:
         return None
 
     def write(self, data: bytes) -> None:
+        if self.fatal_write:
+            raise OSError("serial device disconnected")
+        if self.failed_writes > 0:
+            self.failed_writes -= 1
+            raise TimeoutError("temporary serial write timeout")
         self.writes.append(data)
 
     def flush(self) -> None:
-        return None
+        raise AssertionError("the live HIL harness must not use blocking serial flush")
 
     def readline(self) -> bytes:
-        self.clock.now += 0.25
+        self.clock.now += self.timeout
         return b""
 
 
+class BudgetSerial(FakeSerial):
+    def write(self, data: bytes) -> None:
+        self.clock.now += self.write_timeout
+        super().write(data)
+
+
 fake_clock = FakeClock()
-fake_serial = FakeSerial(fake_clock)
+fake_serial = FakeSerial(fake_clock, failed_writes=1)
+serial_options: dict[str, object] = {}
+
+
+def fake_serial_factory(**options: object) -> FakeSerial:
+    serial_options.update(options)
+    return fake_serial
+
+
 list(
     harness_module.serial_lines(
         "fake-port",
         1.6,
-        serial_factory=lambda **_: fake_serial,
+        serial_factory=fake_serial_factory,
         monotonic=fake_clock.monotonic,
     )
 )
+if serial_options.get("write_timeout") != 0.25:
+    raise SystemExit("expected live serial writes to have a finite timeout")
 if len(fake_serial.writes) < 3 or any(
     write != harness_module.HIL_READY for write in fake_serial.writes
 ):
     raise SystemExit("expected the live harness to repeat the ready handshake")
+
+fatal_clock = FakeClock()
+fatal_serial = FakeSerial(fatal_clock, fatal_write=True)
+try:
+    list(
+        harness_module.serial_lines(
+            "fake-port",
+            1.0,
+            serial_factory=lambda **_: fatal_serial,
+            monotonic=fatal_clock.monotonic,
+        )
+    )
+except OSError as error:
+    if "disconnected" not in str(error):
+        raise
+else:
+    raise SystemExit("expected a fatal serial write error to propagate")
+
+budget_clock = FakeClock()
+budget_serial = BudgetSerial(budget_clock)
+list(
+    harness_module.serial_lines(
+        "fake-port",
+        0.6,
+        serial_factory=lambda **_: budget_serial,
+        monotonic=budget_clock.monotonic,
+    )
+)
+if budget_clock.now > 0.6:
+    raise SystemExit("expected serial I/O to stay within the overall deadline")
+
+late_clock = FakeClock()
+
+
+def late_display_lines() -> Iterator[str]:
+    late_clock.now = 1.0
+    yield (
+        '{"type":"boot_ok","firmware_version":"0.1.0-dev",'
+        '"reset_reason":"power_on","uptime_ms":42,'
+        '"minimum_free_heap_bytes":131072}'
+    )
+    late_clock.now = 2.0
+    yield (
+        '{"type":"display_ready","width":400,"height":300,'
+        '"frame_bytes":15000,"submitted_frames":1,"completed_frames":1,'
+        '"transfer_timeouts":0,"start_failures":0,"rejected_updates":0}'
+    )
+    late_clock.now = 25.0
+    yield (
+        '{"type":"display_progress","width":400,"height":300,'
+        '"frame_bytes":15000,"submitted_frames":3,"completed_frames":3,'
+        '"transfer_timeouts":0,"start_failures":0,"rejected_updates":0}'
+    )
+
+
+late_progress = harness_module.diagnostic_events(
+    late_display_lines(),
+    True,
+    display_deadline_seconds=20.0,
+    monotonic=late_clock.monotonic,
+)[2]
+if late_progress is not None:
+    raise SystemExit("expected a third frame after 20 seconds to miss the stability window")
 
 
 with tempfile.TemporaryDirectory() as temporary_directory:

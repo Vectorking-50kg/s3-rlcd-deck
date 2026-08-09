@@ -10,6 +10,8 @@ from typing import Any
 
 HIL_READY = b"DECK_HIL_READY\n"
 HIL_READY_INTERVAL_SECONDS = 0.5
+DISPLAY_STABILITY_WINDOW_SECONDS = 20.0
+SERIAL_IO_TIMEOUT_SECONDS = 0.25
 
 
 def valid_boot_event(event: dict[str, Any]) -> bool:
@@ -59,7 +61,10 @@ def valid_display_event(
 
 
 def diagnostic_events(
-    lines: Iterable[str], expect_display: bool
+    lines: Iterable[str],
+    expect_display: bool,
+    display_deadline_seconds: float | None = None,
+    monotonic: Any = time.monotonic,
 ) -> tuple[
     dict[str, Any] | None,
     dict[str, Any] | None,
@@ -70,6 +75,7 @@ def diagnostic_events(
     display = None
     progress = None
     boot_count = 0
+    observation_started = monotonic()
     for line in lines:
         candidate = line.strip()
         if not candidate.startswith("{"):
@@ -85,7 +91,11 @@ def diagnostic_events(
         elif display_event_has_fields(event, "display_ready"):
             display = event
         elif display_event_has_fields(event, "display_progress"):
-            progress = event
+            if (
+                display_deadline_seconds is None
+                or monotonic() - observation_started <= display_deadline_seconds
+            ):
+                progress = event
         if boot is not None and not expect_display:
             break
     return boot, display, progress, boot_count
@@ -100,6 +110,7 @@ def serial_lines(
     timeout_seconds: float,
     serial_factory: Any | None = None,
     monotonic: Any = time.monotonic,
+    write_timeout_exception: type[BaseException] | None = None,
 ) -> Iterable[str]:
     if serial_factory is None:
         try:
@@ -107,17 +118,44 @@ def serial_lines(
         except ImportError as error:
             raise RuntimeError("live HIL requires pyserial from the ESP-IDF environment") from error
         serial_factory = serial.Serial
+        write_timeout_exception = serial.SerialTimeoutException
+    elif write_timeout_exception is None:
+        write_timeout_exception = TimeoutError
 
     deadline = monotonic() + timeout_seconds
-    with serial_factory(port=port, baudrate=115200, timeout=0.25) as connection:
+    initial_io_timeout = min(SERIAL_IO_TIMEOUT_SECONDS, timeout_seconds)
+    with serial_factory(
+        port=port,
+        baudrate=115200,
+        timeout=initial_io_timeout,
+        write_timeout=initial_io_timeout,
+    ) as connection:
         next_ready = 0.0
-        while monotonic() < deadline:
+        while True:
             now = monotonic()
+            if now >= deadline:
+                break
             if now >= next_ready:
-                connection.write(HIL_READY)
-                connection.flush()
+                connection.write_timeout = min(
+                    SERIAL_IO_TIMEOUT_SECONDS, deadline - now
+                )
+                try:
+                    connection.write(HIL_READY)
+                except write_timeout_exception:
+                    # USB CDC can briefly reject writes while the target recovers
+                    # from reset. Keep observing until the overall deadline.
+                    pass
+                now = monotonic()
                 next_ready = now + HIL_READY_INTERVAL_SECONDS
+                if now >= deadline:
+                    break
+            remaining_seconds = deadline - monotonic()
+            if remaining_seconds <= 0:
+                break
+            connection.timeout = min(SERIAL_IO_TIMEOUT_SECONDS, remaining_seconds)
             raw_line = connection.readline()
+            if monotonic() > deadline:
+                break
             if raw_line:
                 yield raw_line.decode("utf-8", errors="replace")
 
@@ -150,7 +188,13 @@ def main() -> int:
                 )
         else:
             event, display, progress, boot_count = diagnostic_events(
-                serial_lines(arguments.port, arguments.timeout), arguments.expect_display
+                serial_lines(arguments.port, arguments.timeout),
+                arguments.expect_display,
+                display_deadline_seconds=(
+                    DISPLAY_STABILITY_WINDOW_SECONDS
+                    if arguments.expect_display
+                    else None
+                ),
             )
     except (OSError, RuntimeError) as error:
         print(f"boot smoke failed: {error}", file=sys.stderr)
