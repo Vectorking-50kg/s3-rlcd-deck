@@ -34,13 +34,25 @@ failure, ViewModel equality, diagnostic text, and the Chinese glyph manifest.
 
 ## Setup Mode
 
-Until transactional Wi-Fi storage is added by ticket #6, every boot is treated as having
-no valid Wi-Fi configuration and starts a temporary AP. Each session uses a fresh
-`S3-RLCD-XXXX` SSID and a readable WPA2 password shown only on the Deck screen. The
-ordinary HTTP page at `http://192.168.4.1/` exposes current status and an explicit network
-scan; it cannot submit credentials or pair a Companion. Handled page, status, and scan
-requests refresh the inactivity timer. Development builds use 12 seconds for automated
-HIL; release builds use the required 600 seconds.
+With no committed Wi-Fi configuration, or after the committed network cannot be reached,
+the Deck starts a temporary Setup AP. A BOOT long press also starts a fresh session. Each
+session uses a new `S3-RLCD-XXXX` SSID and a readable WPA2 password shown only on the Deck
+screen. The ordinary HTTP page at `http://192.168.4.1/` exposes status, an explicit network
+scan, and a credential form; it does not pair a Companion.
+
+Submitted credentials are first stored as a candidate and tested as a station. A successful
+connection writes the new record into the inactive slot and switches a CRC-protected active
+marker last. The marker records both the new generation and the exact previous committed
+generation, so an uncommitted slot can never become a recovery fallback. Candidate, slot,
+and marker writes are read back before the in-memory active record changes. Authentication
+failure, connection failure, timeout, corrupt data, and unsupported schema leave the last
+committed record unchanged and keep recovery available. Stored network passwords are never
+included in diagnostic events, screen errors, or HIL reports.
+
+Handled page, status, scan, and submission requests refresh the inactivity timer.
+Development builds use 12 seconds for automated HIL; release builds use the required 600
+seconds. When Setup closes after a failed candidate, the service restores and reconnects the
+last committed station configuration.
 
 ## Display architecture
 
@@ -108,3 +120,25 @@ Setup active/inactive events are published only after the ESP-IDF Wi-Fi driver r
 `WIFI_EVENT_AP_START`/`WIFI_EVENT_AP_STOP`; missing events and stop failures are errors.
 During this extended observation, the live harness also rejects Task WDT, panic, Guru
 Meditation, and assertion logs even if all expected JSON diagnostic events were emitted.
+This first-boot check assumes the `deck_wifi` NVS namespace has no active configuration; use
+the transactional test below once the Deck already has an active record.
+
+## Transactional Wi-Fi HIL
+
+The development-only control channel can validate a reachable 2.4 GHz test AP without
+switching the Mac's Wi-Fi connection. Provide the test credentials through environment
+variables, then run the harness against an already-flashed development build:
+
+```bash
+export DECK_HIL_WIFI_SSID='test-ap-name'
+export DECK_HIL_WIFI_PASSWORD='test-ap-password'
+"$IDF_PYTHON_ENV_PATH/bin/python" tools/hil_wifi_transaction.py \
+  --port /dev/cu.usbmodemXXXX
+```
+
+The harness activates that network in the Deck's `deck_wifi` NVS namespace, verifies the
+committed generation after a software restart, submits a generated unreachable candidate,
+and verifies after another restart that the committed generation still reconnects. It does
+not print the SSID or password, and diagnostic events are rejected if they contain stored or
+candidate credentials. This test intentionally changes the Deck's active Wi-Fi record; it
+does not erase other NVS namespaces, the full Flash, or eFuses.

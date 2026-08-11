@@ -86,10 +86,24 @@ deck_add_host_test(
         test_setup_mode.cpp
         ../../firmware/components/setup_mode/deck_setup_mode.cpp
         ../../firmware/components/setup_mode/deck_setup_http.cpp
-    INCLUDE_DIRS ../../firmware/components/setup_mode/include
+        ../../firmware/components/wifi_config/deck_wifi_config.cpp
+    INCLUDE_DIRS
+        ../../firmware/components/setup_mode/include
+        ../../firmware/components/wifi_config/include
+)
+deck_add_host_test(
+    test_wifi_config
+    SOURCES
+        test_wifi_config.cpp
+        ../../firmware/components/wifi_config/deck_wifi_config.cpp
+    INCLUDE_DIRS ../../firmware/components/wifi_config/include
 )
 
 add_test(
     NAME hil_boot_smoke_replay
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_hil_boot_smoke.py
+)
+add_test(
+    NAME hil_wifi_transaction_contract
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_hil_wifi_transaction.py
 )

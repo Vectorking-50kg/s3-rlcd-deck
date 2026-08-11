@@ -1,6 +1,7 @@
 #pragma once
 
 #include "deck_setup_mode.h"
+#include "deck_wifi_config.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -18,6 +19,7 @@ typedef enum {
     DECK_SETUP_HTTP_PAGE,
     DECK_SETUP_HTTP_STATUS,
     DECK_SETUP_HTTP_SCAN,
+    DECK_SETUP_HTTP_WIFI,
 } deck_setup_http_route_t;
 
 typedef enum {
@@ -44,6 +46,13 @@ typedef struct {
     bool secure;
 } deck_setup_scan_observation_t;
 
+typedef enum {
+    DECK_SETUP_WIFI_REQUEST_OK = 0,
+    DECK_SETUP_WIFI_REQUEST_MALFORMED,
+    DECK_SETUP_WIFI_REQUEST_INVALID_SSID,
+    DECK_SETUP_WIFI_REQUEST_INVALID_PASSWORD,
+} deck_setup_wifi_request_result_t;
+
 const deck_setup_http_route_spec_t *deck_setup_http_routes(size_t *route_count);
 deck_setup_http_route_t deck_setup_http_route(const char *method, const char *path);
 bool deck_setup_http_convert_scan_results(
@@ -54,8 +63,14 @@ bool deck_setup_http_convert_scan_results(
     size_t *result_count
 );
 bool deck_setup_http_render_page(char *buffer, size_t buffer_size);
+deck_setup_wifi_request_result_t deck_setup_http_parse_wifi_request(
+    const char *body,
+    size_t body_size,
+    deck_wifi_credentials_t *credentials
+);
 bool deck_setup_http_render_status(
     const deck_setup_snapshot_t *snapshot,
+    const deck_wifi_config_snapshot_t *wifi,
     const deck_setup_scan_result_t *networks,
     size_t network_count,
     char *buffer,

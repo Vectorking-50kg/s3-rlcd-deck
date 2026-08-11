@@ -27,6 +27,10 @@ deck_m0_view_model_t sample_model()
         DECK_BUTTON_LONG_PRESS,
         1,
         DECK_WIFI_UNAVAILABLE,
+        DECK_WIFI_CONFIG_VIEW_VALIDATING,
+        DECK_WIFI_RECORD_VIEW_VALID,
+        DECK_WIFI_RECORD_VIEW_CORRUPT,
+        7,
         DECK_SETUP_IDLE,
         {},
         {},
@@ -77,7 +81,8 @@ void formats_every_required_diagnostic_field()
     assert(page.find("温度 RAW +23.4C / CAL +19.4C") != std::string::npos);
     assert(page.find("湿度 45.6% / SENSOR ERR 2") != std::string::npos);
     assert(page.find("KEY 短按 #3 / BOOT 长按 #1") != std::string::npos);
-    assert(page.find("Wi-Fi UNAVAILABLE / Setup IDLE") != std::string::npos);
+    assert(page.find("Wi-Fi UNAVAILABLE / CFG VALIDATING #7 / REC VALID/CORRUPT / Setup IDLE") !=
+           std::string::npos);
     assert(page.find("刷新 42 / 最低堆 7024 KiB") != std::string::npos);
     assert(page.find("Companion 配对 M1") != std::string::npos);
 }
@@ -173,7 +178,8 @@ void renders_ephemeral_setup_credentials_on_the_deck()
     assert(deck_m0_view_model_format(&model, text, sizeof(text)));
 
     const std::string page(text);
-    assert(page.find("Wi-Fi UNAVAILABLE / Setup ACTIVE") != std::string::npos);
+    assert(page.find("Wi-Fi UNAVAILABLE / CFG VALIDATING #7 / REC VALID/CORRUPT / Setup ACTIVE") !=
+           std::string::npos);
     assert(page.find("AP S3-RLCD-A1B2") != std::string::npos);
     assert(page.find("PASS ABCD-EFGH-JKLM") != std::string::npos);
     assert(page.find("HTTP http://192.168.4.1") != std::string::npos);

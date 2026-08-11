@@ -145,23 +145,35 @@ bool deck_setup_diagnostics_emit(
 )
 {
     if (info == nullptr || info->reason == nullptr || info->ssid == nullptr ||
-        info->address == nullptr || sink.write == nullptr) {
+        info->address == nullptr || info->wifi_config_state == nullptr ||
+        info->wifi_record_status == nullptr ||
+        info->wifi_candidate_record_status == nullptr || sink.write == nullptr) {
         return false;
     }
     const char *error_stage = info->error_stage == nullptr ? "" : info->error_stage;
-    char line[320];
+    char line[512];
     const int size = snprintf(
         line,
         sizeof(line),
         "{\"type\":\"setup_state\",\"active\":%s,\"reason\":\"%s\","
         "\"session_id\":%" PRIu32 ",\"ssid\":\"%s\",\"address\":\"%s\","
-        "\"error_stage\":\"%s\"}\n",
+        "\"error_stage\":\"%s\",\"wifi_config_state\":\"%s\","
+        "\"wifi_record_status\":\"%s\","
+        "\"wifi_candidate_record_status\":\"%s\","
+        "\"wifi_has_active\":%s,\"wifi_has_candidate\":%s,"
+        "\"wifi_generation\":%" PRIu32 "}\n",
         info->active ? "true" : "false",
         info->reason,
         info->session_id,
         info->ssid,
         info->address,
-        error_stage
+        error_stage,
+        info->wifi_config_state,
+        info->wifi_record_status,
+        info->wifi_candidate_record_status,
+        info->wifi_has_active ? "true" : "false",
+        info->wifi_has_candidate ? "true" : "false",
+        info->wifi_generation
     );
     if (size < 0 || static_cast<size_t>(size) >= sizeof(line)) {
         return false;

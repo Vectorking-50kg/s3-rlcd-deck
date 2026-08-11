@@ -21,6 +21,26 @@ typedef enum {
 } deck_wifi_state_t;
 
 typedef enum {
+    DECK_WIFI_CONFIG_VIEW_NO_ACTIVE = 0,
+    DECK_WIFI_CONFIG_VIEW_ACTIVE,
+    DECK_WIFI_CONFIG_VIEW_VALIDATING,
+    DECK_WIFI_CONFIG_VIEW_AUTH_FAILED,
+    DECK_WIFI_CONFIG_VIEW_TIMED_OUT,
+    DECK_WIFI_CONFIG_VIEW_CONNECTION_FAILED,
+    DECK_WIFI_CONFIG_VIEW_STORAGE_ERROR,
+} deck_wifi_config_view_state_t;
+
+typedef enum {
+    DECK_WIFI_RECORD_VIEW_EMPTY = 0,
+    DECK_WIFI_RECORD_VIEW_VALID,
+    DECK_WIFI_RECORD_VIEW_RECOVERED_PREVIOUS,
+    DECK_WIFI_RECORD_VIEW_CORRUPT,
+    DECK_WIFI_RECORD_VIEW_UNSUPPORTED_SCHEMA,
+    DECK_WIFI_RECORD_VIEW_MIGRATION_FAILED,
+    DECK_WIFI_RECORD_VIEW_IO_ERROR,
+} deck_wifi_record_view_status_t;
+
+typedef enum {
     DECK_SETUP_UNAVAILABLE = 0,
     DECK_SETUP_IDLE,
     DECK_SETUP_ACTIVE,
@@ -54,6 +74,10 @@ typedef struct {
     deck_button_event_t boot_event;
     uint32_t boot_event_count;
     deck_wifi_state_t wifi_state;
+    deck_wifi_config_view_state_t wifi_config_state;
+    deck_wifi_record_view_status_t wifi_record_status;
+    deck_wifi_record_view_status_t wifi_candidate_record_status;
+    uint32_t wifi_config_generation;
     deck_setup_state_t setup_state;
     char setup_ssid[DECK_M0_SETUP_SSID_CAPACITY];
     char setup_password[DECK_M0_SETUP_PASSWORD_CAPACITY];

@@ -174,7 +174,7 @@ void http_contract_is_read_only_and_labels_pairing_as_m1()
     size_t route_count = 0;
     const deck_setup_http_route_spec_t *routes = deck_setup_http_routes(&route_count);
     assert(routes != nullptr);
-    assert(route_count == 3);
+    assert(route_count == 4);
     assert(routes[0].route == DECK_SETUP_HTTP_PAGE);
     assert(routes[0].method == DECK_SETUP_HTTP_GET);
     assert(std::string(routes[0].path) == "/");
@@ -184,11 +184,15 @@ void http_contract_is_read_only_and_labels_pairing_as_m1()
     assert(routes[2].route == DECK_SETUP_HTTP_SCAN);
     assert(routes[2].method == DECK_SETUP_HTTP_POST);
     assert(std::string(routes[2].path) == "/api/scan");
+    assert(routes[3].route == DECK_SETUP_HTTP_WIFI);
+    assert(routes[3].method == DECK_SETUP_HTTP_POST);
+    assert(std::string(routes[3].path) == "/api/wifi");
 
     assert(deck_setup_http_route("GET", "/") == DECK_SETUP_HTTP_PAGE);
     assert(deck_setup_http_route("GET", "/api/status") == DECK_SETUP_HTTP_STATUS);
     assert(deck_setup_http_route("POST", "/api/scan") == DECK_SETUP_HTTP_SCAN);
-    assert(deck_setup_http_route("POST", "/api/wifi") == DECK_SETUP_HTTP_NOT_FOUND);
+    assert(deck_setup_http_route("POST", "/api/wifi") == DECK_SETUP_HTTP_WIFI);
+    assert(deck_setup_http_route("GET", "/api/wifi") == DECK_SETUP_HTTP_METHOD_NOT_ALLOWED);
     assert(deck_setup_http_route("POST", "/api/pair") == DECK_SETUP_HTTP_NOT_FOUND);
     assert(deck_setup_http_route("GET", "/api/scan") == DECK_SETUP_HTTP_METHOD_NOT_ALLOWED);
 
@@ -205,25 +209,92 @@ void http_contract_is_read_only_and_labels_pairing_as_m1()
     assert(html.find("Setup / Recovery") != std::string::npos);
     assert(html.find("Scan networks") != std::string::npos);
     assert(html.find("Companion pairing is planned for M1") != std::string::npos);
-    assert(html.find("password") == std::string::npos);
+    assert(html.find("name=password") != std::string::npos);
+    assert(html.find("Wi-Fi changes are enabled by the next M0 step") == std::string::npos);
     assert(html.find("captive") == std::string::npos);
 
     const std::array<deck_setup_scan_result_t, 2> networks = {{
         {"Office", -42, true},
         {"Guest\\\"WiFi", -71, false},
     }};
+    const deck_wifi_config_snapshot_t wifi = {
+        DECK_WIFI_CONFIG_VALIDATING,
+        DECK_WIFI_RECORD_VALID,
+        DECK_WIFI_RECORD_VALID,
+        true,
+        true,
+        7,
+        "Office",
+        "Candidate",
+    };
     char status[1'024];
-    assert(deck_setup_http_render_status(&snapshot, networks.data(), networks.size(), status,
-                                         sizeof(status)));
+    assert(deck_setup_http_render_status(
+        &snapshot,
+        &wifi,
+        networks.data(),
+        networks.size(),
+        status,
+        sizeof(status)
+    ));
     const std::string json(status);
     assert(json.find("\"active\":true") != std::string::npos);
     assert(json.find("\"address\":\"192.168.4.1\"") != std::string::npos);
     assert(json.find("\"pairing\":\"m1_not_available\"") != std::string::npos);
     assert(json.find("Office") != std::string::npos);
     assert(json.find("Guest\\\\\\\"WiFi") != std::string::npos);
+    assert(json.find("\"state\":\"validating\"") != std::string::npos);
+    assert(json.find("\"record\":\"valid\"") != std::string::npos);
+    assert(json.find("\"active_ssid\":\"Office\"") != std::string::npos);
+    assert(json.find("\"candidate_ssid\":\"Candidate\"") != std::string::npos);
     assert(json.find(snapshot.password) == std::string::npos);
+    assert(json.find("correct-horse") == std::string::npos);
 
     deck_setup_mode_destroy(setup);
+}
+
+void wifi_submission_parser_rejects_malformed_or_invalid_credentials()
+{
+    deck_wifi_credentials_t parsed{};
+    assert(deck_setup_http_parse_wifi_request(
+               "ssid=Office+WiFi&password=correct%2Dhorse",
+               std::strlen("ssid=Office+WiFi&password=correct%2Dhorse"),
+               &parsed
+           ) == DECK_SETUP_WIFI_REQUEST_OK);
+    assert(std::string(parsed.ssid) == "Office WiFi");
+    assert(std::string(parsed.password) == "correct-horse");
+
+    assert(deck_setup_http_parse_wifi_request(
+               "password=correct-horse&ssid=Office",
+               std::strlen("password=correct-horse&ssid=Office"),
+               &parsed
+           ) == DECK_SETUP_WIFI_REQUEST_OK);
+    assert(deck_setup_http_parse_wifi_request(
+               "ssid=OpenNetwork&password=",
+               std::strlen("ssid=OpenNetwork&password="),
+               &parsed
+           ) == DECK_SETUP_WIFI_REQUEST_OK);
+    assert(deck_setup_http_parse_wifi_request(
+               "ssid=&password=correct-horse",
+               std::strlen("ssid=&password=correct-horse"),
+               &parsed
+           ) == DECK_SETUP_WIFI_REQUEST_INVALID_SSID);
+    assert(deck_setup_http_parse_wifi_request(
+               "ssid=Office&password=short",
+               std::strlen("ssid=Office&password=short"),
+               &parsed
+           ) == DECK_SETUP_WIFI_REQUEST_INVALID_PASSWORD);
+    assert(deck_setup_http_parse_wifi_request(
+               "ssid=Office%00Hidden&password=correct-horse",
+               std::strlen("ssid=Office%00Hidden&password=correct-horse"),
+               &parsed
+           ) == DECK_SETUP_WIFI_REQUEST_MALFORMED);
+    assert(deck_setup_http_parse_wifi_request(
+               "ssid=Office&ssid=Other&password=correct-horse",
+               std::strlen("ssid=Office&ssid=Other&password=correct-horse"),
+               &parsed
+           ) == DECK_SETUP_WIFI_REQUEST_MALFORMED);
+    assert(deck_setup_http_parse_wifi_request(nullptr, 1, &parsed) ==
+           DECK_SETUP_WIFI_REQUEST_MALFORMED);
 }
 
 void production_scan_conversion_bounds_and_terminates_ssids()
@@ -275,6 +346,7 @@ int main()
     only_explicit_activity_refreshes_the_timeout();
     explicit_stop_clears_ephemeral_credentials();
     http_contract_is_read_only_and_labels_pairing_as_m1();
+    wifi_submission_parser_rejects_malformed_or_invalid_credentials();
     production_scan_conversion_bounds_and_terminates_ssids();
     return 0;
 }
