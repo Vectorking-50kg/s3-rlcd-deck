@@ -108,6 +108,8 @@ int main()
         1,
         0,
         3,
+        100000,
+        90000,
     };
     require(
         deck_peripheral_diagnostics_emit(&peripheral_info, sink),
@@ -122,7 +124,9 @@ int main()
             "\"humidity_tenths_percent\":630,\"buttons_available\":true,"
             "\"key_event\":\"long_press\","
             "\"key_event_count\":2,\"boot_event\":\"short_press\","
-            "\"boot_event_count\":1,\"rtc_errors\":0,\"sensor_errors\":3}\n",
+            "\"boot_event_count\":1,\"rtc_errors\":0,\"sensor_errors\":3,"
+            "\"free_heap_bytes\":100000,"
+            "\"minimum_free_heap_bytes\":90000}\n",
         "expected one complete peripheral_state JSON line"
     );
 

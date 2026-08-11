@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "duration_seconds": 7200,
+  "minimum_display_updates": 120,
+  "minimum_peripheral_samples": 6000,
+  "require_key_event": true,
+  "require_boot_event": true,
+  "require_setup_cycle": true,
+  "require_wifi_failure_recovery": true,
+  "maximum_heap_drop_bytes": 16384
+}

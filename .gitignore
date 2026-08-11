@@ -49,6 +49,7 @@ __pycache__/
 *.uf2
 
 # Logs and temporary files
+.hil-results/
 *.log
 *.tmp
 *.bak

@@ -179,3 +179,43 @@ to verify both persistent calibration and automatic Setup entry.
 
 This smoke intentionally deletes the active and candidate records in the Deck's `deck_wifi`
 namespace. It preserves `deck_settings`, other NVS namespaces, the rest of Flash, and eFuses.
+
+## Long-duration HIL
+
+After the transactional Wi-Fi HIL has committed a reachable test network, the unified
+harness can build, app-flash, monitor, exercise an unreachable Wi-Fi candidate, and produce
+auditable evidence for the two-hour M0 smoke. Activate ESP-IDF 6.0.2 and inspect the
+non-destructive plan before starting:
+
+```bash
+"$IDF_PYTHON_ENV_PATH/bin/python" tools/hil_smoke.py plan \
+  --config tools/hil_smoke_2h.json
+"$IDF_PYTHON_ENV_PATH/bin/python" tools/hil_smoke.py run \
+  --config tools/hil_smoke_2h.json \
+  --result-dir ".hil-results/$(date -u +%Y%m%dT%H%M%SZ)"
+```
+
+The port may be supplied with `--port`; otherwise the harness sends a read-only identity
+handshake to candidate Espressif serial devices and requires exactly one response identifying
+`s3-rlcd-deck`. Firmware older than this harness does not implement that handshake: run
+`discover` while the new development firmware is active, or supply the inspected port
+explicitly for the initial app-only flash. If automatic download does not work on the board,
+put the verified Deck in ROM download mode immediately before the explicit-port `run`.
+The default run executes Host tests, the development build, and only ESP-IDF's `app-flash`
+target before monitoring. It never requests whole-chip erase, eFuse changes,
+bootloader/partition writes, or irreversible security configuration.
+
+During the run, physically press KEY at least once and long-press BOOT at least once when
+prompted. The harness triggers one Setup session and submits a generated nonexistent open
+network, then requires the previous committed Wi-Fi generation to recover. It never reads,
+prints, sends, or stores the committed Wi-Fi password.
+
+Results are written beneath the ignored `.hil-results/` directory. `serial.jsonl` contains
+timestamped evidence restricted to an allow-list of structured Deck diagnostics; unknown
+console lines and fatal-log details are replaced with fixed redaction markers. `summary.json`
+contains the firmware commit, ESP-IDF version, run interval, reset/watchdog counts,
+display/I2C/Wi-Fi error counts,
+minimum and end-to-end heap data, coverage counters, and SHA-256 hashes. `config.json` is
+the exact reusable run contract. Failed preparation or monitoring returns nonzero and still
+retains a failed summary and available evidence. `tools/hil_smoke_24h.json` is the checked-in
+configuration for the later soak ticket.
