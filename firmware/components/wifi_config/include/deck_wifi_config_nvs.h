@@ -6,7 +6,7 @@
 extern "C" {
 #endif
 
-typedef struct deck_wifi_nvs_storage deck_wifi_nvs_storage_t;
+typedef deck_transaction_nvs_storage_t deck_wifi_nvs_storage_t;
 
 /* nvs_flash_init() must succeed before opening this namespaced store. */
 deck_wifi_nvs_storage_t *deck_wifi_nvs_storage_open(void);

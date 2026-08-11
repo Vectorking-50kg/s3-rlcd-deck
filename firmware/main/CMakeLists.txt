@@ -4,6 +4,7 @@ idf_component_register(
     PRIV_REQUIRES
         application_ui
         board_support
+        device_settings
         display
         esp_app_format
         esp_psram

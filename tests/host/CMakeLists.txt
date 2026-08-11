@@ -86,17 +86,41 @@ deck_add_host_test(
         test_setup_mode.cpp
         ../../firmware/components/setup_mode/deck_setup_mode.cpp
         ../../firmware/components/setup_mode/deck_setup_http.cpp
+        ../../firmware/components/device_settings/deck_device_settings.cpp
+        ../../firmware/components/transaction_store/deck_transaction_store.cpp
         ../../firmware/components/wifi_config/deck_wifi_config.cpp
     INCLUDE_DIRS
+        ../../firmware/components/device_settings/include
         ../../firmware/components/setup_mode/include
+        ../../firmware/components/transaction_store/include
         ../../firmware/components/wifi_config/include
 )
 deck_add_host_test(
     test_wifi_config
     SOURCES
         test_wifi_config.cpp
+        ../../firmware/components/transaction_store/deck_transaction_store.cpp
         ../../firmware/components/wifi_config/deck_wifi_config.cpp
-    INCLUDE_DIRS ../../firmware/components/wifi_config/include
+    INCLUDE_DIRS
+        ../../firmware/components/transaction_store/include
+        ../../firmware/components/wifi_config/include
+)
+deck_add_host_test(
+    test_device_settings
+    SOURCES
+        test_device_settings.cpp
+        ../../firmware/components/device_settings/deck_device_settings.cpp
+        ../../firmware/components/transaction_store/deck_transaction_store.cpp
+    INCLUDE_DIRS
+        ../../firmware/components/device_settings/include
+        ../../firmware/components/transaction_store/include
+)
+deck_add_host_test(
+    test_setup_confirmation
+    SOURCES
+        test_setup_confirmation.cpp
+        ../../firmware/components/setup_mode/deck_setup_confirmation.cpp
+    INCLUDE_DIRS ../../firmware/components/setup_mode/include
 )
 
 add_test(
@@ -106,4 +130,8 @@ add_test(
 add_test(
     NAME hil_wifi_transaction_contract
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_hil_wifi_transaction.py
+)
+add_test(
+    NAME hil_recovery_settings_contract
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_hil_recovery_settings.py
 )

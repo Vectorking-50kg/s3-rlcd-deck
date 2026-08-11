@@ -1,6 +1,8 @@
 #pragma once
 
 #include "deck_setup_mode.h"
+#include "deck_setup_confirmation.h"
+#include "deck_device_settings.h"
 #include "deck_wifi_config.h"
 
 #include <stdbool.h>
@@ -20,6 +22,9 @@ typedef enum {
     DECK_SETUP_HTTP_STATUS,
     DECK_SETUP_HTTP_SCAN,
     DECK_SETUP_HTTP_WIFI,
+    DECK_SETUP_HTTP_TEMPERATURE,
+    DECK_SETUP_HTTP_WIFI_CLEAR_REQUEST,
+    DECK_SETUP_HTTP_WIFI_CLEAR_CONFIRM,
 } deck_setup_http_route_t;
 
 typedef enum {
@@ -53,6 +58,14 @@ typedef enum {
     DECK_SETUP_WIFI_REQUEST_INVALID_PASSWORD,
 } deck_setup_wifi_request_result_t;
 
+typedef enum {
+    DECK_SETUP_TEMPERATURE_REQUEST_OK = 0,
+    DECK_SETUP_TEMPERATURE_REQUEST_MALFORMED,
+    DECK_SETUP_TEMPERATURE_REQUEST_NOT_NUMERIC,
+    DECK_SETUP_TEMPERATURE_REQUEST_OUT_OF_RANGE,
+    DECK_SETUP_TEMPERATURE_REQUEST_NOT_EXACT_TENTH,
+} deck_setup_temperature_request_result_t;
+
 const deck_setup_http_route_spec_t *deck_setup_http_routes(size_t *route_count);
 deck_setup_http_route_t deck_setup_http_route(const char *method, const char *path);
 bool deck_setup_http_convert_scan_results(
@@ -68,9 +81,21 @@ deck_setup_wifi_request_result_t deck_setup_http_parse_wifi_request(
     size_t body_size,
     deck_wifi_credentials_t *credentials
 );
+deck_setup_temperature_request_result_t deck_setup_http_parse_temperature_request(
+    const char *body,
+    size_t body_size,
+    int16_t *temperature_offset_tenths_c
+);
+bool deck_setup_http_parse_confirmation_request(
+    const char *body,
+    size_t body_size,
+    char *token,
+    size_t token_capacity
+);
 bool deck_setup_http_render_status(
     const deck_setup_snapshot_t *snapshot,
     const deck_wifi_config_snapshot_t *wifi,
+    const deck_device_settings_snapshot_t *settings,
     const deck_setup_scan_result_t *networks,
     size_t network_count,
     char *buffer,

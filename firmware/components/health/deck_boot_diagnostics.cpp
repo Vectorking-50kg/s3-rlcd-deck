@@ -147,11 +147,15 @@ bool deck_setup_diagnostics_emit(
     if (info == nullptr || info->reason == nullptr || info->ssid == nullptr ||
         info->address == nullptr || info->wifi_config_state == nullptr ||
         info->wifi_record_status == nullptr ||
-        info->wifi_candidate_record_status == nullptr || sink.write == nullptr) {
+        info->wifi_candidate_record_status == nullptr ||
+        info->device_settings_state == nullptr ||
+        info->device_settings_record_status == nullptr ||
+        info->device_settings_candidate_record_status == nullptr ||
+        sink.write == nullptr) {
         return false;
     }
     const char *error_stage = info->error_stage == nullptr ? "" : info->error_stage;
-    char line[512];
+    char line[768];
     const int size = snprintf(
         line,
         sizeof(line),
@@ -161,7 +165,13 @@ bool deck_setup_diagnostics_emit(
         "\"wifi_record_status\":\"%s\","
         "\"wifi_candidate_record_status\":\"%s\","
         "\"wifi_has_active\":%s,\"wifi_has_candidate\":%s,"
-        "\"wifi_generation\":%" PRIu32 "}\n",
+        "\"wifi_generation\":%" PRIu32 ","
+        "\"device_settings_state\":\"%s\","
+        "\"device_settings_record_status\":\"%s\","
+        "\"device_settings_candidate_record_status\":\"%s\","
+        "\"device_settings_has_active\":%s,\"device_settings_has_candidate\":%s,"
+        "\"device_settings_generation\":%" PRIu32 ","
+        "\"temperature_offset_tenths_c\":%" PRIi16 "}\n",
         info->active ? "true" : "false",
         info->reason,
         info->session_id,
@@ -173,7 +183,14 @@ bool deck_setup_diagnostics_emit(
         info->wifi_candidate_record_status,
         info->wifi_has_active ? "true" : "false",
         info->wifi_has_candidate ? "true" : "false",
-        info->wifi_generation
+        info->wifi_generation,
+        info->device_settings_state,
+        info->device_settings_record_status,
+        info->device_settings_candidate_record_status,
+        info->device_settings_has_active ? "true" : "false",
+        info->device_settings_has_candidate ? "true" : "false",
+        info->device_settings_generation,
+        info->temperature_offset_tenths_c
     );
     if (size < 0 || static_cast<size_t>(size) >= sizeof(line)) {
         return false;

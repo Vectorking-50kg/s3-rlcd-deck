@@ -163,6 +163,24 @@ bool deck_peripheral_monitor_apply(
     return true;
 }
 
+bool deck_peripheral_monitor_set_temperature_offset(
+    deck_peripheral_monitor_t *monitor,
+    int16_t temperature_offset_tenths_c
+)
+{
+    if (monitor == nullptr) {
+        return false;
+    }
+    monitor->config.temperature_offset_tenths_c = temperature_offset_tenths_c;
+    if (monitor->snapshot.sensor_available) {
+        monitor->snapshot.calibrated_temperature_tenths_c = calibrated_temperature(
+            monitor->snapshot.raw_temperature_tenths_c,
+            temperature_offset_tenths_c
+        );
+    }
+    return true;
+}
+
 bool deck_peripheral_monitor_sample(
     deck_peripheral_monitor_t *monitor,
     bool key_level_high,

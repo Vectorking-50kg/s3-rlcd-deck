@@ -54,6 +54,24 @@ Development builds use 12 seconds for automated HIL; release builds use the requ
 seconds. When Setup closes after a failed candidate, the service restores and reconnects the
 last committed station configuration.
 
+The same recovery page owns the Deck's temperature calibration. Offsets are parsed as
+decimal tenths of a degree, range checked from -15.0 C through +15.0 C, and committed in
+the independent `deck_settings` NVS namespace using a versioned candidate, alternating
+slots, CRC, readback, and an active marker written last. With no committed settings record,
+the runtime default is -4.0 C. A settings write failure leaves the previous offset active
+and is visible in both `/api/status` and the `setup_state` diagnostic event.
+
+Wi-Fi and device settings share the private `transaction_store` implementation for record
+CRC, candidate staging, alternating slots, marker verification, rollback, fallback, and
+the NVS adapter. Their namespaces, magic values, payload validation, and public states stay
+separate; the Wi-Fi codec remains byte-compatible with its schema-v1 records.
+
+Clearing Wi-Fi requires a fresh, session-bound 60-second confirmation token followed by a
+second confirmation request. Loading the page, scanning, changing temperature calibration,
+or entering Setup with BOOT never clears configuration. A confirmed clear removes only the
+candidate, active marker, and two slots in `deck_wifi`; it leaves `deck_settings` and other
+device-owned settings intact and keeps Setup Mode running.
+
 ## Display architecture
 
 The `display` module exposes a narrow C-compatible interface and owns 30 KiB of bounded
@@ -142,3 +160,22 @@ and verifies after another restart that the committed generation still reconnect
 not print the SSID or password, and diagnostic events are rejected if they contain stored or
 candidate credentials. This test intentionally changes the Deck's active Wi-Fi record; it
 does not erase other NVS namespaces, the full Flash, or eFuses.
+
+## Recovery settings HIL
+
+Run the transactional Wi-Fi HIL first so the Deck has an active test network. Then enter
+Setup Mode and run the recovery smoke against the already-flashed development build:
+
+```bash
+"$IDF_PYTHON_ENV_PATH/bin/python" tools/hil_recovery_settings.py \
+  --port /dev/cu.usbmodemXXXX --offset=-3.5
+```
+
+When prompted, manually connect the Mac to the Setup SSID/password displayed on the Deck;
+the harness does not change the Mac's Wi-Fi configuration itself. It submits the offset
+through the real HTTP recovery route, verifies the calibrated peripheral diagnostic, proves
+that a wrong clear token is rejected, confirms the real clear token, and restarts the Deck
+to verify both persistent calibration and automatic Setup entry.
+
+This smoke intentionally deletes the active and candidate records in the Deck's `deck_wifi`
+namespace. It preserves `deck_settings`, other NVS namespaces, the rest of Flash, and eFuses.

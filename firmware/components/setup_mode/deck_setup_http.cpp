@@ -16,7 +16,12 @@ constexpr char kPage[] =
     "<form id=wifi><label>SSID <input name=ssid maxlength=32 required></label> "
     "<label>Password <input name=password type=password maxlength=63></label> "
     "<button>Validate and activate</button></form>"
-    "<button id=scan type=button>Scan networks</button><pre id=state>Loading...</pre>"
+    "<button id=scan type=button>Scan networks</button>"
+    "<h2>Temperature calibration</h2><form id=temp><label>Offset (C) "
+    "<input name=offset type=number min=-15 max=15 step=.1 value=-4.0 required>"
+    "</label> <button>Save offset</button></form>"
+    "<h2>Wi-Fi recovery</h2><button id=clear type=button>Clear Wi-Fi...</button>"
+    "<pre id=state>Loading...</pre>"
     "<p><strong>Companion pairing is planned for M1.</strong></p>"
     "<script>async function load(method='GET',path='/api/status'){let r=await "
     "fetch(path,{method});state.textContent=JSON.stringify(await r.json(),null,2)}"
@@ -24,6 +29,16 @@ constexpr char kPage[] =
     "let r=await fetch('/api/wifi',{method:'POST',headers:{'Content-Type':"
     "'application/x-www-form-urlencoded'},body:new URLSearchParams(new FormData(wifi))});"
     "state.textContent=JSON.stringify(await r.json(),null,2);if(r.ok)setTimeout(load,500)};"
+    "temp.onsubmit=async e=>{e.preventDefault();let r=await fetch('/api/temperature',"
+    "{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},"
+    "body:new URLSearchParams(new FormData(temp))});state.textContent=JSON.stringify("
+    "await r.json(),null,2);if(r.ok)setTimeout(load,250)};clear.onclick=async()=>{let r="
+    "await fetch('/api/wifi/clear/request',{method:'POST'});let j=await r.json();if(!r.ok)"
+    "{state.textContent=JSON.stringify(j,null,2);return}if(confirm('Clear saved Wi-Fi and "
+    "remain in Setup Mode?')){r=await fetch('/api/wifi/clear/confirm',{method:'POST',"
+    "headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams("
+    "{token:j.token})});state.textContent=JSON.stringify(await r.json(),null,2);"
+    "if(r.ok)setTimeout(load,250)}};"
     "load()</script></body></html>";
 
 constexpr deck_setup_http_route_spec_t kRoutes[] = {
@@ -31,6 +46,9 @@ constexpr deck_setup_http_route_spec_t kRoutes[] = {
     {DECK_SETUP_HTTP_STATUS, DECK_SETUP_HTTP_GET, "/api/status"},
     {DECK_SETUP_HTTP_SCAN, DECK_SETUP_HTTP_POST, "/api/scan"},
     {DECK_SETUP_HTTP_WIFI, DECK_SETUP_HTTP_POST, "/api/wifi"},
+    {DECK_SETUP_HTTP_TEMPERATURE, DECK_SETUP_HTTP_POST, "/api/temperature"},
+    {DECK_SETUP_HTTP_WIFI_CLEAR_REQUEST, DECK_SETUP_HTTP_POST, "/api/wifi/clear/request"},
+    {DECK_SETUP_HTTP_WIFI_CLEAR_CONFIRM, DECK_SETUP_HTTP_POST, "/api/wifi/clear/confirm"},
 };
 
 class BufferWriter {
@@ -149,6 +167,59 @@ bool decode_form_component(
     }
     output[output_size] = '\0';
     return true;
+}
+
+deck_setup_temperature_request_result_t parse_decimal_tenths(
+    const char *value,
+    int16_t *temperature_offset_tenths_c
+)
+{
+    if (value == nullptr || temperature_offset_tenths_c == nullptr || value[0] == '\0') {
+        return DECK_SETUP_TEMPERATURE_REQUEST_NOT_NUMERIC;
+    }
+    size_t index = 0;
+    bool negative = false;
+    if (value[index] == '+' || value[index] == '-') {
+        negative = value[index] == '-';
+        ++index;
+    }
+    if (value[index] < '0' || value[index] > '9') {
+        return DECK_SETUP_TEMPERATURE_REQUEST_NOT_NUMERIC;
+    }
+    int32_t integer = 0;
+    bool too_large = false;
+    while (value[index] >= '0' && value[index] <= '9') {
+        if (integer <= 1'000) {
+            integer = integer * 10 + (value[index] - '0');
+        } else {
+            too_large = true;
+        }
+        ++index;
+    }
+    int32_t tenth = 0;
+    if (value[index] == '.') {
+        ++index;
+        if (value[index] < '0' || value[index] > '9') {
+            return DECK_SETUP_TEMPERATURE_REQUEST_NOT_NUMERIC;
+        }
+        tenth = value[index] - '0';
+        ++index;
+        while (value[index] >= '0' && value[index] <= '9') {
+            if (value[index] != '0') {
+                return DECK_SETUP_TEMPERATURE_REQUEST_NOT_EXACT_TENTH;
+            }
+            ++index;
+        }
+    }
+    if (value[index] != '\0') {
+        return DECK_SETUP_TEMPERATURE_REQUEST_NOT_NUMERIC;
+    }
+    if (too_large || integer > 15 || (integer == 15 && tenth != 0)) {
+        return DECK_SETUP_TEMPERATURE_REQUEST_OUT_OF_RANGE;
+    }
+    const int32_t magnitude = integer * 10 + tenth;
+    *temperature_offset_tenths_c = static_cast<int16_t>(negative ? -magnitude : magnitude);
+    return DECK_SETUP_TEMPERATURE_REQUEST_OK;
 }
 
 }  // namespace
@@ -298,16 +369,75 @@ deck_setup_wifi_request_result_t deck_setup_http_parse_wifi_request(
     return DECK_SETUP_WIFI_REQUEST_OK;
 }
 
+deck_setup_temperature_request_result_t deck_setup_http_parse_temperature_request(
+    const char *body,
+    size_t body_size,
+    int16_t *temperature_offset_tenths_c
+)
+{
+    constexpr char kPrefix[] = "offset=";
+    constexpr size_t kMaximumBodySize = 64;
+    if (body == nullptr || temperature_offset_tenths_c == nullptr || body_size == 0 ||
+        body_size > kMaximumBodySize || body_size < sizeof(kPrefix) - 1 ||
+        std::memcmp(body, kPrefix, sizeof(kPrefix) - 1) != 0 ||
+        std::memchr(body, '&', body_size) != nullptr) {
+        return DECK_SETUP_TEMPERATURE_REQUEST_MALFORMED;
+    }
+    char decoded[32];
+    if (!decode_form_component(
+            body + sizeof(kPrefix) - 1,
+            body_size - sizeof(kPrefix) + 1,
+            decoded,
+            sizeof(decoded)
+        )) {
+        return DECK_SETUP_TEMPERATURE_REQUEST_MALFORMED;
+    }
+    return parse_decimal_tenths(decoded, temperature_offset_tenths_c);
+}
+
+bool deck_setup_http_parse_confirmation_request(
+    const char *body,
+    size_t body_size,
+    char *token,
+    size_t token_capacity
+)
+{
+    constexpr char kPrefix[] = "token=";
+    if (body == nullptr || token == nullptr ||
+        token_capacity < DECK_SETUP_CONFIRMATION_TOKEN_CAPACITY ||
+        body_size != sizeof(kPrefix) - 1 + DECK_SETUP_CONFIRMATION_TOKEN_CAPACITY - 1 ||
+        std::memcmp(body, kPrefix, sizeof(kPrefix) - 1) != 0) {
+        return false;
+    }
+    if (!decode_form_component(
+            body + sizeof(kPrefix) - 1,
+            body_size - sizeof(kPrefix) + 1,
+            token,
+            token_capacity
+        )) {
+        return false;
+    }
+    for (size_t index = 0; index < DECK_SETUP_CONFIRMATION_TOKEN_CAPACITY - 1; ++index) {
+        if (!((token[index] >= '0' && token[index] <= '9') ||
+              (token[index] >= 'a' && token[index] <= 'f'))) {
+            token[0] = '\0';
+            return false;
+        }
+    }
+    return true;
+}
+
 bool deck_setup_http_render_status(
     const deck_setup_snapshot_t *snapshot,
     const deck_wifi_config_snapshot_t *wifi,
+    const deck_device_settings_snapshot_t *settings,
     const deck_setup_scan_result_t *networks,
     size_t network_count,
     char *buffer,
     size_t buffer_size
 )
 {
-    if (snapshot == nullptr || wifi == nullptr ||
+    if (snapshot == nullptr || wifi == nullptr || settings == nullptr ||
         (networks == nullptr && network_count != 0)) {
         return false;
     }
@@ -334,7 +464,19 @@ bool deck_setup_http_render_status(
     writer.append_json_string(wifi->active_ssid);
     writer.append(",\"candidate_ssid\":");
     writer.append_json_string(wifi->candidate_ssid);
-    writer.append("},\"networks\":[");
+    writer.append("},\"device_settings\":{");
+    writer.append(
+        "\"state\":\"%s\",\"record\":\"%s\",\"candidate_record\":\"%s\","
+        "\"has_active\":%s,\"has_candidate\":%s,\"generation\":%u,"
+        "\"temperature_offset_tenths_c\":%d},\"networks\":[",
+        deck_device_settings_state_name(settings->state),
+        deck_device_settings_record_status_name(settings->record_status),
+        deck_device_settings_record_status_name(settings->candidate_record_status),
+        settings->has_active ? "true" : "false",
+        settings->has_candidate ? "true" : "false",
+        static_cast<unsigned>(settings->generation),
+        static_cast<int>(settings->temperature_offset_tenths_c)
+    );
     for (size_t index = 0; index < network_count; ++index) {
         if (index != 0) {
             writer.append(",");
