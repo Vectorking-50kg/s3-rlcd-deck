@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "firmware_commit": "9d6b8de24ea156ced10fe925b75164ababb30f55",
+  "esp_idf_version": "6.0.2",
+  "lvgl_version": "9.4.0",
+  "test_commands": {
+    "host": "./tools/test_host.sh",
+    "smoke": "python tools/hil_smoke.py run --config tools/hil_smoke_2h.json --result-dir .hil-results/<2h-run>",
+    "soak": "python tools/hil_smoke.py run --config tools/hil_smoke_24h.json --result-dir .hil-results/<24h-run>",
+    "setup": "Manual second-device Setup Mode checklist from issue #9"
+  },
+  "smoke_summary": null,
+  "soak_summary": null,
+  "setup_result": null,
+  "known_limitations": [
+    "M0 uses full-screen RLCD transfer without partial transfer or TE synchronization.",
+    "USB JSON Lines diagnostics are enabled only in development builds."
+  ],
+  "out_of_scope": [
+    "Companion pairing, AI Snapshot, and Provider integrations are delivered after M0.",
+    "Serial Session, OTA, and production management Web are delivered after M0."
+  ]
+}

@@ -139,3 +139,7 @@ add_test(
     NAME hil_smoke_contract
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_hil_smoke.py
 )
+add_test(
+    NAME m0_acceptance_report_contract
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_m0_acceptance_report.py
+)
