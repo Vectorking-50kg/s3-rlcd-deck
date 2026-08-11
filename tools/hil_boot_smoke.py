@@ -9,9 +9,73 @@ from collections.abc import Iterable
 from typing import Any
 
 HIL_READY = b"DECK_HIL_READY\n"
+HIL_READY_INTERVAL_SECONDS = 0.5
+DISPLAY_STABILITY_WINDOW_SECONDS = 20.0
+SERIAL_IO_TIMEOUT_SECONDS = 0.25
 
 
-def boot_event(lines: Iterable[str]) -> dict[str, Any] | None:
+def valid_boot_event(event: dict[str, Any]) -> bool:
+    required = {
+        "firmware_version": str,
+        "reset_reason": str,
+        "uptime_ms": int,
+        "minimum_free_heap_bytes": int,
+    }
+    return event.get("type") == "boot_ok" and all(
+        isinstance(event.get(name), expected) for name, expected in required.items()
+    )
+
+
+def display_event_has_fields(event: dict[str, Any], event_type: str) -> bool:
+    required = {
+        "width": int,
+        "height": int,
+        "frame_bytes": int,
+        "submitted_frames": int,
+        "completed_frames": int,
+        "transfer_timeouts": int,
+        "start_failures": int,
+        "rejected_updates": int,
+    }
+    return event.get("type") == event_type and all(
+        isinstance(event.get(name), expected) for name, expected in required.items()
+    )
+
+
+def valid_display_event(
+    event: dict[str, Any] | None, event_type: str, minimum_frames: int
+) -> bool:
+    if event is None or not display_event_has_fields(event, event_type):
+        return False
+    return (
+        event["width"] == 400
+        and event["height"] == 300
+        and event["frame_bytes"] == 15000
+        and event["submitted_frames"] >= minimum_frames
+        and event["completed_frames"] >= minimum_frames
+        and event["completed_frames"] <= event["submitted_frames"]
+        and event["transfer_timeouts"] == 0
+        and event["start_failures"] == 0
+        and event["rejected_updates"] == 0
+    )
+
+
+def diagnostic_events(
+    lines: Iterable[str],
+    expect_display: bool,
+    display_deadline_seconds: float | None = None,
+    monotonic: Any = time.monotonic,
+) -> tuple[
+    dict[str, Any] | None,
+    dict[str, Any] | None,
+    dict[str, Any] | None,
+    int,
+]:
+    boot = None
+    display = None
+    progress = None
+    boot_count = 0
+    observation_started = monotonic()
     for line in lines:
         candidate = line.strip()
         if not candidate.startswith("{"):
@@ -20,41 +84,93 @@ def boot_event(lines: Iterable[str]) -> dict[str, Any] | None:
             event = json.loads(candidate)
         except json.JSONDecodeError:
             continue
-        if event.get("type") != "boot_ok":
-            continue
-        required = {
-            "firmware_version": str,
-            "reset_reason": str,
-            "uptime_ms": int,
-            "minimum_free_heap_bytes": int,
-        }
-        if all(isinstance(event.get(name), expected) for name, expected in required.items()):
-            return event
-    return None
+        if valid_boot_event(event):
+            if boot is None:
+                boot = event
+            boot_count += 1
+        elif display_event_has_fields(event, "display_ready"):
+            display = event
+        elif display_event_has_fields(event, "display_progress"):
+            if (
+                display_deadline_seconds is None
+                or monotonic() - observation_started <= display_deadline_seconds
+            ):
+                progress = event
+        if boot is not None and not expect_display:
+            break
+    return boot, display, progress, boot_count
 
 
-def serial_lines(port: str, timeout_seconds: float) -> Iterable[str]:
-    try:
-        import serial
-    except ImportError as error:
-        raise RuntimeError("live HIL requires pyserial from the ESP-IDF environment") from error
+def boot_event(lines: Iterable[str]) -> dict[str, Any] | None:
+    return diagnostic_events(lines, False)[0]
 
-    deadline = time.monotonic() + timeout_seconds
-    with serial.Serial(port=port, baudrate=115200, timeout=0.25) as connection:
-        connection.write(HIL_READY)
-        connection.flush()
-        while time.monotonic() < deadline:
+
+def serial_lines(
+    port: str,
+    timeout_seconds: float,
+    serial_factory: Any | None = None,
+    monotonic: Any = time.monotonic,
+    write_timeout_exception: type[BaseException] | None = None,
+) -> Iterable[str]:
+    if serial_factory is None:
+        try:
+            import serial
+        except ImportError as error:
+            raise RuntimeError("live HIL requires pyserial from the ESP-IDF environment") from error
+        serial_factory = serial.Serial
+        write_timeout_exception = serial.SerialTimeoutException
+    elif write_timeout_exception is None:
+        write_timeout_exception = TimeoutError
+
+    deadline = monotonic() + timeout_seconds
+    initial_io_timeout = min(SERIAL_IO_TIMEOUT_SECONDS, timeout_seconds)
+    with serial_factory(
+        port=port,
+        baudrate=115200,
+        timeout=initial_io_timeout,
+        write_timeout=initial_io_timeout,
+    ) as connection:
+        next_ready = 0.0
+        while True:
+            now = monotonic()
+            if now >= deadline:
+                break
+            if now >= next_ready:
+                connection.write_timeout = min(
+                    SERIAL_IO_TIMEOUT_SECONDS, deadline - now
+                )
+                try:
+                    connection.write(HIL_READY)
+                except write_timeout_exception:
+                    # USB CDC can briefly reject writes while the target recovers
+                    # from reset. Keep observing until the overall deadline.
+                    pass
+                now = monotonic()
+                next_ready = now + HIL_READY_INTERVAL_SECONDS
+                if now >= deadline:
+                    break
+            remaining_seconds = deadline - monotonic()
+            if remaining_seconds <= 0:
+                break
+            connection.timeout = min(SERIAL_IO_TIMEOUT_SECONDS, remaining_seconds)
             raw_line = connection.readline()
+            if monotonic() > deadline:
+                break
             if raw_line:
                 yield raw_line.decode("utf-8", errors="replace")
 
 
 def parse_arguments() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Observe one Deck boot_ok diagnostic event.")
+    parser = argparse.ArgumentParser(description="Observe Deck boot and optional display diagnostics.")
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--input-file", type=pathlib.Path, help="Replay a captured console log.")
     source.add_argument("--port", help="Read a live Deck serial port after flashing.")
     parser.add_argument("--timeout", type=float, default=15.0, help="Live serial timeout in seconds.")
+    parser.add_argument(
+        "--expect-display",
+        action="store_true",
+        help="Also require at least three clean full-frame completions and no reset.",
+    )
     return parser.parse_args()
 
 
@@ -67,9 +183,19 @@ def main() -> int:
     try:
         if arguments.input_file is not None:
             with arguments.input_file.open(encoding="utf-8", errors="replace") as capture:
-                event = boot_event(capture)
+                event, display, progress, boot_count = diagnostic_events(
+                    capture, arguments.expect_display
+                )
         else:
-            event = boot_event(serial_lines(arguments.port, arguments.timeout))
+            event, display, progress, boot_count = diagnostic_events(
+                serial_lines(arguments.port, arguments.timeout),
+                arguments.expect_display,
+                display_deadline_seconds=(
+                    DISPLAY_STABILITY_WINDOW_SECONDS
+                    if arguments.expect_display
+                    else None
+                ),
+            )
     except (OSError, RuntimeError) as error:
         print(f"boot smoke failed: {error}", file=sys.stderr)
         return 2
@@ -77,11 +203,35 @@ def main() -> int:
     if event is None:
         print("boot smoke failed: no valid boot_ok event observed", file=sys.stderr)
         return 1
+    if boot_count != 1:
+        print(
+            f"boot smoke failed: observed {boot_count} boot_ok events (unexpected reset)",
+            file=sys.stderr,
+        )
+        return 1
 
     print(
         "boot_ok observed: "
         f"version={event['firmware_version']} reset_reason={event['reset_reason']}"
     )
+    if arguments.expect_display:
+        if not valid_display_event(display, "display_ready", 1):
+            print("display smoke failed: no valid display_ready event observed", file=sys.stderr)
+            return 1
+        print(
+            "display_ready observed: "
+            f"frames={display['completed_frames']} timeouts={display['transfer_timeouts']}"
+        )
+        if not valid_display_event(progress, "display_progress", 3):
+            print(
+                "display smoke failed: fewer than three clean completed frames observed",
+                file=sys.stderr,
+            )
+            return 1
+        print(
+            "display_progress observed: "
+            f"frames={progress['completed_frames']} timeouts={progress['transfer_timeouts']}"
+        )
     return 0
 
 

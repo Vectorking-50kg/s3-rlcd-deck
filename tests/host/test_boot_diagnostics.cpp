@@ -45,4 +45,50 @@ int main()
             "\"minimum_free_heap_bytes\":131072}\n",
         "expected one complete boot_ok JSON line"
     );
+
+    output.clear();
+    const deck_display_ready_info_t display_info = {
+        400,
+        300,
+        15000,
+        1,
+        1,
+        0,
+        0,
+        0,
+    };
+    require(
+        deck_display_diagnostics_emit(&display_info, sink),
+        "expected the display event to be emitted"
+    );
+    require(
+        output ==
+            "{\"type\":\"display_ready\",\"width\":400,\"height\":300,"
+            "\"frame_bytes\":15000,\"submitted_frames\":1,\"completed_frames\":1,"
+            "\"transfer_timeouts\":0,\"start_failures\":0,\"rejected_updates\":0}\n",
+        "expected one complete display_ready JSON line"
+    );
+
+    output.clear();
+    const deck_display_ready_info_t progress_info = {
+        400,
+        300,
+        15000,
+        3,
+        3,
+        0,
+        0,
+        0,
+    };
+    require(
+        deck_display_progress_diagnostics_emit(&progress_info, sink),
+        "expected the display progress event to be emitted"
+    );
+    require(
+        output ==
+            "{\"type\":\"display_progress\",\"width\":400,\"height\":300,"
+            "\"frame_bytes\":15000,\"submitted_frames\":3,\"completed_frames\":3,"
+            "\"transfer_timeouts\":0,\"start_failures\":0,\"rejected_updates\":0}\n",
+        "expected one complete display_progress JSON line"
+    );
 }

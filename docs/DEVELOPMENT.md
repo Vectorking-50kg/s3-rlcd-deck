@@ -751,8 +751,8 @@ firmware/
 ├── main/
 ├── components/
 │   ├── board_support/       # 引脚、RLCD、按键、RTC、SHTC3
-│   ├── display_service/     # LVGL port、刷新节流
-│   ├── app_ui/              # Codex、Provider、Serial、Setup 页面
+│   ├── display/             # 1bpp framebuffer、异步 panel 提交
+│   ├── application_ui/      # 唯一 LVGL owner、ViewModel 与页面
 │   ├── companion_link/      # pairing、WSS、协议、failover
 │   ├── snapshot_store/      # 校验、缓存、stale 规则
 │   ├── serial_service/      # UART、Router、统计、Owner

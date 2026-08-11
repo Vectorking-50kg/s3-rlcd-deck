@@ -29,3 +29,55 @@ bool deck_boot_diagnostics_emit(const deck_boot_info_t *info, deck_diagnostic_si
     sink.write(sink.context, line, static_cast<size_t>(size));
     return true;
 }
+
+namespace {
+
+bool emit_display_diagnostics(
+    const char *event_type,
+    const deck_display_ready_info_t *info,
+    deck_diagnostic_sink_t sink
+)
+{
+    if (event_type == nullptr || info == nullptr || sink.write == nullptr) {
+        return false;
+    }
+
+    char line[320];
+    const int size = snprintf(
+        line,
+        sizeof(line),
+        "{\"type\":\"%s\",\"width\":%" PRIu16 ",\"height\":%" PRIu16 ","
+        "\"frame_bytes\":%" PRIu32 ",\"submitted_frames\":%" PRIu32 ","
+        "\"completed_frames\":%" PRIu32 ",\"transfer_timeouts\":%" PRIu32 ","
+        "\"start_failures\":%" PRIu32 ",\"rejected_updates\":%" PRIu32 "}\n",
+        event_type,
+        info->width,
+        info->height,
+        info->frame_bytes,
+        info->submitted_frames,
+        info->completed_frames,
+        info->transfer_timeouts,
+        info->start_failures,
+        info->rejected_updates
+    );
+    if (size < 0 || static_cast<size_t>(size) >= sizeof(line)) {
+        return false;
+    }
+    sink.write(sink.context, line, static_cast<size_t>(size));
+    return true;
+}
+
+}  // namespace
+
+bool deck_display_diagnostics_emit(const deck_display_ready_info_t *info, deck_diagnostic_sink_t sink)
+{
+    return emit_display_diagnostics("display_ready", info, sink);
+}
+
+bool deck_display_progress_diagnostics_emit(
+    const deck_display_ready_info_t *info,
+    deck_diagnostic_sink_t sink
+)
+{
+    return emit_display_diagnostics("display_progress", info, sink);
+}
