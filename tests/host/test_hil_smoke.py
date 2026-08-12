@@ -492,12 +492,28 @@ with tempfile.TemporaryDirectory() as temporary_directory:
     fake_idf = fake_bin / "idf.py"
     fake_idf.write_text("#!/bin/sh\necho 'ESP-IDF v6.0.2'\n", encoding="utf-8")
     fake_idf.chmod(0o755)
+    fake_git = fake_bin / "git"
+    fake_git.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = status ]; then\n"
+        "    if [ \"${DECK_FAKE_GIT_DIRTY:-0}\" = 1 ]; then printf ' M tools/fake.py\\n'; fi\n"
+        "    exit 0\n"
+        "fi\n"
+        "if [ \"$1\" = rev-parse ]; then\n"
+        f"    echo '{COMMIT}'\n"
+        "    exit 0\n"
+        "fi\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    fake_git.chmod(0o755)
     environment = os.environ.copy()
     environment["PYTHONPATH"] = str(fake_modules)
     environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
     environment["DECK_FAKE_SERIAL_FILE"] = str(fake_serial_lines)
     fake_serial_writes = temporary / "fake-serial-writes.txt"
     environment["DECK_FAKE_SERIAL_WRITES"] = str(fake_serial_writes)
+    environment["DECK_FAKE_GIT_DIRTY"] = "1"
     dirty_result_directory = temporary / "dirty-live-result"
     dirty_live = subprocess.run(
         [
@@ -570,6 +586,34 @@ with tempfile.TemporaryDirectory() as temporary_directory:
     assert "DECK_HIL_READY\n" in writes
     assert "DECK_SETUP\n" in writes
     assert "DECK_WIFI " in writes and " -\n" in writes
+
+    del environment["DECK_FAKE_GIT_DIRTY"]
+    clean_result_directory = temporary / "clean-live-result"
+    clean_live = subprocess.run(
+        [
+            sys.executable,
+            str(HARNESS),
+            "run",
+            "--monitor-only",
+            "--port",
+            "/dev/fakeDeck",
+            "--config",
+            str(live_config_path),
+            "--result-dir",
+            str(clean_result_directory),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    if clean_live.returncode != 0:
+        raise SystemExit(f"expected clean monitor-only live smoke to pass: {clean_live.stderr}")
+    clean_summary = json.loads(
+        (clean_result_directory / "summary.json").read_text(encoding="utf-8")
+    )
+    assert clean_summary["status"] == "passed"
+    assert clean_summary["source_dirty"] is False
 
     environment["DECK_FAKE_SERIAL_MODE"] = "open_fail"
     failed_result_directory = temporary / "failed-live-result"
