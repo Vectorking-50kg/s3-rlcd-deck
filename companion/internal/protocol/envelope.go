@@ -36,8 +36,8 @@ func ParseEnvelope(message []byte) (Envelope, error) {
 	if err := validateJSONDocument(message); err != nil {
 		return Envelope{}, errors.Join(ErrMalformedEnvelope, err)
 	}
-	envelope, err := decodeEnvelope(message)
-	if err != nil {
+	var envelope Envelope
+	if err := json.Unmarshal(message, &envelope); err != nil {
 		return Envelope{}, errors.Join(ErrMalformedEnvelope, err)
 	}
 	if len(envelope.Type) > 64 || !messageTypePattern.MatchString(envelope.Type) {
@@ -110,57 +110,4 @@ func validateJSONValue(decoder *json.Decoder) error {
 	default:
 		return ErrMalformedEnvelope
 	}
-}
-
-func decodeEnvelope(message []byte) (Envelope, error) {
-	decoder := json.NewDecoder(bytes.NewReader(message))
-	token, err := decoder.Token()
-	if err != nil || token != json.Delim('{') {
-		return Envelope{}, err
-	}
-	seen := make(map[string]struct{})
-	var typeValue json.RawMessage
-	var versionValue json.RawMessage
-	for decoder.More() {
-		keyToken, tokenErr := decoder.Token()
-		if tokenErr != nil {
-			return Envelope{}, tokenErr
-		}
-		key, ok := keyToken.(string)
-		if !ok {
-			return Envelope{}, ErrMalformedEnvelope
-		}
-		if _, duplicate := seen[key]; duplicate {
-			return Envelope{}, ErrMalformedEnvelope
-		}
-		seen[key] = struct{}{}
-		var value json.RawMessage
-		if decodeErr := decoder.Decode(&value); decodeErr != nil {
-			return Envelope{}, decodeErr
-		}
-		switch key {
-		case "type":
-			typeValue = value
-		case "protocol_version":
-			versionValue = value
-		}
-	}
-	closing, err := decoder.Token()
-	if err != nil || closing != json.Delim('}') {
-		return Envelope{}, err
-	}
-	if _, err = decoder.Token(); !errors.Is(err, io.EOF) {
-		return Envelope{}, ErrMalformedEnvelope
-	}
-	if typeValue == nil || versionValue == nil {
-		return Envelope{}, ErrMalformedEnvelope
-	}
-	var envelope Envelope
-	if err = json.Unmarshal(typeValue, &envelope.Type); err != nil {
-		return Envelope{}, err
-	}
-	if err = json.Unmarshal(versionValue, &envelope.ProtocolVersion); err != nil {
-		return Envelope{}, err
-	}
-	return envelope, nil
 }
