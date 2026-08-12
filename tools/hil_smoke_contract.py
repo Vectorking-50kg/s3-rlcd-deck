@@ -324,9 +324,15 @@ def analyze_capture(
     setup_sessions_seen: set[int] = set()
     persisted_failure_signatures: set[tuple[str, int, str]] = set()
     diagnostic_schema_error_count = 0
+    host_observation_started = False
+    host_observation_complete = False
 
     for envelope in envelopes:
         line = envelope["line"]
+        if line == "[host] observation started":
+            host_observation_started = True
+        elif line == "[host] observation complete":
+            host_observation_complete = True
         if line == REDACTED_FATAL_LINE:
             failures.append("fatal target log observed")
             continue
@@ -497,6 +503,8 @@ def analyze_capture(
 
     if not boot_events:
         failures.append("no boot_ok event observed")
+    if host_observation_started and not host_observation_complete:
+        failures.append("live observation did not complete")
     if duration_seconds < config.duration_seconds:
         failures.append("configured smoke duration was not reached")
     if reset_count:

@@ -184,6 +184,18 @@ namespace. It preserves `deck_settings`, other NVS namespaces, the rest of Flash
 
 ## Long-duration HIL
 
+For fast development feedback, use the 90-second contract after an intentional firmware build
+or app-only flash. It exercises the same diagnostics, physical buttons, Setup cycle, recoverable
+Wi-Fi failure, and stabilized-heap gate, but it is not release evidence and cannot replace the
+two-hour or 24-hour gates:
+
+```bash
+"$IDF_PYTHON_ENV_PATH/bin/python" tools/hil_smoke.py run \
+  --monitor-only \
+  --config tools/hil_smoke_dev.json \
+  --result-dir ".hil-results/dev-$(date -u +%Y%m%dT%H%M%SZ)"
+```
+
 After the transactional Wi-Fi HIL has committed a reachable test network, the unified
 harness can build, app-flash, monitor, exercise an unreachable Wi-Fi candidate, and produce
 auditable evidence for the two-hour M0 smoke. Activate ESP-IDF 6.0.2 and inspect the

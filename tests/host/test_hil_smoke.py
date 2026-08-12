@@ -14,6 +14,7 @@ HARNESS = REPOSITORY_ROOT / "tools" / "hil_smoke.py"
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
 DEFAULT_CONFIG = REPOSITORY_ROOT / "tools" / "hil_smoke_2h.json"
 SOAK_CONFIG = REPOSITORY_ROOT / "tools" / "hil_smoke_24h.json"
+DEV_CONFIG = REPOSITORY_ROOT / "tools" / "hil_smoke_dev.json"
 
 
 def captured(elapsed_seconds: float, event: dict[str, object] | str) -> str:
@@ -105,6 +106,10 @@ with tempfile.TemporaryDirectory() as temporary_directory:
     assert soak_config["schema_version"] == 2
     assert soak_config["duration_seconds"] == 86400
     assert soak_config["heap_warmup_seconds"] == 60
+    dev_config = json.loads(DEV_CONFIG.read_text(encoding="utf-8"))
+    assert dev_config["schema_version"] == 2
+    assert dev_config["duration_seconds"] == 90
+    assert dev_config["heap_warmup_seconds"] == 60
     ignored_result = subprocess.run(
         ["git", "check-ignore", ".hil-results/probe/serial.jsonl"],
         cwd=REPOSITORY_ROOT,
@@ -278,6 +283,38 @@ with tempfile.TemporaryDirectory() as temporary_directory:
     assert (result_directory / "config.json").is_file()
     assert "password" not in evidence.decode("utf-8").lower()
     assert "hunter2" not in evidence.decode("utf-8")
+
+    interrupted_capture = temporary / "interrupted.jsonl"
+    interrupted_capture.write_text(
+        "\n".join([captured(0, "[host] observation started"), *lines]) + "\n",
+        encoding="utf-8",
+    )
+    interrupted_directory = temporary / "interrupted-result"
+    interrupted = subprocess.run(
+        [
+            sys.executable,
+            str(HARNESS),
+            "replay",
+            "--input-file",
+            str(interrupted_capture),
+            "--config",
+            str(config_path),
+            "--result-dir",
+            str(interrupted_directory),
+            "--firmware-commit",
+            COMMIT,
+            "--toolchain-version",
+            "ESP-IDF v6.0.2",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert interrupted.returncode != 0
+    interrupted_summary = json.loads(
+        (interrupted_directory / "summary.json").read_text(encoding="utf-8")
+    )
+    assert any("did not complete" in value for value in interrupted_summary["failures"])
 
     extra_failure_capture = temporary / "extra-failure.jsonl"
     runtime_disconnect = [
@@ -788,6 +825,7 @@ with tempfile.TemporaryDirectory() as temporary_directory:
         "class Serial:\n"
         "    def __init__(self, **options):\n"
         "        if os.environ.get('DECK_FAKE_SERIAL_MODE') == 'open_fail': raise SerialException('fake disconnect')\n"
+        "        self.interrupt = os.environ.get('DECK_FAKE_SERIAL_MODE') == 'interrupt'\n"
         "        self.timeout = options.get('timeout', 0.01)\n"
         "        self.write_timeout = options.get('write_timeout', 0.01)\n"
         "        encoded = [line.encode() for line in pathlib.Path(os.environ['DECK_FAKE_SERIAL_FILE']).read_text().splitlines(True)]\n"
@@ -802,6 +840,9 @@ with tempfile.TemporaryDirectory() as temporary_directory:
         "        with pathlib.Path(os.environ['DECK_FAKE_SERIAL_WRITES']).open('ab') as output: output.write(data)\n"
         "        return len(data)\n"
         "    def readline(self):\n"
+        "        if self.interrupt:\n"
+        "            self.interrupt = False\n"
+        "            raise KeyboardInterrupt()\n"
         "        if self.lines: return self.lines.pop(0)\n"
         "        time.sleep(self.timeout)\n"
         "        return b''\n"
@@ -979,6 +1020,35 @@ with tempfile.TemporaryDirectory() as temporary_directory:
         for line in overlong_evidence
     )
     del environment["DECK_FAKE_SERIAL_OVERLONG"]
+
+    environment["DECK_FAKE_SERIAL_MODE"] = "interrupt"
+    interrupted_live_directory = temporary / "interrupted-live-result"
+    interrupted_live = subprocess.run(
+        [
+            sys.executable,
+            str(HARNESS),
+            "run",
+            "--monitor-only",
+            "--port",
+            "/dev/fakeDeck",
+            "--config",
+            str(live_config_path),
+            "--result-dir",
+            str(interrupted_live_directory),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert interrupted_live.returncode != 0
+    interrupted_live_summary = json.loads(
+        (interrupted_live_directory / "summary.json").read_text(encoding="utf-8")
+    )
+    assert interrupted_live_summary["status"] == "failed"
+    assert "monitor interrupted" in interrupted_live_summary["failures"]
+    assert (interrupted_live_directory / "config.json").is_file()
+    assert (interrupted_live_directory / "serial.jsonl").is_file()
 
     environment["DECK_FAKE_SERIAL_MODE"] = "open_fail"
     failed_result_directory = temporary / "failed-live-result"

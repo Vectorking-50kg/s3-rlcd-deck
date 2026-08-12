@@ -108,6 +108,28 @@ def run_live(arguments: argparse.Namespace) -> int:
             redacted,
             source_dirty=dirty,
         )
+    except KeyboardInterrupt:
+        evidence = capture_path.read_bytes() if capture_path.is_file() else b""
+        try:
+            envelopes, evidence, redacted = load_capture(capture_path)
+            summary = analyze_capture(
+                envelopes,
+                config,
+                commit,
+                version,
+                redacted,
+                source_dirty=dirty,
+            )
+            summary["status"] = "failed"
+            summary["failures"].append("monitor interrupted")
+        except (SmokeFailure, OSError):
+            summary = empty_failure_summary(
+                commit,
+                version,
+                "monitor interrupted",
+                utc_now(),
+                source_dirty=dirty,
+            )
     except (SmokeFailure, OSError) as error:
         evidence = capture_path.read_bytes() if capture_path.is_file() else b""
         summary = empty_failure_summary(
