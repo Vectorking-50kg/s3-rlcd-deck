@@ -44,7 +44,6 @@ struct UiContext {
     int64_t last_tick_us;
     uint64_t last_model_second;
     bool presented_model_valid;
-    bool flush_waiting;
     bool ready_emitted;
     bool lvgl_initialized;
 };
@@ -98,6 +97,42 @@ void fail_task(UiContext *context)
     vTaskDelete(nullptr);
 }
 
+void notify_completed_frame(UiContext *context)
+{
+    if (!context->ready_emitted) {
+        context->ready_emitted = true;
+        notify(context, DECK_APPLICATION_UI_READY);
+    } else {
+        notify(context, DECK_APPLICATION_UI_FRAME_COMPLETED);
+    }
+}
+
+bool wait_for_display_transfer(UiContext *context)
+{
+    while (true) {
+        const deck_display_result_t result =
+            deck_display_service_poll(context->display_service, monotonic_ms());
+        if (result == DECK_DISPLAY_COMPLETED) {
+            notify_completed_frame(context);
+            return true;
+        }
+        if (result == DECK_DISPLAY_RECOVERED) {
+            const deck_display_result_t retry =
+                deck_display_service_submit(context->display_service, monotonic_ms());
+            if (retry != DECK_DISPLAY_SUBMITTED) {
+                return retry == DECK_DISPLAY_UNCHANGED;
+            }
+        } else if (result == DECK_DISPLAY_START_FAILED ||
+                   result == DECK_DISPLAY_INVALID_ARGUMENT ||
+                   result == DECK_DISPLAY_UNCHANGED) {
+            return false;
+        }
+        // The SPI callback is asynchronous. Yield so the idle task and Wi-Fi
+        // stack keep running while LVGL retains ownership of its draw buffer.
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+}
+
 void display_flush(lv_display_t *lv_display, const lv_area_t *area, uint8_t *pixels)
 {
     auto *context = static_cast<UiContext *>(lv_display_get_user_data(lv_display));
@@ -130,8 +165,7 @@ void display_flush(lv_display_t *lv_display, const lv_area_t *area, uint8_t *pix
     const deck_display_result_t submit_result =
         deck_display_service_submit(context->display_service, monotonic_ms());
     if (submit_result == DECK_DISPLAY_SUBMITTED) {
-        context->flush_waiting = true;
-        return;
+        (void)wait_for_display_transfer(context);
     }
     lv_display_flush_ready(lv_display);
 }
@@ -236,29 +270,6 @@ void ui_task(void *task_context)
         if (elapsed_ms > 0) {
             lv_tick_inc(static_cast<uint32_t>(elapsed_ms));
             context->last_tick_us += elapsed_ms * 1000;
-        }
-
-        const deck_display_result_t display_result =
-            deck_display_service_poll(context->display_service, static_cast<uint64_t>(now_us / 1000));
-        if (context->flush_waiting &&
-            (display_result == DECK_DISPLAY_COMPLETED || display_result == DECK_DISPLAY_RECOVERING ||
-             display_result == DECK_DISPLAY_START_FAILED)) {
-            context->flush_waiting = false;
-            lv_display_flush_ready(context->lv_display);
-        }
-        if (display_result == DECK_DISPLAY_COMPLETED) {
-            if (!context->ready_emitted) {
-                context->ready_emitted = true;
-                notify(context, DECK_APPLICATION_UI_READY);
-            } else {
-                notify(context, DECK_APPLICATION_UI_FRAME_COMPLETED);
-            }
-        }
-        if (display_result == DECK_DISPLAY_COMPLETED || display_result == DECK_DISPLAY_RECOVERED) {
-            (void)deck_display_service_submit(
-                context->display_service,
-                static_cast<uint64_t>(now_us / 1000)
-            );
         }
 
         receive_model_update(context);

@@ -1,0 +1,11 @@
+menu "Deck Setup Mode"
+
+config DECK_SETUP_INACTIVITY_TIMEOUT_SECONDS
+    int "Setup Mode inactivity timeout in seconds"
+    range 10 3600
+    default 600
+    help
+        Stop the ephemeral AP and HTTP recovery page after this many seconds
+        without a handled page, status, or scan request.
+
+endmenu

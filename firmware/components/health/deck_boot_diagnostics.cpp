@@ -138,3 +138,34 @@ bool deck_peripheral_diagnostics_emit(
     sink.write(sink.context, line, static_cast<size_t>(size));
     return true;
 }
+
+bool deck_setup_diagnostics_emit(
+    const deck_setup_diagnostic_info_t *info,
+    deck_diagnostic_sink_t sink
+)
+{
+    if (info == nullptr || info->reason == nullptr || info->ssid == nullptr ||
+        info->address == nullptr || sink.write == nullptr) {
+        return false;
+    }
+    const char *error_stage = info->error_stage == nullptr ? "" : info->error_stage;
+    char line[320];
+    const int size = snprintf(
+        line,
+        sizeof(line),
+        "{\"type\":\"setup_state\",\"active\":%s,\"reason\":\"%s\","
+        "\"session_id\":%" PRIu32 ",\"ssid\":\"%s\",\"address\":\"%s\","
+        "\"error_stage\":\"%s\"}\n",
+        info->active ? "true" : "false",
+        info->reason,
+        info->session_id,
+        info->ssid,
+        info->address,
+        error_stage
+    );
+    if (size < 0 || static_cast<size_t>(size) >= sizeof(line)) {
+        return false;
+    }
+    sink.write(sink.context, line, static_cast<size_t>(size));
+    return true;
+}

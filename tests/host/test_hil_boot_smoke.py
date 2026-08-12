@@ -299,6 +299,55 @@ with tempfile.TemporaryDirectory() as temporary_directory:
         text=True,
     )
 
+    setup_started = (
+        '{"type":"setup_state","active":true,'
+        '"reason":"no_wifi_config","session_id":1,'
+        '"ssid":"S3-RLCD-A1B2","address":"192.168.4.1",'
+        '"error_stage":""}\n'
+    )
+    setup_stopped = (
+        '{"type":"setup_state","active":false,'
+        '"reason":"none","session_id":1,"ssid":"",'
+        '"address":"192.168.4.1","error_stage":""}\n'
+    )
+    setup_capture = pathlib.Path(temporary_directory) / "setup-console.log"
+    setup_capture.write_text(
+        capture.read_text(encoding="utf-8") + setup_started + setup_stopped,
+        encoding="utf-8",
+    )
+    setup_result = subprocess.run(
+        [
+            sys.executable,
+            str(HARNESS),
+            "--input-file",
+            str(setup_capture),
+            "--expect-setup",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    bad_setup_capture = pathlib.Path(temporary_directory) / "bad-setup-console.log"
+    bad_setup_capture.write_text(
+        capture.read_text(encoding="utf-8")
+        + setup_started.replace('"error_stage":""', '"error_stage":"wifi_start"')
+        + setup_stopped,
+        encoding="utf-8",
+    )
+    bad_setup_result = subprocess.run(
+        [
+            sys.executable,
+            str(HARNESS),
+            "--input-file",
+            str(bad_setup_capture),
+            "--expect-setup",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
     reset_capture = pathlib.Path(temporary_directory) / "unexpected-reset.log"
     reset_capture.write_text(
         display_capture.read_text(encoding="utf-8")
@@ -313,6 +362,25 @@ with tempfile.TemporaryDirectory() as temporary_directory:
             str(HARNESS),
             "--input-file",
             str(reset_capture),
+            "--expect-display",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    fatal_log_capture = pathlib.Path(temporary_directory) / "fatal-console.log"
+    fatal_log_capture.write_text(
+        display_capture.read_text(encoding="utf-8")
+        + "E (12345) task_wdt: Task watchdog got triggered\n",
+        encoding="utf-8",
+    )
+    fatal_log_result = subprocess.run(
+        [
+            sys.executable,
+            str(HARNESS),
+            "--input-file",
+            str(fatal_log_capture),
             "--expect-display",
         ],
         check=False,
@@ -369,5 +437,24 @@ if button_result.returncode != 0:
     print(button_result.stderr, end="", file=sys.stderr)
     raise SystemExit("expected the peripheral harness to accept physical button evidence")
 
+if setup_result.returncode != 0:
+    print(setup_result.stdout, end="", file=sys.stderr)
+    print(setup_result.stderr, end="", file=sys.stderr)
+    raise SystemExit("expected the HIL harness to accept Setup AP start and timeout stop")
+
+setup_expected = (
+    expected
+    + "setup_state observed: ssid=S3-RLCD-A1B2 address=192.168.4.1 "
+    + "session=1 stopped=true\n"
+)
+if setup_result.stdout != setup_expected:
+    raise SystemExit(f"unexpected setup harness output: {setup_result.stdout!r}")
+
+if bad_setup_result.returncode == 0 or "active-to-inactive" not in bad_setup_result.stderr:
+    raise SystemExit("expected the Setup harness to reject a startup error")
+
 if reset_result.returncode == 0 or "unexpected reset" not in reset_result.stderr:
     raise SystemExit("expected the display harness to reject a second boot_ok event")
+
+if fatal_log_result.returncode == 0 or "fatal target log" not in fatal_log_result.stderr:
+    raise SystemExit("expected the HIL harness to reject a target watchdog log")

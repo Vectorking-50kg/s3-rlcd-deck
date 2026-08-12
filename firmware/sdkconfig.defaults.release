@@ -1,3 +1,4 @@
 # Production builds must not mix diagnostics into the future Target bridge.
 # CONFIG_DECK_DIAGNOSTIC_CONSOLE is not set
 CONFIG_ESP_CONSOLE_NONE=y
+CONFIG_DECK_SETUP_INACTIVITY_TIMEOUT_SECONDS=600

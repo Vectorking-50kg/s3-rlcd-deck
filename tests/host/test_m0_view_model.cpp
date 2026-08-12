@@ -28,6 +28,9 @@ deck_m0_view_model_t sample_model()
         1,
         DECK_WIFI_UNAVAILABLE,
         DECK_SETUP_IDLE,
+        {},
+        {},
+        {},
         42,
         754,
         7'192'576,
@@ -135,7 +138,7 @@ void renders_unavailable_sensor_without_hiding_valid_rtc()
 void treats_unknown_data_sources_as_unavailable()
 {
     deck_m0_view_model_t model = sample_model();
-    model.data_source = static_cast<deck_data_source_t>(99);
+    model.data_source = 99;
     char text[768];
     assert(deck_m0_view_model_format(&model, text, sizeof(text)));
 
@@ -159,6 +162,23 @@ void renders_unavailable_button_inputs_explicitly()
     );
 }
 
+void renders_ephemeral_setup_credentials_on_the_deck()
+{
+    deck_m0_view_model_t model = sample_model();
+    model.setup_state = DECK_SETUP_ACTIVE;
+    std::strcpy(model.setup_ssid, "S3-RLCD-A1B2");
+    std::strcpy(model.setup_password, "ABCD-EFGH-JKLM");
+    std::strcpy(model.setup_address, "192.168.4.1");
+    char text[768];
+    assert(deck_m0_view_model_format(&model, text, sizeof(text)));
+
+    const std::string page(text);
+    assert(page.find("Wi-Fi UNAVAILABLE / Setup ACTIVE") != std::string::npos);
+    assert(page.find("AP S3-RLCD-A1B2") != std::string::npos);
+    assert(page.find("PASS ABCD-EFGH-JKLM") != std::string::npos);
+    assert(page.find("HTTP http://192.168.4.1") != std::string::npos);
+}
+
 }  // namespace
 
 int main()
@@ -170,5 +190,6 @@ int main()
     renders_unavailable_sensor_without_hiding_valid_rtc();
     treats_unknown_data_sources_as_unavailable();
     renders_unavailable_button_inputs_explicitly();
+    renders_ephemeral_setup_credentials_on_the_deck();
     return 0;
 }

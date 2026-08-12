@@ -21,9 +21,14 @@ typedef enum {
 } deck_wifi_state_t;
 
 typedef enum {
-    DECK_SETUP_IDLE = 0,
+    DECK_SETUP_UNAVAILABLE = 0,
+    DECK_SETUP_IDLE,
     DECK_SETUP_ACTIVE,
 } deck_setup_state_t;
+
+#define DECK_M0_SETUP_SSID_CAPACITY 13
+#define DECK_M0_SETUP_PASSWORD_CAPACITY 15
+#define DECK_M0_SETUP_ADDRESS_CAPACITY 16
 
 typedef enum {
     DECK_DATA_UNAVAILABLE = 0,
@@ -33,7 +38,7 @@ typedef enum {
 
 typedef struct {
     const char *firmware_version;
-    deck_data_source_t data_source;
+    uint8_t data_source;
     bool rtc_available;
     uint8_t rtc_hour;
     uint8_t rtc_minute;
@@ -50,6 +55,9 @@ typedef struct {
     uint32_t boot_event_count;
     deck_wifi_state_t wifi_state;
     deck_setup_state_t setup_state;
+    char setup_ssid[DECK_M0_SETUP_SSID_CAPACITY];
+    char setup_password[DECK_M0_SETUP_PASSWORD_CAPACITY];
+    char setup_address[DECK_M0_SETUP_ADDRESS_CAPACITY];
     uint32_t refresh_count;
     uint64_t uptime_seconds;
     uint32_t minimum_free_heap_bytes;

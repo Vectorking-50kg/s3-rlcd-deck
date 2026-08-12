@@ -49,6 +49,15 @@ typedef struct {
     uint32_t sensor_error_count;
 } deck_peripheral_diagnostic_info_t;
 
+typedef struct {
+    bool active;
+    const char *reason;
+    uint32_t session_id;
+    const char *ssid;
+    const char *address;
+    const char *error_stage;
+} deck_setup_diagnostic_info_t;
+
 typedef void (*deck_diagnostic_write_fn)(void *context, const char *data, size_t size);
 
 typedef struct {
@@ -64,6 +73,10 @@ bool deck_display_progress_diagnostics_emit(
 );
 bool deck_peripheral_diagnostics_emit(
     const deck_peripheral_diagnostic_info_t *info,
+    deck_diagnostic_sink_t sink
+);
+bool deck_setup_diagnostics_emit(
+    const deck_setup_diagnostic_info_t *info,
     deck_diagnostic_sink_t sink
 );
 

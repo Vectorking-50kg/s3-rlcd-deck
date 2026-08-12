@@ -3,6 +3,7 @@
 import argparse
 import json
 import pathlib
+import re
 import sys
 import time
 from collections.abc import Iterable
@@ -106,10 +107,43 @@ def valid_peripheral_event(event: dict[str, Any] | None) -> bool:
     )
 
 
+def setup_event_has_fields(event: dict[str, Any]) -> bool:
+    required = {
+        "active": bool,
+        "reason": str,
+        "session_id": int,
+        "ssid": str,
+        "address": str,
+        "error_stage": str,
+    }
+    return event.get("type") == "setup_state" and all(
+        type(event.get(name)) is expected for name, expected in required.items()
+    )
+
+
+def valid_setup_event(event: dict[str, Any], active: bool) -> bool:
+    if not setup_event_has_fields(event) or event["active"] is not active:
+        return False
+    common = (
+        event["session_id"] >= 1
+        and event["address"] == "192.168.4.1"
+        and event["error_stage"] == ""
+        and "password" not in event
+    )
+    if active:
+        return (
+            common
+            and event["reason"] in {"no_wifi_config", "boot_long_press"}
+            and re.fullmatch(r"S3-RLCD-[0-9A-F]{4}", event["ssid"]) is not None
+        )
+    return common and event["reason"] == "none" and event["ssid"] == ""
+
+
 def diagnostic_events(
     lines: Iterable[str],
     expect_display: bool,
     expect_peripherals: bool = False,
+    expect_setup: bool = False,
     display_deadline_seconds: float | None = None,
     monotonic: Any = time.monotonic,
 ) -> tuple[
@@ -120,6 +154,10 @@ def diagnostic_events(
     int,
     int,
     bool,
+    dict[str, Any] | None,
+    dict[str, Any] | None,
+    bool,
+    bool,
 ]:
     boot = None
     display = None
@@ -128,8 +166,22 @@ def diagnostic_events(
     boot_count = 0
     peripheral_count = 0
     peripheral_samples_valid = True
+    setup_started = None
+    setup_stopped = None
+    setup_events_valid = True
+    fatal_log_detected = False
     observation_started = monotonic()
     for line in lines:
+        normalized_line = line.lower()
+        fatal_log_detected = fatal_log_detected or any(
+            marker in normalized_line
+            for marker in (
+                "task_wdt:",
+                "guru meditation error",
+                "panic'ed",
+                "assert failed",
+            )
+        )
         candidate = line.strip()
         if not candidate.startswith("{"):
             continue
@@ -153,7 +205,16 @@ def diagnostic_events(
             peripheral = event
             peripheral_count += 1
             peripheral_samples_valid = peripheral_samples_valid and valid_peripheral_event(event)
-        if boot is not None and not expect_display and not expect_peripherals:
+        elif setup_event_has_fields(event):
+            if event["active"]:
+                setup_events_valid = setup_events_valid and valid_setup_event(event, True)
+                setup_started = event
+                setup_stopped = None
+            else:
+                setup_events_valid = setup_events_valid and valid_setup_event(event, False)
+                if setup_started is not None and event["session_id"] == setup_started["session_id"]:
+                    setup_stopped = event
+        if boot is not None and not expect_display and not expect_peripherals and not expect_setup:
             break
     return (
         boot,
@@ -163,6 +224,10 @@ def diagnostic_events(
         boot_count,
         peripheral_count,
         peripheral_samples_valid,
+        setup_started,
+        setup_stopped,
+        setup_events_valid,
+        fatal_log_detected,
     )
 
 
@@ -242,6 +307,11 @@ def parse_arguments() -> argparse.Namespace:
         help="Also require at least three clean RTC/SHTC3 peripheral-state samples.",
     )
     parser.add_argument(
+        "--expect-setup",
+        action="store_true",
+        help="Require a clean ephemeral Setup AP start followed by inactivity stop.",
+    )
+    parser.add_argument(
         "--expect-key-event",
         choices=("short_press", "long_press"),
         help="Require the latest physical KEY event while observing peripherals.",
@@ -287,14 +357,18 @@ def main() -> int:
     try:
         if arguments.input_file is not None:
             with arguments.input_file.open(encoding="utf-8", errors="replace") as capture:
-                event, display, progress, peripheral, boot_count, peripheral_count, peripheral_valid = diagnostic_events(
-                    capture, arguments.expect_display, arguments.expect_peripherals
+                event, display, progress, peripheral, boot_count, peripheral_count, peripheral_valid, setup_started, setup_stopped, setup_valid, fatal_log_detected = diagnostic_events(
+                    capture,
+                    arguments.expect_display,
+                    arguments.expect_peripherals,
+                    arguments.expect_setup,
                 )
         else:
-            event, display, progress, peripheral, boot_count, peripheral_count, peripheral_valid = diagnostic_events(
+            event, display, progress, peripheral, boot_count, peripheral_count, peripheral_valid, setup_started, setup_stopped, setup_valid, fatal_log_detected = diagnostic_events(
                 serial_lines(arguments.port, arguments.timeout),
                 arguments.expect_display,
                 arguments.expect_peripherals,
+                arguments.expect_setup,
                 display_deadline_seconds=(
                     DISPLAY_STABILITY_WINDOW_SECONDS
                     if arguments.expect_display
@@ -305,6 +379,9 @@ def main() -> int:
         print(f"boot smoke failed: {error}", file=sys.stderr)
         return 2
 
+    if fatal_log_detected:
+        print("boot smoke failed: fatal target log observed", file=sys.stderr)
+        return 1
     if event is None:
         print("boot smoke failed: no valid boot_ok event observed", file=sys.stderr)
         return 1
@@ -377,6 +454,24 @@ def main() -> int:
                 f"key={peripheral['key_event']}#{peripheral['key_event_count']} "
                 f"boot={peripheral['boot_event']}#{peripheral['boot_event_count']}"
             )
+    if arguments.expect_setup:
+        if (
+            not setup_valid
+            or setup_started is None
+            or setup_stopped is None
+            or not valid_setup_event(setup_started, True)
+            or not valid_setup_event(setup_stopped, False)
+        ):
+            print(
+                "setup smoke failed: clean active-to-inactive Setup transition missing",
+                file=sys.stderr,
+            )
+            return 1
+        print(
+            "setup_state observed: "
+            f"ssid={setup_started['ssid']} address={setup_started['address']} "
+            f"session={setup_started['session_id']} stopped=true"
+        )
     return 0
 
 

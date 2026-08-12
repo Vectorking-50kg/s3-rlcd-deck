@@ -80,6 +80,14 @@ deck_add_host_test(
         ../../firmware/components/board_support/deck_shtc3.cpp
     INCLUDE_DIRS ../../firmware/components/board_support/include
 )
+deck_add_host_test(
+    test_setup_mode
+    SOURCES
+        test_setup_mode.cpp
+        ../../firmware/components/setup_mode/deck_setup_mode.cpp
+        ../../firmware/components/setup_mode/deck_setup_http.cpp
+    INCLUDE_DIRS ../../firmware/components/setup_mode/include
+)
 
 add_test(
     NAME hil_boot_smoke_replay

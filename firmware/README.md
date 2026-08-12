@@ -32,6 +32,16 @@ The display tests cover the 400×300 landscape bit mapping, bounds checks, uncha
 frames, asynchronous frame ownership, late completion after timeout, transfer-start
 failure, ViewModel equality, diagnostic text, and the Chinese glyph manifest.
 
+## Setup Mode
+
+Until transactional Wi-Fi storage is added by ticket #6, every boot is treated as having
+no valid Wi-Fi configuration and starts a temporary AP. Each session uses a fresh
+`S3-RLCD-XXXX` SSID and a readable WPA2 password shown only on the Deck screen. The
+ordinary HTTP page at `http://192.168.4.1/` exposes current status and an explicit network
+scan; it cannot submit credentials or pair a Companion. Handled page, status, and scan
+requests refresh the inactivity timer. Development builds use 12 seconds for automated
+HIL; release builds use the required 600 seconds.
+
 ## Display architecture
 
 The `display` module exposes a narrow C-compatible interface and owns 30 KiB of bounded
@@ -85,3 +95,16 @@ or a second `boot_ok` indicating an unexpected reset. It repeats the HIL handsha
 500 ms so a reboot late in the observation window cannot hide behind the firmware's
 startup wait. Landscape orientation, black/white appearance, mirroring, and clipping
 still require observing the physical Deck screen.
+
+To additionally require one clean Setup AP active-to-inactive transition without changing
+the development Mac's Wi-Fi connection:
+
+```bash
+./tools/hil_boot_smoke.sh /dev/cu.usbmodemXXXX \
+  --expect-display --expect-peripherals --expect-setup
+```
+
+Setup active/inactive events are published only after the ESP-IDF Wi-Fi driver reports
+`WIFI_EVENT_AP_START`/`WIFI_EVENT_AP_STOP`; missing events and stop failures are errors.
+During this extended observation, the live harness also rejects Task WDT, panic, Guru
+Meditation, and assertion logs even if all expected JSON diagnostic events were emitted.
