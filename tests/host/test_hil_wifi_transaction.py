@@ -44,6 +44,31 @@ class StartupRaceConnection:
         return self.lines.pop(0) if self.lines else b""
 
 
+class RestartConnection:
+    def __init__(self, timeline: list[str]) -> None:
+        self.timeline = timeline
+
+    def write(self, value: bytes) -> None:
+        assert value == b"DECK_RESTART\n"
+        self.timeline.append("write")
+
+    def flush(self) -> None:
+        self.timeline.append("flush")
+
+    def close(self) -> None:
+        self.timeline.append("close")
+
+
+class ReopenSerial:
+    def __init__(self, timeline: list[str]) -> None:
+        self.timeline = timeline
+
+    def Serial(self, **options: object) -> object:
+        assert options["port"] == "/dev/fakeDeck"
+        self.timeline.append("reopen")
+        return object()
+
+
 def event(**overrides: object) -> dict[str, object]:
     value: dict[str, object] = {
         "type": "setup_state",
@@ -91,3 +116,12 @@ startup_race = StartupRaceConnection()
 active_after_retry = MODULE.enter_setup_session(startup_race, 1.0)
 assert startup_race.writes[:2] == [MODULE.HIL_READY, b"DECK_SETUP\n"]
 assert active_after_retry["session_id"] == 3
+
+timeline: list[str] = []
+original_sleep = MODULE.time.sleep
+MODULE.time.sleep = lambda _: timeline.append("sleep")
+try:
+    MODULE.restart(ReopenSerial(timeline), RestartConnection(timeline), "/dev/fakeDeck", 1.0)
+finally:
+    MODULE.time.sleep = original_sleep
+assert timeline == ["write", "flush", "close", "sleep", "reopen"]
