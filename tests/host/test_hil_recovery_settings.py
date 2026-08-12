@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import importlib.util
+import json
 import pathlib
 
 
@@ -9,6 +10,22 @@ SPEC = importlib.util.spec_from_file_location("hil_recovery_settings", MODULE_PA
 assert SPEC is not None and SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+
+
+class StartupRaceConnection:
+    def __init__(self) -> None:
+        self.lines: list[bytes] = []
+        self.writes: list[bytes] = []
+
+    def write(self, value: bytes) -> None:
+        self.writes.append(value)
+        if value == MODULE.HIL_READY and not self.lines:
+            self.lines.append(b'{"type":"boot_ok"}\n')
+        elif value == b"DECK_SETUP\n":
+            self.lines.append(json.dumps(setup_event()).encode("utf-8") + b"\n")
+
+    def readline(self) -> bytes:
+        return self.lines.pop(0) if self.lines else b""
 
 
 def setup_event(**overrides):
@@ -102,3 +119,8 @@ for invalid in ("15.1", "1.25", "nan", "-15.1"):
         pass
     else:
         raise AssertionError(f"expected invalid offset: {invalid}")
+
+startup_race = StartupRaceConnection()
+active_setup = MODULE.enter_setup_session(startup_race, 1.0)
+assert startup_race.writes[:2] == [MODULE.HIL_READY, b"DECK_SETUP\n"]
+assert active_setup["active"] is True
