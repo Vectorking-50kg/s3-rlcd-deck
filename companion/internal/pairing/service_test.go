@@ -295,6 +295,7 @@ func TestAuditEventsContainOnlyHashedDeviceReferences(t *testing.T) {
 		Auditor:                auditor,
 		CodeTTL:                5 * time.Minute,
 		CertificateFingerprint: testCertificateFingerprint,
+		CodePepper:             makeTokenBytes(0xf0),
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -339,6 +340,7 @@ func newService(
 		Random:                 random,
 		CodeTTL:                5 * time.Minute,
 		CertificateFingerprint: testCertificateFingerprint,
+		CodePepper:             makeTokenBytes(0xf1),
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)

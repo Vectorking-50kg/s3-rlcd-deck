@@ -2,6 +2,7 @@ package pairing
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -74,6 +75,7 @@ type Config struct {
 	Auditor                Auditor
 	CodeTTL                time.Duration
 	CertificateFingerprint string
+	CodePepper             []byte
 }
 
 type Service struct {
@@ -83,6 +85,7 @@ type Service struct {
 	auditor     Auditor
 	codeTTL     time.Duration
 	fingerprint string
+	codePepper  []byte
 }
 
 type IssuedCode struct {
@@ -159,6 +162,16 @@ func New(config Config) (*Service, error) {
 	if config.Random == nil {
 		config.Random = cryptoRandom{}
 	}
+	if len(config.CodePepper) == 0 {
+		var err error
+		config.CodePepper, err = config.Random.Bytes(deviceTokenBytes)
+		if err != nil {
+			return nil, fmt.Errorf("generate ephemeral pairing-code pepper: %w", err)
+		}
+	}
+	if len(config.CodePepper) != deviceTokenBytes {
+		return nil, errors.New("pairing-code pepper must contain exactly 32 bytes")
+	}
 	if config.CodeTTL == 0 {
 		config.CodeTTL = defaultCodeTTL
 	}
@@ -175,6 +188,7 @@ func New(config Config) (*Service, error) {
 		auditor:     config.Auditor,
 		codeTTL:     config.CodeTTL,
 		fingerprint: config.CertificateFingerprint,
+		codePepper:  append([]byte(nil), config.CodePepper...),
 	}, nil
 }
 
@@ -208,7 +222,7 @@ func (service *Service) issueCode(
 		now := service.clock.Now().UTC()
 		issued := IssuedCode{Code: code, ExpiresAt: now.Add(service.codeTTL)}
 		err = save(StoredCode{
-			Verifier:  verifier(code),
+			Verifier:  service.codeVerifier(code),
 			IssuedAt:  now,
 			ExpiresAt: issued.ExpiresAt,
 		})
@@ -242,7 +256,7 @@ func (service *Service) Redeem(ctx context.Context, request RedeemRequest) (Cred
 		ProtocolVersion:        request.ProtocolVersion,
 		CreatedAt:              now,
 	}
-	if err = service.store.ConsumeCode(ctx, verifier(request.Code), now, trust); err != nil {
+	if err = service.store.ConsumeCode(ctx, service.codeVerifier(request.Code), now, trust); err != nil {
 		service.audit("pairing_redeem", "rejected", request.DeviceID, now)
 		if errors.Is(err, ErrCodeUnavailable) {
 			return Credential{}, ErrCodeUnavailable
@@ -318,6 +332,12 @@ func validateRedeemRequest(request RedeemRequest) (string, error) {
 }
 
 func verifier(secret string) string { return verifierBytes([]byte(secret)) }
+
+func (service *Service) codeVerifier(code string) string {
+	mac := hmac.New(sha256.New, service.codePepper)
+	_, _ = mac.Write([]byte(code))
+	return hex.EncodeToString(mac.Sum(nil))
+}
 
 func verifierBytes(secret []byte) string {
 	digest := sha256.Sum256(secret)

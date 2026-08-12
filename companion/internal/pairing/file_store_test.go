@@ -2,6 +2,9 @@ package pairing_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -126,5 +129,59 @@ func TestFileStoreRejectsMalformedStateWithoutReplacingIt(t *testing.T) {
 	}
 	if string(contents) != `{"schema_version":1,"codes":` {
 		t.Fatal("malformed state was overwritten")
+	}
+}
+
+func TestPairingCodeVerifierIsPepperedAndRestartInvalidatesOutstandingCode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pairing.json")
+	store, err := pairing.OpenFileStore(path)
+	if err != nil {
+		t.Fatalf("OpenFileStore() error = %v", err)
+	}
+	clock := &fakeClock{now: time.Date(2026, 8, 13, 8, 0, 0, 0, time.UTC)}
+	firstRandom := &fakeRandom{numbers: []int{456789}}
+	first, err := pairing.New(pairing.Config{
+		Clock:                  clock,
+		Store:                  store,
+		Random:                 firstRandom,
+		CodePepper:             makeTokenBytes(0xa1),
+		CertificateFingerprint: testCertificateFingerprint,
+	})
+	if err != nil {
+		t.Fatalf("pairing.New(first) error = %v", err)
+	}
+	issued, err := first.Issue(context.Background())
+	if err != nil {
+		t.Fatalf("Issue() error = %v", err)
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	plainDigest := sha256.Sum256([]byte(issued.Code))
+	if strings.Contains(string(contents), hex.EncodeToString(plainDigest[:])) {
+		t.Fatal("stored Pairing verifier matches an offline SHA-256 code table")
+	}
+	if err = store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	reopened, err := pairing.OpenFileStore(path)
+	if err != nil {
+		t.Fatalf("reopen FileStore error = %v", err)
+	}
+	defer reopened.Close()
+	restarted, err := pairing.New(pairing.Config{
+		Clock:                  clock,
+		Store:                  reopened,
+		Random:                 &fakeRandom{tokens: [][]byte{makeTokenBytes(0xb1)}},
+		CodePepper:             makeTokenBytes(0xa2),
+		CertificateFingerprint: testCertificateFingerprint,
+	})
+	if err != nil {
+		t.Fatalf("pairing.New(restarted) error = %v", err)
+	}
+	if _, err = restarted.Redeem(context.Background(), validRedeemRequest(issued.Code)); !errors.Is(err, pairing.ErrCodeUnavailable) {
+		t.Fatalf("Redeem(outstanding code after restart) error = %v, want unavailable", err)
 	}
 }
