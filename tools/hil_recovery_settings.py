@@ -230,6 +230,7 @@ def wait_http_status(base_url: str, timeout_seconds: float) -> dict[str, Any]:
 
 def restart(serial_module: Any, connection: Any, port: str, timeout_seconds: float) -> Any:
     connection.write(b"DECK_RESTART\n")
+    connection.flush()
     connection.close()
     time.sleep(0.75)
     return open_serial(serial_module, port, time.monotonic() + timeout_seconds)
