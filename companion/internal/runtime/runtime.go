@@ -37,7 +37,6 @@ type Runtime struct {
 	managementHandler http.Handler
 	deviceHubHandler  http.Handler
 	shutdownTimeout   time.Duration
-	sessionsMu        sync.Mutex
 	sessions          *managementSessions
 
 	mu      sync.RWMutex
@@ -103,9 +102,14 @@ func (application *Runtime) Run(ctx context.Context) error {
 	if deviceHubHandler == nil {
 		deviceHubHandler = application.deviceHubRoutes()
 	}
+	managementLimits := application.config.Management.Limits
 	managementServer := &http.Server{
 		Handler:           managementHandler,
-		ReadHeaderTimeout: 5 * time.Second,
+		ReadHeaderTimeout: managementLimits.ReadHeaderTimeout,
+		ReadTimeout:       managementLimits.ReadTimeout,
+		WriteTimeout:      managementLimits.WriteTimeout,
+		IdleTimeout:       managementLimits.IdleTimeout,
+		MaxHeaderBytes:    managementLimits.MaxHeaderBytes,
 	}
 	limits := application.config.DeviceHub.Limits
 	deviceHubServer := &http.Server{
@@ -117,6 +121,16 @@ func (application *Runtime) Run(ctx context.Context) error {
 		MaxHeaderBytes:    limits.MaxHeaderBytes,
 	}
 	application.setState(StateReady, managementListener.Addr().String(), deviceHubListener.Addr().String())
+	managementListener = newConnectionLimitedListener(
+		managementListener,
+		managementLimits.MaxConcurrent,
+		managementLimits.MaxConcurrentPerIP,
+	)
+	deviceHubListener = newConnectionLimitedListener(
+		deviceHubListener,
+		limits.MaxConcurrent,
+		limits.MaxConcurrentPerIP,
+	)
 
 	type serveResult struct {
 		name string

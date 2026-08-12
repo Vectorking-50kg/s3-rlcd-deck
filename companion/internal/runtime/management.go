@@ -9,6 +9,8 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"strconv"
+	"sync"
 	"time"
 
 	webapp "github.com/Vectorking-50kg/s3-rlcd-deck/companion/web"
@@ -18,6 +20,7 @@ const (
 	managementSessionCookie = "s3deck_session"
 	managementLoginMaxBytes = 4 << 10
 	managementSessionTTL    = 8 * time.Hour
+	maxManagementSessions   = 1024
 )
 
 type managementSession struct {
@@ -26,19 +29,39 @@ type managementSession struct {
 }
 
 type managementSessions struct {
+	mu      sync.Mutex
 	entries map[[sha256.Size]byte]managementSession
+	ttl     time.Duration
+	maxSize int
 }
 
 func newManagementSessions() *managementSessions {
-	return &managementSessions{entries: make(map[[sha256.Size]byte]managementSession)}
+	return &managementSessions{
+		entries: make(map[[sha256.Size]byte]managementSession),
+		ttl:     managementSessionTTL,
+		maxSize: maxManagementSessions,
+	}
 }
 
 func (application *Runtime) managementRoutes() http.Handler {
+	limits := application.config.Management.Limits
+	sensitiveRateLimiter := newIPRateLimiter(
+		limits.SensitiveRequests,
+		limits.SensitiveRateWindow,
+	)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/bootstrap", application.handleBootstrap)
-	mux.HandleFunc("POST /api/v1/login", application.handleLogin)
+	mux.HandleFunc("POST /api/v1/login", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.handleLogin,
+	))
 	mux.HandleFunc("GET /api/v1/status", application.requireManagementSession(application.handleStatus))
-	mux.HandleFunc("POST /api/v1/logout", application.requireManagementWrite(application.handleLogout))
+	mux.HandleFunc("POST /api/v1/logout", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.requireManagementWrite(application.handleLogout),
+	))
 	mux.HandleFunc("/api/", func(response http.ResponseWriter, _ *http.Request) {
 		http.Error(response, "not found", http.StatusNotFound)
 	})
@@ -84,12 +107,10 @@ func (application *Runtime) handleLogin(response http.ResponseWriter, request *h
 		http.Error(response, "session unavailable", http.StatusInternalServerError)
 		return
 	}
-	application.sessionsMu.Lock()
-	application.sessions.entries[sha256.Sum256([]byte(sessionToken))] = managementSession{
-		csrfHash:  sha256.Sum256([]byte(csrfToken)),
-		expiresAt: time.Now().Add(managementSessionTTL),
+	if !application.sessions.add(sessionToken, csrfToken, time.Now()) {
+		http.Error(response, "session capacity reached", http.StatusServiceUnavailable)
+		return
 	}
-	application.sessionsMu.Unlock()
 	http.SetCookie(response, &http.Cookie{
 		Name:     managementSessionCookie,
 		Value:    sessionToken,
@@ -109,9 +130,7 @@ func (application *Runtime) handleStatus(response http.ResponseWriter, _ *http.R
 
 func (application *Runtime) handleLogout(response http.ResponseWriter, request *http.Request) {
 	cookie, _ := request.Cookie(managementSessionCookie)
-	application.sessionsMu.Lock()
-	delete(application.sessions.entries, sha256.Sum256([]byte(cookie.Value)))
-	application.sessionsMu.Unlock()
+	application.sessions.revoke(cookie.Value)
 	http.SetCookie(response, &http.Cookie{
 		Name:     managementSessionCookie,
 		Path:     "/",
@@ -154,17 +173,61 @@ func (application *Runtime) managementSession(request *http.Request) (management
 		return managementSession{}, false
 	}
 	key := sha256.Sum256([]byte(cookie.Value))
-	application.sessionsMu.Lock()
-	defer application.sessionsMu.Unlock()
-	session, found := application.sessions.entries[key]
-	if !found {
-		return managementSession{}, false
+	return application.sessions.lookupKey(key, time.Now())
+}
+
+func (sessions *managementSessions) add(sessionToken string, csrfToken string, now time.Time) bool {
+	sessions.mu.Lock()
+	defer sessions.mu.Unlock()
+	sessions.pruneExpired(now)
+	if len(sessions.entries) >= sessions.maxSize {
+		return false
 	}
-	if time.Now().After(session.expiresAt) {
-		delete(application.sessions.entries, key)
-		return managementSession{}, false
+	sessions.entries[sha256.Sum256([]byte(sessionToken))] = managementSession{
+		csrfHash:  sha256.Sum256([]byte(csrfToken)),
+		expiresAt: now.Add(sessions.ttl),
 	}
-	return session, true
+	return true
+}
+
+func (sessions *managementSessions) lookupKey(
+	key [sha256.Size]byte,
+	now time.Time,
+) (managementSession, bool) {
+	sessions.mu.Lock()
+	defer sessions.mu.Unlock()
+	sessions.pruneExpired(now)
+	session, found := sessions.entries[key]
+	return session, found
+}
+
+func (sessions *managementSessions) revoke(sessionToken string) {
+	sessions.mu.Lock()
+	defer sessions.mu.Unlock()
+	delete(sessions.entries, sha256.Sum256([]byte(sessionToken)))
+}
+
+func (sessions *managementSessions) pruneExpired(now time.Time) {
+	for key, session := range sessions.entries {
+		if !now.Before(session.expiresAt) {
+			delete(sessions.entries, key)
+		}
+	}
+}
+
+func limitManagementRequests(
+	limiter *ipRateLimiter,
+	window time.Duration,
+	next http.HandlerFunc,
+) http.HandlerFunc {
+	return func(response http.ResponseWriter, request *http.Request) {
+		if !limiter.allow(request.RemoteAddr, time.Now()) {
+			response.Header().Set("Retry-After", strconv.Itoa(max(1, int(window.Seconds()))))
+			http.Error(response, "rate limit exceeded", http.StatusTooManyRequests)
+			return
+		}
+		next(response, request)
+	}
 }
 
 func (application *Runtime) managementOriginValid(request *http.Request) bool {

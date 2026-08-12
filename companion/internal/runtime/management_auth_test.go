@@ -2,12 +2,95 @@ package runtime_test
 
 import (
 	"context"
+	"errors"
+	"io"
+	"net"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	companionruntime "github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/runtime"
 )
+
+func TestManagementClosesSlowLoginBodiesWithinConfiguredDeadline(t *testing.T) {
+	config := testConfig()
+	config.Management.Limits.ReadTimeout = 30 * time.Millisecond
+	application, err := companionruntime.New(config)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- application.Run(ctx) }()
+	status := waitForState(t, application, companionruntime.StateReady)
+
+	connection, err := net.Dial("tcp", status.ManagementAddress)
+	if err != nil {
+		t.Fatalf("dial management: %v", err)
+	}
+	partialLogin := "POST /api/v1/login HTTP/1.1\r\nHost: " + status.ManagementAddress +
+		"\r\nOrigin: http://" + status.ManagementAddress +
+		"\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{"
+	if _, err = io.WriteString(connection, partialLogin); err != nil {
+		t.Fatalf("write partial login: %v", err)
+	}
+	if err = connection.SetReadDeadline(time.Now().Add(300 * time.Millisecond)); err != nil {
+		t.Fatalf("SetReadDeadline() error = %v", err)
+	}
+	buffer := make([]byte, 1)
+	_, err = connection.Read(buffer)
+	connection.Close()
+	var networkError net.Error
+	if errors.As(err, &networkError) && networkError.Timeout() {
+		t.Fatal("management listener kept a slow login body beyond ReadTimeout")
+	}
+
+	cancel()
+	if err = <-done; err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+}
+
+func TestManagementRateLimitsSensitiveRequestsByIP(t *testing.T) {
+	config := testConfig()
+	config.Management.Limits.SensitiveRequests = 1
+	config.Management.Limits.SensitiveRateWindow = time.Minute
+	application, err := companionruntime.New(config)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- application.Run(ctx) }()
+	status := waitForState(t, application, companionruntime.StateReady)
+
+	for attempt, wantStatus := range []int{http.StatusUnauthorized, http.StatusTooManyRequests} {
+		request, requestErr := http.NewRequest(
+			http.MethodPost,
+			"http://"+status.ManagementAddress+"/api/v1/login",
+			strings.NewReader(`{"token":"incorrect-management-token-value"}`),
+		)
+		if requestErr != nil {
+			t.Fatalf("NewRequest() error = %v", requestErr)
+		}
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Origin", "http://"+status.ManagementAddress)
+		response, requestErr := http.DefaultClient.Do(request)
+		if requestErr != nil {
+			t.Fatalf("POST login attempt %d: %v", attempt+1, requestErr)
+		}
+		response.Body.Close()
+		if response.StatusCode != wantStatus {
+			t.Fatalf("POST login attempt %d = %d, want %d", attempt+1, response.StatusCode, wantStatus)
+		}
+	}
+
+	cancel()
+	if err = <-done; err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+}
 
 func TestManagementAllowsOnlyBootstrapAndLoginBeforeAuthentication(t *testing.T) {
 	config := testConfig()

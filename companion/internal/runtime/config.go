@@ -30,6 +30,19 @@ type ManagementConfig struct {
 	AllowLAN      bool
 	AllowedOrigin string
 	AdminToken    string
+	Limits        ManagementLimits
+}
+
+type ManagementLimits struct {
+	MaxHeaderBytes      int
+	ReadHeaderTimeout   time.Duration
+	ReadTimeout         time.Duration
+	WriteTimeout        time.Duration
+	IdleTimeout         time.Duration
+	MaxConcurrent       int
+	MaxConcurrentPerIP  int
+	SensitiveRequests   int
+	SensitiveRateWindow time.Duration
 }
 
 type DeviceHubConfig struct {
@@ -39,15 +52,16 @@ type DeviceHubConfig struct {
 }
 
 type DeviceHubLimits struct {
-	MaxHeaderBytes    int
-	MaxBodyBytes      int64
-	ReadHeaderTimeout time.Duration
-	ReadTimeout       time.Duration
-	WriteTimeout      time.Duration
-	IdleTimeout       time.Duration
-	MaxConcurrent     int
-	RateLimitRequests int
-	RateLimitWindow   time.Duration
+	MaxHeaderBytes     int
+	MaxBodyBytes       int64
+	ReadHeaderTimeout  time.Duration
+	ReadTimeout        time.Duration
+	WriteTimeout       time.Duration
+	IdleTimeout        time.Duration
+	MaxConcurrent      int
+	MaxConcurrentPerIP int
+	RateLimitRequests  int
+	RateLimitWindow    time.Duration
 }
 
 func normalizeConfig(config Config) (Config, error) {
@@ -88,7 +102,39 @@ func normalizeConfig(config Config) (Config, error) {
 		return Config{}, fmt.Errorf("invalid Device Hub address: %w", err)
 	}
 	config.DeviceHub.Limits = normalizeDeviceHubLimits(config.DeviceHub.Limits)
+	config.Management.Limits = normalizeManagementLimits(config.Management.Limits)
 	return config, nil
+}
+
+func normalizeManagementLimits(limits ManagementLimits) ManagementLimits {
+	if limits.MaxHeaderBytes <= 0 {
+		limits.MaxHeaderBytes = 16 << 10
+	}
+	if limits.ReadHeaderTimeout <= 0 {
+		limits.ReadHeaderTimeout = 2 * time.Second
+	}
+	if limits.ReadTimeout <= 0 {
+		limits.ReadTimeout = 10 * time.Second
+	}
+	if limits.WriteTimeout <= 0 {
+		limits.WriteTimeout = 10 * time.Second
+	}
+	if limits.IdleTimeout <= 0 {
+		limits.IdleTimeout = 30 * time.Second
+	}
+	if limits.MaxConcurrent <= 0 {
+		limits.MaxConcurrent = 64
+	}
+	if limits.MaxConcurrentPerIP <= 0 {
+		limits.MaxConcurrentPerIP = 16
+	}
+	if limits.SensitiveRequests <= 0 {
+		limits.SensitiveRequests = 30
+	}
+	if limits.SensitiveRateWindow <= 0 {
+		limits.SensitiveRateWindow = time.Minute
+	}
+	return limits
 }
 
 func validateBrowserOrigin(origin string) error {
@@ -126,6 +172,9 @@ func normalizeDeviceHubLimits(limits DeviceHubLimits) DeviceHubLimits {
 	}
 	if limits.MaxConcurrent <= 0 {
 		limits.MaxConcurrent = 32
+	}
+	if limits.MaxConcurrentPerIP <= 0 {
+		limits.MaxConcurrentPerIP = 8
 	}
 	if limits.RateLimitRequests <= 0 {
 		limits.RateLimitRequests = 120

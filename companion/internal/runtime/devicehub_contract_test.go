@@ -139,6 +139,53 @@ func TestDeviceHubClosesSlowHeadersWithinConfiguredDeadline(t *testing.T) {
 	}
 }
 
+func TestDeviceHubLimitsConnectionsBeforeHeadersAreComplete(t *testing.T) {
+	config := testConfig()
+	config.DeviceHub.Limits.MaxConcurrent = 1
+	config.DeviceHub.Limits.MaxConcurrentPerIP = 1
+	config.DeviceHub.Limits.ReadHeaderTimeout = time.Second
+	application, err := companionruntime.New(config)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- application.Run(ctx) }()
+	status := waitForState(t, application, companionruntime.StateReady)
+
+	partial, err := net.Dial("tcp", status.DeviceHubAddress)
+	if err != nil {
+		t.Fatalf("dial first Device Hub connection: %v", err)
+	}
+	if _, err = io.WriteString(partial, "GET /api/v1/device/health HTTP/1.1\r\nHost: deck\r\n"); err != nil {
+		t.Fatalf("write partial header: %v", err)
+	}
+
+	overLimit, err := net.Dial("tcp", status.DeviceHubAddress)
+	if err != nil {
+		t.Fatalf("dial over-limit connection: %v", err)
+	}
+	if _, err = io.WriteString(overLimit, "GET / HTTP/1.1\r\nHost: deck\r\n\r\n"); err != nil {
+		t.Fatalf("write over-limit request: %v", err)
+	}
+	if err = overLimit.SetReadDeadline(time.Now().Add(300 * time.Millisecond)); err != nil {
+		t.Fatalf("SetReadDeadline() error = %v", err)
+	}
+	buffer := make([]byte, 1)
+	_, err = overLimit.Read(buffer)
+	overLimit.Close()
+	var networkError net.Error
+	if errors.As(err, &networkError) && networkError.Timeout() {
+		t.Fatal("over-limit half-open connection was not rejected at the listener")
+	}
+	partial.Close()
+
+	cancel()
+	if err = <-done; err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+}
+
 func TestDeviceHubBindFailureClosesManagementListener(t *testing.T) {
 	occupied, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
