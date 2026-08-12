@@ -32,6 +32,19 @@ bool deck_boot_diagnostics_emit(const deck_boot_info_t *info, deck_diagnostic_si
 
 namespace {
 
+const char *button_event_name(deck_diagnostic_button_event_t event)
+{
+    switch (event) {
+        case DECK_DIAGNOSTIC_BUTTON_SHORT_PRESS:
+            return "short_press";
+        case DECK_DIAGNOSTIC_BUTTON_LONG_PRESS:
+            return "long_press";
+        case DECK_DIAGNOSTIC_BUTTON_NONE:
+        default:
+            return "none";
+    }
+}
+
 bool emit_display_diagnostics(
     const char *event_type,
     const deck_display_ready_info_t *info,
@@ -80,4 +93,48 @@ bool deck_display_progress_diagnostics_emit(
 )
 {
     return emit_display_diagnostics("display_progress", info, sink);
+}
+
+bool deck_peripheral_diagnostics_emit(
+    const deck_peripheral_diagnostic_info_t *info,
+    deck_diagnostic_sink_t sink
+)
+{
+    if (info == nullptr || sink.write == nullptr) {
+        return false;
+    }
+
+    char line[512];
+    const int size = snprintf(
+        line,
+        sizeof(line),
+        "{\"type\":\"peripheral_state\",\"rtc_available\":%s,"
+        "\"rtc_hour\":%" PRIu8 ",\"rtc_minute\":%" PRIu8 ","
+        "\"sensor_available\":%s,\"raw_temperature_tenths_c\":%" PRIi16 ","
+        "\"calibrated_temperature_tenths_c\":%" PRIi16 ","
+        "\"humidity_tenths_percent\":%" PRIu16 ",\"buttons_available\":%s,"
+        "\"key_event\":\"%s\","
+        "\"key_event_count\":%" PRIu32 ",\"boot_event\":\"%s\","
+        "\"boot_event_count\":%" PRIu32 ",\"rtc_errors\":%" PRIu32 ","
+        "\"sensor_errors\":%" PRIu32 "}\n",
+        info->rtc_available ? "true" : "false",
+        info->rtc_hour,
+        info->rtc_minute,
+        info->sensor_available ? "true" : "false",
+        info->raw_temperature_tenths_c,
+        info->calibrated_temperature_tenths_c,
+        info->humidity_tenths_percent,
+        info->buttons_available ? "true" : "false",
+        button_event_name(info->key_event),
+        info->key_event_count,
+        button_event_name(info->boot_event),
+        info->boot_event_count,
+        info->rtc_error_count,
+        info->sensor_error_count
+    );
+    if (size < 0 || static_cast<size_t>(size) >= sizeof(line)) {
+        return false;
+    }
+    sink.write(sink.context, line, static_cast<size_t>(size));
+    return true;
 }

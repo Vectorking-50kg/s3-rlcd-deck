@@ -15,10 +15,13 @@ deck_m0_view_model_t sample_model()
         true,
         12,
         34,
+        4,
+        true,
         234,
         194,
         456,
         2,
+        true,
         DECK_BUTTON_SHORT_PRESS,
         3,
         DECK_BUTTON_LONG_PRESS,
@@ -67,7 +70,7 @@ void formats_every_required_diagnostic_field()
     assert(page.find("S3 RLCD Deck / M0 诊断 [SIM]") != std::string::npos);
     assert(page.find("FW 0.2.0-dev") != std::string::npos);
     assert(page.find("UP 00:12:34") != std::string::npos);
-    assert(page.find("RTC 12:34 / 状态 SIMULATED") != std::string::npos);
+    assert(page.find("RTC 12:34 / 状态 SIMULATED / RTC ERR 4") != std::string::npos);
     assert(page.find("温度 RAW +23.4C / CAL +19.4C") != std::string::npos);
     assert(page.find("湿度 45.6% / SENSOR ERR 2") != std::string::npos);
     assert(page.find("KEY 短按 #3 / BOOT 长按 #1") != std::string::npos);
@@ -110,7 +113,23 @@ void renders_unavailable_rtc_without_fabricating_time()
     model.rtc_available = false;
     char text[768];
     assert(deck_m0_view_model_format(&model, text, sizeof(text)));
-    assert(std::string(text).find("RTC --:-- / 状态 UNAVAILABLE") != std::string::npos);
+    assert(
+        std::string(text).find("RTC --:-- / 状态 UNAVAILABLE / RTC ERR 4") !=
+        std::string::npos
+    );
+}
+
+void renders_unavailable_sensor_without_hiding_valid_rtc()
+{
+    deck_m0_view_model_t model = sample_model();
+    model.sensor_available = false;
+    char text[768];
+    assert(deck_m0_view_model_format(&model, text, sizeof(text)));
+
+    const std::string page(text);
+    assert(page.find("RTC 12:34 / 状态 SIMULATED / RTC ERR 4") != std::string::npos);
+    assert(page.find("温度 RAW --.-C / CAL --.-C") != std::string::npos);
+    assert(page.find("湿度 --.-% / SENSOR ERR 2") != std::string::npos);
 }
 
 void treats_unknown_data_sources_as_unavailable()
@@ -122,9 +141,22 @@ void treats_unknown_data_sources_as_unavailable()
 
     const std::string page(text);
     assert(page.find("M0 诊断 [UNAVAILABLE]") != std::string::npos);
-    assert(page.find("RTC --:-- / 状态 UNAVAILABLE") != std::string::npos);
+    assert(page.find("RTC --:-- / 状态 UNAVAILABLE / RTC ERR 4") != std::string::npos);
     assert(page.find("温度 RAW --.-C / CAL --.-C") != std::string::npos);
     assert(page.find("湿度 --.-% / SENSOR ERR 2") != std::string::npos);
+}
+
+void renders_unavailable_button_inputs_explicitly()
+{
+    deck_m0_view_model_t model = sample_model();
+    model.buttons_available = false;
+    char text[768];
+    assert(deck_m0_view_model_format(&model, text, sizeof(text)));
+
+    assert(
+        std::string(text).find("KEY UNAVAILABLE #3 / BOOT UNAVAILABLE #1") !=
+        std::string::npos
+    );
 }
 
 }  // namespace
@@ -135,6 +167,8 @@ int main()
     equality_tracks_visible_state_only();
     every_chinese_page_character_is_in_the_font_manifest();
     renders_unavailable_rtc_without_fabricating_time();
+    renders_unavailable_sensor_without_hiding_valid_rtc();
     treats_unknown_data_sources_as_unavailable();
+    renders_unavailable_button_inputs_explicitly();
     return 0;
 }

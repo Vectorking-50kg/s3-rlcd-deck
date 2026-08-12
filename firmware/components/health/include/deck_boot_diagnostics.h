@@ -26,6 +26,29 @@ typedef struct {
     uint32_t rejected_updates;
 } deck_display_ready_info_t;
 
+typedef enum {
+    DECK_DIAGNOSTIC_BUTTON_NONE = 0,
+    DECK_DIAGNOSTIC_BUTTON_SHORT_PRESS,
+    DECK_DIAGNOSTIC_BUTTON_LONG_PRESS,
+} deck_diagnostic_button_event_t;
+
+typedef struct {
+    bool rtc_available;
+    uint8_t rtc_hour;
+    uint8_t rtc_minute;
+    bool sensor_available;
+    int16_t raw_temperature_tenths_c;
+    int16_t calibrated_temperature_tenths_c;
+    uint16_t humidity_tenths_percent;
+    bool buttons_available;
+    deck_diagnostic_button_event_t key_event;
+    uint32_t key_event_count;
+    deck_diagnostic_button_event_t boot_event;
+    uint32_t boot_event_count;
+    uint32_t rtc_error_count;
+    uint32_t sensor_error_count;
+} deck_peripheral_diagnostic_info_t;
+
 typedef void (*deck_diagnostic_write_fn)(void *context, const char *data, size_t size);
 
 typedef struct {
@@ -37,6 +60,10 @@ bool deck_boot_diagnostics_emit(const deck_boot_info_t *info, deck_diagnostic_si
 bool deck_display_diagnostics_emit(const deck_display_ready_info_t *info, deck_diagnostic_sink_t sink);
 bool deck_display_progress_diagnostics_emit(
     const deck_display_ready_info_t *info,
+    deck_diagnostic_sink_t sink
+);
+bool deck_peripheral_diagnostics_emit(
+    const deck_peripheral_diagnostic_info_t *info,
     deck_diagnostic_sink_t sink
 );
 
