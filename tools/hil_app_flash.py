@@ -6,6 +6,7 @@ import argparse
 from dataclasses import dataclass
 import pathlib
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -201,15 +202,40 @@ def openocd_reset_run_command(openocd: str, adapter_serial: str) -> list[str]:
     ]
 
 
-def best_effort_reset_run(openocd: str, adapter_serial: str) -> None:
+def best_effort_reset_run(
+    openocd: str,
+    adapter_serial: str,
+    runner: Any = subprocess.run,
+) -> None:
     try:
-        subprocess.run(
+        runner(
             openocd_reset_run_command(openocd, adapter_serial),
             cwd=REPOSITORY_ROOT,
             check=False,
         )
-    except OSError:
+    except Exception:
         pass
+
+
+def run_openocd_checked(
+    command: list[str],
+    openocd: str,
+    adapter_serial: str,
+    failure_message: str,
+    runner: Any = subprocess.run,
+) -> None:
+    try:
+        result = runner(command, cwd=REPOSITORY_ROOT, check=False)
+    except BaseException:
+        best_effort_reset_run(openocd, adapter_serial, runner)
+        raise
+    if result.returncode != 0:
+        best_effort_reset_run(openocd, adapter_serial, runner)
+        raise AppFlashFailure(failure_message)
+
+
+def interrupt_app_flash(_signum: int, _frame: Any) -> None:
+    raise AppFlashFailure("app flashing was interrupted; target recovery was requested")
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -227,6 +253,7 @@ def parse_arguments() -> argparse.Namespace:
 
 def main() -> int:
     arguments = parse_arguments()
+    previous_sigterm_handler = signal.signal(signal.SIGTERM, interrupt_app_flash)
     try:
         partition_table = arguments.build_dir / "partition_table" / "partition-table.bin"
         application_image = arguments.build_dir / "s3_rlcd_deck.bin"
@@ -245,26 +272,32 @@ def main() -> int:
             adapter_serial,
             partition_table,
         )
-        verify_result = subprocess.run(verify_command, cwd=REPOSITORY_ROOT, check=False)
-        if verify_result.returncode != 0:
-            best_effort_reset_run(openocd, adapter_serial)
-            raise AppFlashFailure(
+        run_openocd_checked(
+            verify_command,
+            openocd,
+            adapter_serial,
+            (
                 "device partition table does not exactly match the development build; "
                 "refusing app-slot writes"
-            )
+            ),
+        )
         command = openocd_flash_command(
             openocd,
             adapter_serial,
             application_image,
             partitions,
         )
-        result = subprocess.run(command, cwd=REPOSITORY_ROOT, check=False)
-        if result.returncode != 0:
-            best_effort_reset_run(openocd, adapter_serial)
-            raise AppFlashFailure("OpenOCD app-slot programming or verification failed")
+        run_openocd_checked(
+            command,
+            openocd,
+            adapter_serial,
+            "OpenOCD app-slot programming or verification failed",
+        )
     except AppFlashFailure as error:
         print(f"Deck app flash failed: {error}", file=sys.stderr)
         return 1
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm_handler)
 
     slots = ",".join(f"{partition.label}@0x{partition.offset:x}" for partition in partitions)
     print(f"Deck app slots verified: {slots} image_bytes={image_size}")

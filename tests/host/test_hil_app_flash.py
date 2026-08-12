@@ -97,3 +97,33 @@ serialized_reset = " ".join(reset_command).lower()
 assert "reset run" in serialized_reset
 assert "program" not in serialized_reset
 assert "erase" not in serialized_reset
+
+
+class Completed:
+    returncode = 0
+
+
+for interrupted_command in (verify_command, command):
+    calls: list[list[str]] = []
+
+    def interrupted_runner(arguments: list[str], **_options: object) -> Completed:
+        calls.append(arguments)
+        if len(calls) == 1:
+            raise OSError("simulated OpenOCD interruption")
+        return Completed()
+
+    try:
+        MODULE.run_openocd_checked(
+            interrupted_command,
+            "/fake/openocd",
+            "58:E6:C5:71:DE:B8",
+            "simulated failure",
+            interrupted_runner,
+        )
+    except OSError:
+        pass
+    else:
+        raise AssertionError("OpenOCD interruption was not propagated")
+    assert len(calls) == 2
+    assert "reset run" in " ".join(calls[1]).lower()
+    assert "program" not in " ".join(calls[1]).lower()
