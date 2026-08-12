@@ -104,13 +104,25 @@ func TestPairingCodeIsZeroPaddedShortLivedAndSingleUse(t *testing.T) {
 	if _, err = service.Redeem(context.Background(), request); !errors.Is(err, pairing.ErrCodeUnavailable) {
 		t.Fatalf("replay error = %v, want ErrCodeUnavailable", err)
 	}
-	valid, err := service.Verify(context.Background(), request.DeviceID, credential.Token)
+	valid, err := service.Verify(context.Background(), authentication(request, credential.Token))
 	if err != nil || !valid {
 		t.Fatalf("Verify() = %t, %v; want true", valid, err)
 	}
-	valid, err = service.Verify(context.Background(), request.DeviceID, "wrong-device-token")
+	valid, err = service.Verify(context.Background(), authentication(request, "wrong-device-token"))
 	if err != nil || valid {
 		t.Fatalf("Verify(wrong token) = %t, %v; want false", valid, err)
+	}
+	wrongIdentity := authentication(request, credential.Token)
+	wrongIdentity.DeviceIdentity = "ZGlmZmVyZW50LWRldmljZS1wdWJsaWMta2V5"
+	valid, err = service.Verify(context.Background(), wrongIdentity)
+	if err != nil || valid {
+		t.Fatalf("Verify(wrong identity) = %t, %v; want false", valid, err)
+	}
+	wrongProtocol := authentication(request, credential.Token)
+	wrongProtocol.ProtocolVersion++
+	valid, err = service.Verify(context.Background(), wrongProtocol)
+	if err != nil || valid {
+		t.Fatalf("Verify(wrong protocol) = %t, %v; want false", valid, err)
 	}
 	stored, err := store.LookupTrust(context.Background(), request.DeviceID)
 	if err != nil {
@@ -200,11 +212,11 @@ func TestConcurrentRedeemAllowsExactlyOneConsumer(t *testing.T) {
 	}
 }
 
-func TestRotateAndRevokeTrust(t *testing.T) {
+func TestRotationCodeDeliversTokenOnlyThroughRedeemAndRevokeTrust(t *testing.T) {
 	clock := &fakeClock{now: time.Date(2026, 8, 13, 8, 0, 0, 0, time.UTC)}
 	store := pairing.NewMemoryStore()
 	service := newService(t, clock, store, &fakeRandom{
-		numbers: []int{1},
+		numbers: []int{1, 2},
 		tokens: [][]byte{
 			makeTokenBytes(5),
 			makeTokenBytes(6),
@@ -218,25 +230,30 @@ func TestRotateAndRevokeTrust(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Redeem() error = %v", err)
 	}
-	rotated, err := service.Rotate(context.Background(), credential.DeviceID)
+	rotation, err := service.IssueRotation(context.Background(), credential.DeviceID)
 	if err != nil {
-		t.Fatalf("Rotate() error = %v", err)
+		t.Fatalf("IssueRotation() error = %v", err)
+	}
+	rotatedRequest := validRedeemRequest(rotation.Code)
+	rotated, err := service.Redeem(context.Background(), rotatedRequest)
+	if err != nil {
+		t.Fatalf("Redeem(rotation) error = %v", err)
 	}
 	if rotated.Token == credential.Token || rotated.Token == "" {
 		t.Fatal("Rotate() did not issue a distinct one-time token")
 	}
-	valid, _ := service.Verify(context.Background(), credential.DeviceID, credential.Token)
+	valid, _ := service.Verify(context.Background(), authentication(rotatedRequest, credential.Token))
 	if valid {
 		t.Fatal("old token remained valid after rotation")
 	}
-	valid, _ = service.Verify(context.Background(), credential.DeviceID, rotated.Token)
+	valid, _ = service.Verify(context.Background(), authentication(rotatedRequest, rotated.Token))
 	if !valid {
 		t.Fatal("rotated token is not valid")
 	}
 	if err = service.Revoke(context.Background(), credential.DeviceID); err != nil {
 		t.Fatalf("Revoke() error = %v", err)
 	}
-	valid, _ = service.Verify(context.Background(), credential.DeviceID, rotated.Token)
+	valid, _ = service.Verify(context.Background(), authentication(rotatedRequest, rotated.Token))
 	if valid {
 		t.Fatal("token remained valid after device revocation")
 	}
@@ -344,4 +361,13 @@ func makeTokenBytes(fill byte) []byte {
 		value[index] = fill
 	}
 	return value
+}
+
+func authentication(request pairing.RedeemRequest, token string) pairing.Authentication {
+	return pairing.Authentication{
+		DeviceID:        request.DeviceID,
+		Token:           token,
+		DeviceIdentity:  request.DeviceIdentity,
+		ProtocolVersion: request.ProtocolVersion,
+	}
 }

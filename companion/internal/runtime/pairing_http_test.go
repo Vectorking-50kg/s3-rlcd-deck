@@ -3,10 +3,12 @@ package runtime_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +17,33 @@ import (
 )
 
 const testCertificateFingerprint = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+type failHTTPConsumeStore struct {
+	*pairing.MemoryStore
+	mu   sync.Mutex
+	fail bool
+}
+
+func (store *failHTTPConsumeStore) ConsumeCode(
+	ctx context.Context,
+	codeVerifier string,
+	now time.Time,
+	trust pairing.StoredTrust,
+) error {
+	store.mu.Lock()
+	fail := store.fail
+	store.mu.Unlock()
+	if fail {
+		return errors.New("injected HTTP store failure")
+	}
+	return store.MemoryStore.ConsumeCode(ctx, codeVerifier, now, trust)
+}
+
+func (store *failHTTPConsumeStore) SetFail(fail bool) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.fail = fail
+}
 
 func TestPairingHTTPFlowIssuesRedeemsRotatesAndRevokesDeviceTrust(t *testing.T) {
 	config := testConfig()
@@ -34,26 +63,33 @@ func TestPairingHTTPFlowIssuesRedeemsRotatesAndRevokesDeviceTrust(t *testing.T) 
 		t.Fatalf("pairing credential = %#v", credential)
 	}
 	redeemPairingCode(t, status.DeviceHubAddress, issued.Code, pairing.ProtocolVersion, http.StatusUnauthorized)
-	if got := deviceHealthStatus(t, status.DeviceHubAddress, credential.DeviceID, credential.Token); got != http.StatusOK {
+	if got := deviceHealthStatus(t, status.DeviceHubAddress, credential.DeviceID, "ZGV2aWNlLXB1YmxpYy1rZXktbWF0ZXJpYWw", pairing.ProtocolVersion, credential.Token); got != http.StatusOK {
 		t.Fatalf("paired Device health = %d, want 200", got)
 	}
-	if got := deviceHealthStatus(t, status.DeviceHubAddress, credential.DeviceID, config.Management.AdminToken); got != http.StatusUnauthorized {
+	if got := deviceHealthStatus(t, status.DeviceHubAddress, credential.DeviceID, "ZGlmZmVyZW50LWRldmljZS1wdWJsaWMta2V5", pairing.ProtocolVersion, credential.Token); got != http.StatusUnauthorized {
+		t.Fatalf("wrong device identity = %d, want 401", got)
+	}
+	if got := deviceHealthStatus(t, status.DeviceHubAddress, credential.DeviceID, "ZGV2aWNlLXB1YmxpYy1rZXktbWF0ZXJpYWw", pairing.ProtocolVersion+1, credential.Token); got != http.StatusUnauthorized {
+		t.Fatalf("wrong device protocol = %d, want 401", got)
+	}
+	if got := deviceHealthStatus(t, status.DeviceHubAddress, credential.DeviceID, "ZGV2aWNlLXB1YmxpYy1rZXktbWF0ZXJpYWw", pairing.ProtocolVersion, config.Management.AdminToken); got != http.StatusUnauthorized {
 		t.Fatalf("management token on Device Hub = %d, want 401", got)
 	}
 
-	rotated := rotateDeviceToken(t, client, status.ManagementAddress, credential.DeviceID, session, csrf)
+	rotationCode := rotateDeviceToken(t, client, status.ManagementAddress, credential.DeviceID, session, csrf)
+	rotated := redeemPairingCode(t, status.DeviceHubAddress, rotationCode.Code, pairing.ProtocolVersion, http.StatusOK)
 	if rotated.Token == "" || rotated.Token == credential.Token {
 		t.Fatal("management rotation did not return one distinct device token")
 	}
-	if got := deviceHealthStatus(t, status.DeviceHubAddress, credential.DeviceID, credential.Token); got != http.StatusUnauthorized {
+	if got := deviceHealthStatus(t, status.DeviceHubAddress, credential.DeviceID, "ZGV2aWNlLXB1YmxpYy1rZXktbWF0ZXJpYWw", pairing.ProtocolVersion, credential.Token); got != http.StatusUnauthorized {
 		t.Fatalf("old token after rotation = %d, want 401", got)
 	}
-	if got := deviceHealthStatus(t, status.DeviceHubAddress, credential.DeviceID, rotated.Token); got != http.StatusOK {
+	if got := deviceHealthStatus(t, status.DeviceHubAddress, credential.DeviceID, "ZGV2aWNlLXB1YmxpYy1rZXktbWF0ZXJpYWw", pairing.ProtocolVersion, rotated.Token); got != http.StatusOK {
 		t.Fatalf("rotated token health = %d, want 200", got)
 	}
 
 	revokeDevice(t, client, status.ManagementAddress, credential.DeviceID, session, csrf)
-	if got := deviceHealthStatus(t, status.DeviceHubAddress, credential.DeviceID, rotated.Token); got != http.StatusUnauthorized {
+	if got := deviceHealthStatus(t, status.DeviceHubAddress, credential.DeviceID, "ZGV2aWNlLXB1YmxpYy1rZXktbWF0ZXJpYWw", pairing.ProtocolVersion, rotated.Token); got != http.StatusUnauthorized {
 		t.Fatalf("revoked token health = %d, want 401", got)
 	}
 
@@ -152,6 +188,39 @@ func TestPairingRedeemRejectsChunkedBodyBeyondDeviceLimit(t *testing.T) {
 	}
 }
 
+func TestPairingHTTPUsesInjectedClockAndFailsClosedOnStoreError(t *testing.T) {
+	clock := &runtimeTestClock{now: time.Date(2026, 8, 13, 8, 0, 0, 0, time.UTC)}
+	store := &failHTTPConsumeStore{MemoryStore: pairing.NewMemoryStore()}
+	config := testConfigWithPairing(clock, store)
+	application, err := companionruntime.New(config)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- application.Run(ctx) }()
+	status := waitForState(t, application, companionruntime.StateReady)
+	client, session, csrf := loginManagement(t, status.ManagementAddress, config.Management.AdminToken)
+
+	expired := issuePairingCode(t, client, status.ManagementAddress, session, csrf)
+	clock.Set(expired.ExpiresAt.Add(time.Nanosecond))
+	redeemPairingCode(t, status.DeviceHubAddress, expired.Code, pairing.ProtocolVersion, http.StatusUnauthorized)
+
+	current := issuePairingCode(t, client, status.ManagementAddress, session, csrf)
+	store.SetFail(true)
+	redeemPairingCode(t, status.DeviceHubAddress, current.Code, pairing.ProtocolVersion, http.StatusServiceUnavailable)
+	store.SetFail(false)
+	credential := redeemPairingCode(t, status.DeviceHubAddress, current.Code, pairing.ProtocolVersion, http.StatusOK)
+	if credential.Token == "" {
+		t.Fatal("store failure returned/consumed the only plaintext credential")
+	}
+
+	cancel()
+	if err = <-done; err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+}
+
 func issuePairingCode(
 	t *testing.T,
 	client *http.Client,
@@ -179,7 +248,7 @@ func issuePairingCode(
 	if err = json.NewDecoder(response.Body).Decode(&issued); err != nil {
 		t.Fatalf("decode pairing code: %v", err)
 	}
-	if len(issued.Code) != 6 || time.Until(issued.ExpiresAt) <= 0 {
+	if len(issued.Code) != 6 || issued.ExpiresAt.IsZero() {
 		t.Fatalf("issued code = %#v", issued)
 	}
 	return issued
@@ -229,7 +298,7 @@ func rotateDeviceToken(
 	deviceID string,
 	session *http.Cookie,
 	csrf string,
-) pairing.Credential {
+) pairing.IssuedCode {
 	t.Helper()
 	request, err := http.NewRequest(
 		http.MethodPost,
@@ -250,11 +319,11 @@ func rotateDeviceToken(
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("POST rotate = %d, want 200", response.StatusCode)
 	}
-	var credential pairing.Credential
-	if err = json.NewDecoder(response.Body).Decode(&credential); err != nil {
-		t.Fatalf("decode rotated credential: %v", err)
+	var issued pairing.IssuedCode
+	if err = json.NewDecoder(response.Body).Decode(&issued); err != nil {
+		t.Fatalf("decode rotation code: %v", err)
 	}
-	return credential
+	return issued
 }
 
 func revokeDevice(
@@ -287,13 +356,22 @@ func revokeDevice(
 	}
 }
 
-func deviceHealthStatus(t *testing.T, address string, deviceID string, token string) int {
+func deviceHealthStatus(
+	t *testing.T,
+	address string,
+	deviceID string,
+	deviceIdentity string,
+	protocolVersion int,
+	token string,
+) int {
 	t.Helper()
 	request, err := http.NewRequest(http.MethodGet, "http://"+address+"/api/v1/device/health", nil)
 	if err != nil {
 		t.Fatalf("NewRequest(health) error = %v", err)
 	}
 	request.Header.Set("X-Device-ID", deviceID)
+	request.Header.Set("X-Device-Identity", deviceIdentity)
+	request.Header.Set("X-Protocol-Version", strconv.Itoa(protocolVersion))
 	request.Header.Set("Authorization", "Bearer "+token)
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {

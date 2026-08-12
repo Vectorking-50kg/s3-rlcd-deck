@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -54,8 +55,8 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	)
 	dataDirectory := flags.String(
 		"data-directory",
-		defaultDataDirectory(),
-		"protected directory for Companion identity and revocable device trust",
+		"",
+		"protected directory for Companion identity and revocable device trust (defaults to the platform user-config directory)",
 	)
 	if err := flags.Parse(arguments); err != nil {
 		return 2
@@ -73,13 +74,23 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "cannot configure Companion: %s is required\n", managementTokenEnvironment)
 		return 2
 	}
+	resolvedDataDirectory := *dataDirectory
+	if resolvedDataDirectory == "" {
+		var directoryErr error
+		resolvedDataDirectory, directoryErr = defaultDataDirectory()
+		if directoryErr != nil {
+			fmt.Fprintf(stderr, "cannot locate the Companion data directory: %v\n", directoryErr)
+			return 2
+		}
+	}
 
-	store, err := pairing.OpenFileStore(filepath.Join(*dataDirectory, "pairing.json"))
+	store, err := pairing.OpenFileStore(filepath.Join(resolvedDataDirectory, "pairing.json"))
 	if err != nil {
 		fmt.Fprintf(stderr, "cannot open pairing trust: %v\n", err)
 		return 2
 	}
-	identity, err := deviceidentity.LoadOrCreate(filepath.Join(*dataDirectory, "device-hub-identity.json"))
+	defer store.Close()
+	identity, err := deviceidentity.LoadOrCreate(filepath.Join(resolvedDataDirectory, "device-hub-identity.json"))
 	if err != nil {
 		fmt.Fprintf(stderr, "cannot load Device Hub identity: %v\n", err)
 		return 2
@@ -118,10 +129,10 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	return 0
 }
 
-func defaultDataDirectory() string {
+func defaultDataDirectory() (string, error) {
 	base, err := os.UserConfigDir()
 	if err != nil || base == "" {
-		return ".s3deck-companion"
+		return "", errors.Join(errors.New("user configuration directory is unavailable"), err)
 	}
-	return filepath.Join(base, "s3-rlcd-deck")
+	return filepath.Join(base, "s3-rlcd-deck"), nil
 }

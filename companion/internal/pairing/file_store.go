@@ -8,10 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"sync"
 	"time"
 
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/protectedfile"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/protocol"
 )
 
@@ -38,6 +38,7 @@ type FileStore struct {
 	mu    sync.RWMutex
 	path  string
 	state fileStoreState
+	lock  *protectedfile.Lock
 }
 
 func OpenFileStore(path string) (*FileStore, error) {
@@ -46,12 +47,16 @@ func OpenFileStore(path string) (*FileStore, error) {
 	}
 	path = filepath.Clean(path)
 	parent := filepath.Dir(path)
-	if err := os.MkdirAll(parent, 0o700); err != nil {
-		return nil, fmt.Errorf("create pairing store directory: %w", err)
+	lock, err := protectedfile.AcquireDirectoryLock(parent, ".pairing.lock")
+	if err != nil {
+		return nil, err
 	}
-	if err := os.Chmod(parent, 0o700); err != nil {
-		return nil, fmt.Errorf("protect pairing store directory: %w", err)
-	}
+	closeLock := true
+	defer func() {
+		if closeLock {
+			_ = lock.Close()
+		}
+	}()
 	state := emptyFileStoreState()
 	info, err := os.Lstat(path)
 	switch {
@@ -63,31 +68,69 @@ func OpenFileStore(path string) (*FileStore, error) {
 	case !info.Mode().IsRegular():
 		return nil, errors.New("pairing store must be a regular file")
 	default:
+		if err = protectedfile.EnsurePrivateFile(path); err != nil {
+			return nil, err
+		}
 		state, err = readFileStore(path)
 		if err != nil {
 			return nil, err
 		}
 	}
-	return &FileStore{path: path, state: state}, nil
+	closeLock = false
+	return &FileStore{path: path, state: state, lock: lock}, nil
+}
+
+func (store *FileStore) Close() error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.lock == nil {
+		return nil
+	}
+	err := store.lock.Close()
+	store.lock = nil
+	return err
 }
 
 func (store *FileStore) SaveCode(ctx context.Context, code StoredCode) error {
 	return store.update(ctx, func(state *fileStoreState) error {
-		for key, existing := range state.Codes {
-			if !code.IssuedAt.Before(existing.ExpiresAt) {
-				delete(state.Codes, key)
-			}
+		if err := saveFileCode(state, code); err != nil {
+			return err
 		}
-		if _, found := state.Codes[code.Verifier]; found {
-			return ErrCodeConflict
-		}
-		if len(state.Codes) >= maxActiveCodes {
-			return errors.New("active pairing code capacity reached")
-		}
-		state.Codes[code.Verifier] = code
 		appendFileAudit(state, "pairing_code_issued", "success", "", code.IssuedAt)
 		return nil
 	})
+}
+
+func (store *FileStore) SaveRotationCode(ctx context.Context, code StoredCode) error {
+	return store.update(ctx, func(state *fileStoreState) error {
+		if code.DeviceID == "" {
+			return ErrInvalidRequest
+		}
+		if _, found := state.Trusts[code.DeviceID]; !found {
+			return ErrTrustNotFound
+		}
+		if err := saveFileCode(state, code); err != nil {
+			return err
+		}
+		appendFileAudit(state, "device_token_rotation_code_issued", "success", code.DeviceID, code.IssuedAt)
+		return nil
+	})
+}
+
+func saveFileCode(state *fileStoreState, code StoredCode) error {
+	for key, existing := range state.Codes {
+		if !code.IssuedAt.Before(existing.ExpiresAt) {
+			delete(state.Codes, key)
+		}
+	}
+	if _, found := state.Codes[code.Verifier]; found {
+		return ErrCodeConflict
+	}
+	if len(state.Codes) >= maxActiveCodes {
+		return errors.New("active pairing code capacity reached")
+	}
+	state.Codes[code.Verifier] = code
+	return nil
 }
 
 func (store *FileStore) ConsumeCode(
@@ -107,6 +150,16 @@ func (store *FileStore) ConsumeCode(
 		if _, exists := state.Trusts[trust.DeviceID]; !exists && len(state.Trusts) >= maxStoredTrusts {
 			return errors.New("device trust capacity reached")
 		}
+		if code.DeviceID != "" {
+			existing, exists := state.Trusts[code.DeviceID]
+			if !exists || trust.DeviceID != code.DeviceID ||
+				trust.DeviceIdentityVerifier != existing.DeviceIdentityVerifier ||
+				trust.ProtocolVersion != existing.ProtocolVersion {
+				return ErrCodeUnavailable
+			}
+			trust.CreatedAt = existing.CreatedAt
+			trust.RotatedAt = now
+		}
 		delete(state.Codes, codeVerifier)
 		state.Trusts[trust.DeviceID] = trust
 		appendFileAudit(state, "pairing_redeem", "success", trust.DeviceID, now)
@@ -125,25 +178,6 @@ func (store *FileStore) LookupTrust(ctx context.Context, deviceID string) (Store
 		return StoredTrust{}, ErrTrustNotFound
 	}
 	return trust, nil
-}
-
-func (store *FileStore) RotateTrust(
-	ctx context.Context,
-	deviceID string,
-	tokenVerifier string,
-	now time.Time,
-) error {
-	return store.update(ctx, func(state *fileStoreState) error {
-		trust, found := state.Trusts[deviceID]
-		if !found {
-			return ErrTrustNotFound
-		}
-		trust.TokenVerifier = tokenVerifier
-		trust.RotatedAt = now
-		state.Trusts[deviceID] = trust
-		appendFileAudit(state, "device_token_rotated", "success", deviceID, now)
-		return nil
-	})
 }
 
 func (store *FileStore) RevokeTrust(ctx context.Context, deviceID string, now time.Time) error {
@@ -166,6 +200,9 @@ func (store *FileStore) update(
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	if store.lock == nil {
+		return errors.New("pairing store is closed")
+	}
 	next := cloneFileStoreState(store.state)
 	if err := mutate(&next); err != nil {
 		return err
@@ -242,7 +279,8 @@ func validateFileStoreState(state fileStoreState) error {
 	}
 	for key, code := range state.Codes {
 		if key != code.Verifier || !verifierPattern.MatchString(key) || code.IssuedAt.IsZero() ||
-			!code.ExpiresAt.After(code.IssuedAt) {
+			!code.ExpiresAt.After(code.IssuedAt) ||
+			(code.DeviceID != "" && !deviceIDPattern.MatchString(code.DeviceID)) {
 			return errors.New("invalid stored pairing code")
 		}
 	}
@@ -291,45 +329,5 @@ func writeFileStore(path string, state fileStoreState) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("encode pairing store: %w", err)
 	}
-	parent := filepath.Dir(path)
-	temporary, err := os.CreateTemp(parent, ".pairing-*.tmp")
-	if err != nil {
-		return false, fmt.Errorf("create pairing store transaction: %w", err)
-	}
-	temporaryPath := temporary.Name()
-	removeTemporary := true
-	defer func() {
-		_ = temporary.Close()
-		if removeTemporary {
-			_ = os.Remove(temporaryPath)
-		}
-	}()
-	if err = temporary.Chmod(0o600); err == nil {
-		_, err = temporary.Write(contents)
-	}
-	if err == nil {
-		err = temporary.Sync()
-	}
-	if closeErr := temporary.Close(); err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		return false, fmt.Errorf("write pairing store transaction: %w", err)
-	}
-	if err = os.Rename(temporaryPath, path); err != nil {
-		return false, fmt.Errorf("commit pairing store transaction: %w", err)
-	}
-	removeTemporary = false
-	if runtime.GOOS != "windows" {
-		directory, openErr := os.Open(parent)
-		if openErr != nil {
-			return true, fmt.Errorf("open pairing store directory after commit: %w", openErr)
-		}
-		syncErr := directory.Sync()
-		closeErr := directory.Close()
-		if syncErr != nil || closeErr != nil {
-			return true, fmt.Errorf("sync pairing store directory after commit: %w", errors.Join(syncErr, closeErr))
-		}
-	}
-	return true, nil
+	return protectedfile.Replace(path, contents)
 }

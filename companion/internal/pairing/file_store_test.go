@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -55,15 +56,59 @@ func TestFileStorePersistsOnlyVerifiersAcrossRestart(t *testing.T) {
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("store permissions = %o, want 600", info.Mode().Perm())
 	}
+	if err = store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
 
 	reopened, err := pairing.OpenFileStore(path)
 	if err != nil {
 		t.Fatalf("reopen FileStore error = %v", err)
 	}
 	restarted := newService(t, clock, reopened, &fakeRandom{})
-	valid, err := restarted.Verify(context.Background(), request.DeviceID, credential.Token)
+	valid, err := restarted.Verify(context.Background(), authentication(request, credential.Token))
 	if err != nil || !valid {
 		t.Fatalf("Verify() after restart = %t, %v; want true", valid, err)
+	}
+}
+
+func TestFileStoreExclusivelyOwnsItsDataDirectory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pairing.json")
+	first, err := pairing.OpenFileStore(path)
+	if err != nil {
+		t.Fatalf("OpenFileStore(first) error = %v", err)
+	}
+	defer first.Close()
+	if _, err = pairing.OpenFileStore(path); err == nil {
+		t.Fatal("OpenFileStore(second) error = nil, stale instances could overwrite revocation")
+	}
+	if err = first.Close(); err != nil {
+		t.Fatalf("Close(first) error = %v", err)
+	}
+	second, err := pairing.OpenFileStore(path)
+	if err != nil {
+		t.Fatalf("OpenFileStore(after close) error = %v", err)
+	}
+	second.Close()
+}
+
+func TestFileStoreRepairsExistingUnixPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows protection is verified through the DACL adapter")
+	}
+	directory := t.TempDir()
+	path := filepath.Join(directory, "pairing.json")
+	contents := []byte(`{"schema_version":1,"codes":{},"trusts":{},"audit":[]}`)
+	if err := os.WriteFile(path, contents, 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	store, err := pairing.OpenFileStore(path)
+	if err != nil {
+		t.Fatalf("OpenFileStore() error = %v", err)
+	}
+	defer store.Close()
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("repaired mode = %o, %v; want 600", info.Mode().Perm(), err)
 	}
 }
 

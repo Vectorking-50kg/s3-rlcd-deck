@@ -96,7 +96,7 @@ func (application *Runtime) handleIssuePairingCode(response http.ResponseWriter,
 }
 
 func (application *Runtime) handleRotateDeviceToken(response http.ResponseWriter, request *http.Request) {
-	credential, err := application.pairing.Rotate(request.Context(), request.PathValue("deviceID"))
+	issued, err := application.pairing.IssueRotation(request.Context(), request.PathValue("deviceID"))
 	if err != nil {
 		if errors.Is(err, pairing.ErrTrustNotFound) || errors.Is(err, pairing.ErrInvalidRequest) {
 			http.Error(response, "device not found", http.StatusNotFound)
@@ -105,7 +105,7 @@ func (application *Runtime) handleRotateDeviceToken(response http.ResponseWriter
 		http.Error(response, "device token rotation unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	writeManagementJSON(response, credential)
+	writeManagementJSON(response, issued)
 }
 
 func (application *Runtime) handleRevokeDevice(response http.ResponseWriter, request *http.Request) {

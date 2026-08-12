@@ -50,9 +50,9 @@ type Random interface {
 
 type Store interface {
 	SaveCode(context.Context, StoredCode) error
+	SaveRotationCode(context.Context, StoredCode) error
 	ConsumeCode(context.Context, string, time.Time, StoredTrust) error
 	LookupTrust(context.Context, string) (StoredTrust, error)
-	RotateTrust(context.Context, string, string, time.Time) error
 	RevokeTrust(context.Context, string, time.Time) error
 }
 
@@ -106,6 +106,7 @@ type Credential struct {
 
 type StoredCode struct {
 	Verifier  string    `json:"verifier"`
+	DeviceID  string    `json:"device_id,omitempty"`
 	IssuedAt  time.Time `json:"issued_at"`
 	ExpiresAt time.Time `json:"expires_at"`
 }
@@ -117,6 +118,13 @@ type StoredTrust struct {
 	ProtocolVersion        int       `json:"protocol_version"`
 	CreatedAt              time.Time `json:"created_at"`
 	RotatedAt              time.Time `json:"rotated_at,omitempty"`
+}
+
+type Authentication struct {
+	DeviceID        string
+	Token           string
+	DeviceIdentity  string
+	ProtocolVersion int
 }
 
 type systemClock struct{}
@@ -171,6 +179,26 @@ func New(config Config) (*Service, error) {
 }
 
 func (service *Service) Issue(ctx context.Context) (IssuedCode, error) {
+	return service.issueCode(ctx, "pairing_code_issued", func(code StoredCode) error {
+		return service.store.SaveCode(ctx, code)
+	})
+}
+
+func (service *Service) IssueRotation(ctx context.Context, deviceID string) (IssuedCode, error) {
+	if !deviceIDPattern.MatchString(deviceID) {
+		return IssuedCode{}, ErrInvalidRequest
+	}
+	return service.issueCode(ctx, "device_token_rotation_code_issued", func(code StoredCode) error {
+		code.DeviceID = deviceID
+		return service.store.SaveRotationCode(ctx, code)
+	})
+}
+
+func (service *Service) issueCode(
+	ctx context.Context,
+	auditAction string,
+	save func(StoredCode) error,
+) (IssuedCode, error) {
 	for range maxCodeCollisions {
 		number, err := service.random.Number(pairingCodeSpace)
 		if err != nil || number < 0 || number >= pairingCodeSpace {
@@ -179,13 +207,13 @@ func (service *Service) Issue(ctx context.Context) (IssuedCode, error) {
 		code := fmt.Sprintf("%06d", number)
 		now := service.clock.Now().UTC()
 		issued := IssuedCode{Code: code, ExpiresAt: now.Add(service.codeTTL)}
-		err = service.store.SaveCode(ctx, StoredCode{
+		err = save(StoredCode{
 			Verifier:  verifier(code),
 			IssuedAt:  now,
 			ExpiresAt: issued.ExpiresAt,
 		})
 		if err == nil {
-			service.audit("pairing_code_issued", "success", "", now)
+			service.audit(auditAction, "success", "", now)
 			return issued, nil
 		}
 		if !errors.Is(err, ErrCodeConflict) {
@@ -230,46 +258,36 @@ func (service *Service) Redeem(ctx context.Context, request RedeemRequest) (Cred
 	}, nil
 }
 
-func (service *Service) Verify(ctx context.Context, deviceID string, token string) (bool, error) {
-	if !deviceIDPattern.MatchString(deviceID) || token == "" {
+func (service *Service) Verify(ctx context.Context, authentication Authentication) (bool, error) {
+	if !deviceIDPattern.MatchString(authentication.DeviceID) || authentication.Token == "" ||
+		authentication.ProtocolVersion != ProtocolVersion {
 		return false, nil
 	}
-	trust, err := service.store.LookupTrust(ctx, deviceID)
+	identity, err := base64.RawURLEncoding.DecodeString(authentication.DeviceIdentity)
+	if err != nil || len(identity) < 16 || len(identity) > 512 {
+		return false, nil
+	}
+	trust, err := service.store.LookupTrust(ctx, authentication.DeviceID)
 	if errors.Is(err, ErrTrustNotFound) {
 		return false, nil
 	}
 	if err != nil {
 		return false, fmt.Errorf("lookup device trust: %w", err)
 	}
-	expected, err := hex.DecodeString(trust.TokenVerifier)
-	if err != nil || len(expected) != sha256.Size {
+	expectedToken, err := decodeVerifier(trust.TokenVerifier)
+	if err != nil {
 		return false, errors.New("stored token verifier is invalid")
 	}
-	actual := sha256.Sum256([]byte(token))
-	return subtle.ConstantTimeCompare(expected, actual[:]) == 1, nil
-}
-
-func (service *Service) Rotate(ctx context.Context, deviceID string) (Credential, error) {
-	if !deviceIDPattern.MatchString(deviceID) {
-		return Credential{}, ErrInvalidRequest
+	expectedIdentity, err := decodeVerifier(trust.DeviceIdentityVerifier)
+	if err != nil {
+		return false, errors.New("stored device identity verifier is invalid")
 	}
-	tokenBytes, err := service.random.Bytes(deviceTokenBytes)
-	if err != nil || len(tokenBytes) != deviceTokenBytes {
-		return Credential{}, errors.New("generate device token")
-	}
-	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
-	now := service.clock.Now().UTC()
-	if err = service.store.RotateTrust(ctx, deviceID, verifier(token), now); err != nil {
-		service.audit("device_token_rotated", "rejected", deviceID, now)
-		return Credential{}, fmt.Errorf("rotate device trust: %w", err)
-	}
-	service.audit("device_token_rotated", "success", deviceID, now)
-	return Credential{
-		DeviceID:               deviceID,
-		Token:                  token,
-		CertificateFingerprint: service.fingerprint,
-		ProtocolVersion:        ProtocolVersion,
-	}, nil
+	actualToken := sha256.Sum256([]byte(authentication.Token))
+	actualIdentity := sha256.Sum256(identity)
+	tokenMatches := subtle.ConstantTimeCompare(expectedToken, actualToken[:])
+	identityMatches := subtle.ConstantTimeCompare(expectedIdentity, actualIdentity[:])
+	protocolMatches := subtle.ConstantTimeEq(int32(trust.ProtocolVersion), int32(authentication.ProtocolVersion))
+	return tokenMatches&identityMatches&protocolMatches == 1, nil
 }
 
 func (service *Service) Revoke(ctx context.Context, deviceID string) error {
@@ -304,6 +322,14 @@ func verifier(secret string) string { return verifierBytes([]byte(secret)) }
 func verifierBytes(secret []byte) string {
 	digest := sha256.Sum256(secret)
 	return hex.EncodeToString(digest[:])
+}
+
+func decodeVerifier(encoded string) ([]byte, error) {
+	decoded, err := hex.DecodeString(encoded)
+	if err != nil || len(decoded) != sha256.Size {
+		return nil, errors.New("invalid verifier")
+	}
+	return decoded, nil
 }
 
 func (service *Service) audit(action string, outcome string, deviceID string, occurredAt time.Time) {

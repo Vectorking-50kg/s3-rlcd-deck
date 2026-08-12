@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/protectedfile"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/protocol"
 )
 
@@ -44,12 +45,11 @@ func LoadOrCreate(path string) (*Identity, error) {
 	}
 	path = filepath.Clean(path)
 	parent := filepath.Dir(path)
-	if err := os.MkdirAll(parent, 0o700); err != nil {
-		return nil, fmt.Errorf("create device identity directory: %w", err)
+	lock, err := protectedfile.AcquireDirectoryLock(parent, ".identity.lock")
+	if err != nil {
+		return nil, err
 	}
-	if err := os.Chmod(parent, 0o700); err != nil {
-		return nil, fmt.Errorf("protect device identity directory: %w", err)
-	}
+	defer lock.Close()
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		identity, generateErr := generate()
@@ -66,6 +66,9 @@ func LoadOrCreate(path string) (*Identity, error) {
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return nil, errors.New("device identity must be a regular non-symlink file")
+	}
+	if err = protectedfile.EnsurePrivateFile(path); err != nil {
+		return nil, err
 	}
 	if info.Size() > maxIdentityBytes {
 		return nil, errors.New("device identity file is too large")
@@ -160,34 +163,6 @@ func write(path string, identity *Identity) error {
 	if err != nil {
 		return fmt.Errorf("encode device identity: %w", err)
 	}
-	parent := filepath.Dir(path)
-	temporary, err := os.CreateTemp(parent, ".identity-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create device identity transaction: %w", err)
-	}
-	temporaryPath := temporary.Name()
-	removeTemporary := true
-	defer func() {
-		_ = temporary.Close()
-		if removeTemporary {
-			_ = os.Remove(temporaryPath)
-		}
-	}()
-	if err = temporary.Chmod(0o600); err == nil {
-		_, err = temporary.Write(contents)
-	}
-	if err == nil {
-		err = temporary.Sync()
-	}
-	if closeErr := temporary.Close(); err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		return fmt.Errorf("write device identity transaction: %w", err)
-	}
-	if err = os.Rename(temporaryPath, path); err != nil {
-		return fmt.Errorf("commit device identity transaction: %w", err)
-	}
-	removeTemporary = false
-	return nil
+	_, err = protectedfile.Replace(path, contents)
+	return err
 }

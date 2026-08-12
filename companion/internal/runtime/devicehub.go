@@ -119,11 +119,18 @@ func newDeviceHubGateway(config DeviceHubConfig, next http.Handler) http.Handler
 
 func (application *Runtime) handleDeviceHealth(response http.ResponseWriter, request *http.Request) {
 	deviceID := request.Header.Get("X-Device-ID")
+	deviceIdentity := request.Header.Get("X-Device-Identity")
+	protocolVersion, protocolErr := strconv.Atoi(request.Header.Get("X-Protocol-Version"))
 	token, present := bearerToken(request)
 	valid := false
 	var verifyErr error
-	if present {
-		valid, verifyErr = application.pairing.Verify(request.Context(), deviceID, token)
+	if present && protocolErr == nil {
+		valid, verifyErr = application.pairing.Verify(request.Context(), pairing.Authentication{
+			DeviceID:        deviceID,
+			Token:           token,
+			DeviceIdentity:  deviceIdentity,
+			ProtocolVersion: protocolVersion,
+		})
 	}
 	if verifyErr != nil {
 		http.Error(response, "device trust unavailable", http.StatusServiceUnavailable)

@@ -6,7 +6,9 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,12 +16,38 @@ import (
 	companionruntime "github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/runtime"
 )
 
+type runtimeTestClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (clock *runtimeTestClock) Now() time.Time {
+	clock.mu.Lock()
+	defer clock.mu.Unlock()
+	return clock.now
+}
+
+func (clock *runtimeTestClock) Set(now time.Time) {
+	clock.mu.Lock()
+	defer clock.mu.Unlock()
+	clock.now = now
+}
+
 func TestRuntimeRejectsNonLoopbackManagementAddress(t *testing.T) {
 	config := testConfig()
 	config.Management.Address = "0.0.0.0:7777"
 	_, err := companionruntime.New(config)
 	if !errors.Is(err, companionruntime.ErrManagementAddressNotLoopback) {
 		t.Fatalf("New() error = %v, want ErrManagementAddressNotLoopback", err)
+	}
+}
+
+func TestRuntimeRejectsNonLoopbackDeviceHubUntilPinnedTLSExists(t *testing.T) {
+	config := testConfig()
+	config.DeviceHub.Address = "0.0.0.0:7780"
+	_, err := companionruntime.New(config)
+	if !errors.Is(err, companionruntime.ErrDeviceHubTLSRequired) {
+		t.Fatalf("New() error = %v, want ErrDeviceHubTLSRequired", err)
 	}
 }
 
@@ -173,6 +201,8 @@ func TestRuntimeServesDeviceHubOnAnIndependentAuthenticatedListener(t *testing.T
 		t.Fatalf("NewRequest() error = %v", err)
 	}
 	request.Header.Set("X-Device-ID", credential.DeviceID)
+	request.Header.Set("X-Device-Identity", "ZGV2aWNlLXB1YmxpYy1rZXktbWF0ZXJpYWw")
+	request.Header.Set("X-Protocol-Version", strconv.Itoa(pairing.ProtocolVersion))
 	request.Header.Set("Authorization", "Bearer "+credential.Token)
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
@@ -209,6 +239,8 @@ func TestRuntimeServesDeviceHubOnAnIndependentAuthenticatedListener(t *testing.T
 		t.Fatalf("NewRequest() error = %v", err)
 	}
 	managementRouteOnDevice.Header.Set("X-Device-ID", credential.DeviceID)
+	managementRouteOnDevice.Header.Set("X-Device-Identity", "ZGV2aWNlLXB1YmxpYy1rZXktbWF0ZXJpYWw")
+	managementRouteOnDevice.Header.Set("X-Protocol-Version", strconv.Itoa(pairing.ProtocolVersion))
 	managementRouteOnDevice.Header.Set("Authorization", "Bearer "+credential.Token)
 	wrongListenerResponse, err = http.DefaultClient.Do(managementRouteOnDevice)
 	if err != nil {
@@ -233,6 +265,8 @@ func TestRuntimeServesDeviceHubOnAnIndependentAuthenticatedListener(t *testing.T
 			}
 			if token != "" {
 				unauthorizedRequest.Header.Set("X-Device-ID", credential.DeviceID)
+				unauthorizedRequest.Header.Set("X-Device-Identity", "ZGV2aWNlLXB1YmxpYy1rZXktbWF0ZXJpYWw")
+				unauthorizedRequest.Header.Set("X-Protocol-Version", strconv.Itoa(pairing.ProtocolVersion))
 				unauthorizedRequest.Header.Set("Authorization", "Bearer "+token)
 			}
 			unauthorizedResponse, requestErr := http.DefaultClient.Do(unauthorizedRequest)
@@ -253,8 +287,14 @@ func TestRuntimeServesDeviceHubOnAnIndependentAuthenticatedListener(t *testing.T
 }
 
 func testConfig() companionruntime.Config {
+	clock := &runtimeTestClock{now: time.Date(2026, 8, 13, 8, 0, 0, 0, time.UTC)}
+	return testConfigWithPairing(clock, pairing.NewMemoryStore())
+}
+
+func testConfigWithPairing(clock pairing.Clock, store pairing.Store) companionruntime.Config {
 	pairingService, err := pairing.New(pairing.Config{
-		Store:                  pairing.NewMemoryStore(),
+		Clock:                  clock,
+		Store:                  store,
 		CertificateFingerprint: testCertificateFingerprint,
 	})
 	if err != nil {

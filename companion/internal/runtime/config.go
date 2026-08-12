@@ -18,6 +18,7 @@ const (
 
 var (
 	ErrManagementAddressNotLoopback = errors.New("management address must be loopback unless LAN management is explicitly enabled")
+	ErrDeviceHubTLSRequired         = errors.New("Device Hub must remain loopback-only until pinned TLS transport is configured")
 )
 
 type Config struct {
@@ -98,8 +99,12 @@ func normalizeConfig(config Config) (Config, error) {
 			return Config{}, fmt.Errorf("invalid management allowed origin: %w", err)
 		}
 	}
-	if _, err = addressIP(config.DeviceHub.Address); err != nil {
+	deviceHubIP, err := addressIP(config.DeviceHub.Address)
+	if err != nil {
 		return Config{}, fmt.Errorf("invalid Device Hub address: %w", err)
+	}
+	if !deviceHubIP.IsLoopback() {
+		return Config{}, ErrDeviceHubTLSRequired
 	}
 	config.DeviceHub.Limits = normalizeDeviceHubLimits(config.DeviceHub.Limits)
 	config.Management.Limits = normalizeManagementLimits(config.Management.Limits)
