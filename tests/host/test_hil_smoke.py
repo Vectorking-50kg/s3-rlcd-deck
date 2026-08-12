@@ -402,7 +402,7 @@ with tempfile.TemporaryDirectory() as temporary_directory:
         "commands": [
             ["tools/test_host.sh"],
             ["tools/idf.sh", "dev", "build"],
-            ["tools/idf.sh", "dev", "-p", "/dev/fakeDeck", "app-flash"],
+            ["tools/hil_app_flash.py", "--port", "/dev/fakeDeck"],
         ],
         "duration_seconds": 7200.0,
         "port": "/dev/fakeDeck",

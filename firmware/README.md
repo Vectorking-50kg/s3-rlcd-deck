@@ -200,12 +200,14 @@ non-destructive plan before starting:
 The port may be supplied with `--port`; otherwise the harness sends a read-only identity
 handshake to candidate Espressif serial devices and requires exactly one response identifying
 `s3-rlcd-deck`. Firmware older than this harness does not implement that handshake: run
-`discover` while the new development firmware is active, or supply the inspected port
-explicitly for the initial app-only flash. If automatic download does not work on the board,
-put the verified Deck in ROM download mode immediately before the explicit-port `run`.
-The default run executes Host tests, the development build, and only ESP-IDF's `app-flash`
-target before monitoring. It never requests whole-chip erase, eFuse changes,
-bootloader/partition writes, or irreversible security configuration.
+`discover` while the new development firmware is active, or supply the physically inspected
+port explicitly for the initial app-only flash. The default run executes Host tests and the
+development build, resolves the exact USB-JTAG adapter serial from that port, reads the Deck's
+partition table without modifying it, and requires an exact match with the generated table.
+Only then does it program and verify the same image in both OTA application slots. Writing both
+slots guarantees the monitored image is current regardless of the OTA selection record. It
+never requests whole-chip erase, eFuse changes, bootloader/partition/NVS writes, or irreversible
+security configuration.
 
 During the run, physically press KEY at least once and long-press BOOT at least once when
 prompted. The harness triggers one Setup session and submits a generated nonexistent open

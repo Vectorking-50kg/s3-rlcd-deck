@@ -107,7 +107,7 @@ def run_plan(port: str, duration_seconds: float) -> dict[str, Any]:
         "commands": [
             ["tools/test_host.sh"],
             ["tools/idf.sh", "dev", "build"],
-            ["tools/idf.sh", "dev", "-p", port, "app-flash"],
+            ["tools/hil_app_flash.py", "--port", port],
         ],
         "duration_seconds": duration_seconds,
         "port": port,
