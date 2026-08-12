@@ -1,6 +1,7 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "duration_seconds": 7200,
+  "heap_warmup_seconds": 60,
   "minimum_display_updates": 120,
   "minimum_peripheral_samples": 6000,
   "require_key_event": true,

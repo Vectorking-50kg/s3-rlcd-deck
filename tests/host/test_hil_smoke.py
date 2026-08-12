@@ -98,11 +98,13 @@ def display_event(event_type: str, completed: int) -> dict[str, object]:
 
 with tempfile.TemporaryDirectory() as temporary_directory:
     default_config = json.loads(DEFAULT_CONFIG.read_text(encoding="utf-8"))
-    assert default_config["schema_version"] == 1
+    assert default_config["schema_version"] == 2
     assert default_config["duration_seconds"] == 7200
+    assert default_config["heap_warmup_seconds"] == 60
     soak_config = json.loads(SOAK_CONFIG.read_text(encoding="utf-8"))
-    assert soak_config["schema_version"] == 1
+    assert soak_config["schema_version"] == 2
     assert soak_config["duration_seconds"] == 86400
+    assert soak_config["heap_warmup_seconds"] == 60
     ignored_result = subprocess.run(
         ["git", "check-ignore", ".hil-results/probe/serial.jsonl"],
         cwd=REPOSITORY_ROOT,
@@ -117,8 +119,9 @@ with tempfile.TemporaryDirectory() as temporary_directory:
     config_path.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "duration_seconds": 7200,
+                "heap_warmup_seconds": 60,
                 "minimum_display_updates": 3,
                 "minimum_peripheral_samples": 3,
                 "require_key_event": True,
@@ -143,7 +146,36 @@ with tempfile.TemporaryDirectory() as temporary_directory:
             },
         ),
         captured(1, display_event("display_ready", 1)),
-        captured(2, peripheral_event(0, 0, 100000, 99000)),
+        captured(2, peripheral_event(0, 0, 120000, 99000)),
+        captured(
+            3,
+            setup_event(
+                session_id=3,
+                wifi_config_state="connection_failed",
+                wifi_has_candidate=True,
+            ),
+        ),
+        captured(
+            4,
+            setup_event(
+                session_id=3,
+                active=False,
+                reason="none",
+                ssid="",
+                wifi_config_state="connection_failed",
+                wifi_has_candidate=True,
+            ),
+        ),
+        captured(
+            5,
+            setup_event(
+                session_id=3,
+                active=False,
+                reason="none",
+                ssid="",
+                wifi_config_state="active",
+            ),
+        ),
         captured(10, setup_event(wifi_config_state="validating", wifi_has_candidate=True)),
         captured(
             20,
@@ -155,6 +187,35 @@ with tempfile.TemporaryDirectory() as temporary_directory:
         captured(
             30,
             setup_event(active=False, reason="none", ssid="", wifi_config_state="active"),
+        ),
+        captured(
+            40,
+            setup_event(
+                session_id=6,
+                wifi_config_state="connection_failed",
+                wifi_has_candidate=True,
+            ),
+        ),
+        captured(
+            41,
+            setup_event(
+                session_id=6,
+                active=False,
+                reason="none",
+                ssid="",
+                wifi_config_state="connection_failed",
+                wifi_has_candidate=True,
+            ),
+        ),
+        captured(
+            42,
+            setup_event(
+                session_id=6,
+                active=False,
+                reason="none",
+                ssid="",
+                wifi_config_state="active",
+            ),
         ),
         captured(60, display_event("display_progress", 10)),
         captured(61, peripheral_event(1, 1, 99500, 98500)),
@@ -190,6 +251,7 @@ with tempfile.TemporaryDirectory() as temporary_directory:
     summary = json.loads((result_directory / "summary.json").read_text(encoding="utf-8"))
     evidence = (result_directory / "serial.jsonl").read_bytes()
     assert summary["status"] == "passed"
+    assert summary["schema_version"] == 2
     assert summary["firmware_commit"] == COMMIT
     assert summary["toolchain_version"] == "ESP-IDF v6.0.2"
     assert summary["duration_seconds"] == 7200
@@ -199,10 +261,15 @@ with tempfile.TemporaryDirectory() as temporary_directory:
     assert summary["i2c_error_count"] == 0
     assert summary["wifi_error_count"] == 1
     assert summary["minimum_free_heap_bytes"] == 98000
-    assert summary["heap_drop_bytes"] == 1000
+    assert summary["initial_free_heap_bytes"] == 120000
+    assert summary["heap_baseline_elapsed_seconds"] == 61
+    assert summary["heap_baseline_free_heap_bytes"] == 99500
+    assert summary["heap_warmup_seconds"] == 60
+    assert summary["heap_drop_bytes"] == 21000
+    assert summary["stabilized_heap_drop_bytes"] == 500
     assert summary["display_updates"] == 19
     assert summary["peripheral_samples"] == 3
-    assert summary["setup_cycles"] == 1
+    assert summary["setup_cycles"] == 3
     assert summary["wifi_failure_recoveries"] == 1
     assert summary["key_event_delta"] == 1
     assert summary["boot_event_delta"] == 1
@@ -213,11 +280,12 @@ with tempfile.TemporaryDirectory() as temporary_directory:
     assert "hunter2" not in evidence.decode("utf-8")
 
     extra_failure_capture = temporary / "extra-failure.jsonl"
-    second_cycle = [
+    runtime_disconnect = [
         captured(
-            100,
+            90,
             setup_event(
                 session_id=5,
+                reason="no_wifi_config",
                 wifi_config_state="connection_failed",
             ),
         ),
@@ -233,7 +301,7 @@ with tempfile.TemporaryDirectory() as temporary_directory:
         ),
     ]
     extra_failure_capture.write_text(
-        "\n".join([*lines[:-2], *second_cycle, *lines[-2:]]) + "\n",
+        "\n".join([*lines[:-2], *runtime_disconnect, *lines[-2:]]) + "\n",
         encoding="utf-8",
     )
     extra_failure_directory = temporary / "extra-failure-result"
@@ -264,6 +332,236 @@ with tempfile.TemporaryDirectory() as temporary_directory:
     assert extra_summary["wifi_error_count"] == 2
     assert any("additional Wi-Fi" in failure for failure in extra_summary["failures"])
 
+    storage_failure_capture = temporary / "storage-failure.jsonl"
+    storage_failure_lines = list(lines)
+    storage_failure_lines[3] = captured(
+        3,
+        setup_event(
+            session_id=3,
+            wifi_config_state="storage_error",
+            error_stage="wifi_load",
+        ),
+    )
+    storage_failure_capture.write_text(
+        "\n".join(storage_failure_lines) + "\n", encoding="utf-8"
+    )
+    storage_failure_directory = temporary / "storage-failure-result"
+    storage_failure = subprocess.run(
+        [
+            sys.executable,
+            str(HARNESS),
+            "replay",
+            "--input-file",
+            str(storage_failure_capture),
+            "--config",
+            str(config_path),
+            "--result-dir",
+            str(storage_failure_directory),
+            "--firmware-commit",
+            COMMIT,
+            "--toolchain-version",
+            "ESP-IDF v6.0.2",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert storage_failure.returncode != 0
+    storage_summary = json.loads(
+        (storage_failure_directory / "summary.json").read_text(encoding="utf-8")
+    )
+    assert storage_summary["wifi_error_count"] == 2
+
+    startup_failure_capture = temporary / "startup-failure.jsonl"
+    startup_failure_lines = list(lines)
+    startup_failure_lines[3] = captured(
+        3,
+        setup_event(
+            session_id=3,
+            reason="no_wifi_config",
+            wifi_config_state="connection_failed",
+            wifi_has_candidate=False,
+        ),
+    )
+    startup_failure_capture.write_text(
+        "\n".join(startup_failure_lines) + "\n", encoding="utf-8"
+    )
+    startup_failure_directory = temporary / "startup-failure-result"
+    startup_failure = subprocess.run(
+        [
+            sys.executable,
+            str(HARNESS),
+            "replay",
+            "--input-file",
+            str(startup_failure_capture),
+            "--config",
+            str(config_path),
+            "--result-dir",
+            str(startup_failure_directory),
+            "--firmware-commit",
+            COMMIT,
+            "--toolchain-version",
+            "ESP-IDF v6.0.2",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert startup_failure.returncode != 0
+    startup_failure_summary = json.loads(
+        (startup_failure_directory / "summary.json").read_text(encoding="utf-8")
+    )
+    assert startup_failure_summary["wifi_error_count"] == 2
+
+    chained_storage_capture = temporary / "chained-storage.jsonl"
+    chained_storage_lines = list(lines)
+    chained_storage_lines.insert(
+        8,
+        captured(
+            21,
+            setup_event(
+                wifi_config_state="storage_error",
+                error_stage="wifi_commit",
+                wifi_has_candidate=True,
+            ),
+        ),
+    )
+    chained_storage_capture.write_text(
+        "\n".join(chained_storage_lines) + "\n", encoding="utf-8"
+    )
+    chained_storage_directory = temporary / "chained-storage-result"
+    chained_storage = subprocess.run(
+        [
+            sys.executable,
+            str(HARNESS),
+            "replay",
+            "--input-file",
+            str(chained_storage_capture),
+            "--config",
+            str(config_path),
+            "--result-dir",
+            str(chained_storage_directory),
+            "--firmware-commit",
+            COMMIT,
+            "--toolchain-version",
+            "ESP-IDF v6.0.2",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert chained_storage.returncode != 0
+    chained_storage_summary = json.loads(
+        (chained_storage_directory / "summary.json").read_text(encoding="utf-8")
+    )
+    assert chained_storage_summary["wifi_error_count"] == 2
+
+    boot_runtime_failure_capture = temporary / "boot-runtime-failure.jsonl"
+    boot_runtime_failure = [
+        captured(
+            90,
+            setup_event(
+                session_id=7,
+                wifi_config_state="active",
+                wifi_has_candidate=True,
+            ),
+        ),
+        captured(
+            100,
+            setup_event(
+                session_id=7,
+                wifi_config_state="connection_failed",
+                wifi_has_candidate=True,
+            ),
+        ),
+        captured(
+            110,
+            setup_event(
+                session_id=7,
+                active=False,
+                reason="none",
+                ssid="",
+                wifi_config_state="active",
+            ),
+        ),
+    ]
+    boot_runtime_failure_capture.write_text(
+        "\n".join([*lines[:-2], *boot_runtime_failure, *lines[-2:]]) + "\n",
+        encoding="utf-8",
+    )
+    boot_runtime_failure_directory = temporary / "boot-runtime-failure-result"
+    boot_runtime_result = subprocess.run(
+        [
+            sys.executable,
+            str(HARNESS),
+            "replay",
+            "--input-file",
+            str(boot_runtime_failure_capture),
+            "--config",
+            str(config_path),
+            "--result-dir",
+            str(boot_runtime_failure_directory),
+            "--firmware-commit",
+            COMMIT,
+            "--toolchain-version",
+            "ESP-IDF v6.0.2",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert boot_runtime_result.returncode != 0
+    boot_runtime_summary = json.loads(
+        (boot_runtime_failure_directory / "summary.json").read_text(encoding="utf-8")
+    )
+    assert boot_runtime_summary["wifi_error_count"] == 2
+
+    missing_baseline_config_path = temporary / "missing-baseline-config.json"
+    missing_baseline_config = json.loads(config_path.read_text(encoding="utf-8"))
+    missing_baseline_config["duration_seconds"] = 30
+    missing_baseline_config["heap_warmup_seconds"] = 20
+    missing_baseline_config_path.write_text(
+        json.dumps(missing_baseline_config), encoding="utf-8"
+    )
+    missing_baseline_capture = temporary / "missing-baseline.jsonl"
+    missing_baseline_lines = [
+        captured(0.4, json.loads(json.loads(lines[0])["line"])),
+        captured(1, display_event("display_ready", 1)),
+        captured(2, peripheral_event(0, 0, 100000, 99000)),
+        captured(30, display_event("display_progress", 10)),
+    ]
+    missing_baseline_capture.write_text(
+        "\n".join(missing_baseline_lines) + "\n", encoding="utf-8"
+    )
+    missing_baseline_directory = temporary / "missing-baseline-result"
+    missing_baseline = subprocess.run(
+        [
+            sys.executable,
+            str(HARNESS),
+            "replay",
+            "--input-file",
+            str(missing_baseline_capture),
+            "--config",
+            str(missing_baseline_config_path),
+            "--result-dir",
+            str(missing_baseline_directory),
+            "--firmware-commit",
+            COMMIT,
+            "--toolchain-version",
+            "ESP-IDF v6.0.2",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert missing_baseline.returncode != 0
+    missing_baseline_summary = json.loads(
+        (missing_baseline_directory / "summary.json").read_text(encoding="utf-8")
+    )
+    assert missing_baseline_summary["heap_baseline_elapsed_seconds"] is None
+    assert missing_baseline_summary["stabilized_heap_drop_bytes"] is None
+    assert any("baseline missing" in failure for failure in missing_baseline_summary["failures"])
+
     invalid_schema_capture = temporary / "invalid-schema.jsonl"
     invalid_schema_lines = list(lines)
     invalid_display = display_event("display_ready", 1)
@@ -274,7 +572,7 @@ with tempfile.TemporaryDirectory() as temporary_directory:
     invalid_schema_lines[2] = captured(2, invalid_peripheral)
     unexpected_field_display = display_event("display_progress", 10)
     unexpected_field_display["password"] = "hunter2"
-    invalid_schema_lines[6] = captured(60, unexpected_field_display)
+    invalid_schema_lines[12] = captured(60, unexpected_field_display)
     invalid_schema_capture.write_text(
         "\n".join(invalid_schema_lines) + "\n", encoding="utf-8"
     )
@@ -415,6 +713,7 @@ with tempfile.TemporaryDirectory() as temporary_directory:
     live_config_path = temporary / "live-config.json"
     live_config = json.loads(config_path.read_text(encoding="utf-8"))
     live_config["duration_seconds"] = 0.1
+    live_config["heap_warmup_seconds"] = 0
     live_config["minimum_display_updates"] = 1
     live_config["minimum_peripheral_samples"] = 2
     live_config_path.write_text(json.dumps(live_config), encoding="utf-8")
@@ -437,11 +736,28 @@ with tempfile.TemporaryDirectory() as temporary_directory:
                     peripheral_event(0, 0, 100000, 99000), separators=(",", ":")
                 ),
                 json.dumps(
+                    setup_event(
+                        active=False,
+                        reason="none",
+                        ssid="",
+                        wifi_config_state="connection_failed",
+                        wifi_has_candidate=True,
+                    ),
+                    separators=(",", ":"),
+                ),
+                json.dumps(
+                    setup_event(
+                        wifi_config_state="connection_failed",
+                        wifi_has_candidate=True,
+                    ),
+                    separators=(",", ":"),
+                ),
+                json.dumps(
                     setup_event(active=False, reason="none", ssid=""),
                     separators=(",", ":"),
                 ),
                 json.dumps(
-                    setup_event(),
+                    setup_event(wifi_config_state="validating"),
                     separators=(",", ":"),
                 ),
                 json.dumps(
@@ -474,7 +790,12 @@ with tempfile.TemporaryDirectory() as temporary_directory:
         "        if os.environ.get('DECK_FAKE_SERIAL_MODE') == 'open_fail': raise SerialException('fake disconnect')\n"
         "        self.timeout = options.get('timeout', 0.01)\n"
         "        self.write_timeout = options.get('write_timeout', 0.01)\n"
-        "        self.lines = [line.encode() for line in pathlib.Path(os.environ['DECK_FAKE_SERIAL_FILE']).read_text().splitlines(True)]\n"
+        "        encoded = [line.encode() for line in pathlib.Path(os.environ['DECK_FAKE_SERIAL_FILE']).read_text().splitlines(True)]\n"
+        "        self.lines = encoded\n"
+        "        if os.environ.get('DECK_FAKE_SERIAL_OVERLONG') == '1':\n"
+        "            self.lines = [b'x' * 4097, encoded[0], *encoded[1:]]\n"
+        "        if os.environ.get('DECK_FAKE_SERIAL_FRAGMENT') == '1':\n"
+        "            self.lines = [part for line in encoded for part in (line[:len(line)//2], line[len(line)//2:])]\n"
         "    def __enter__(self): return self\n"
         "    def __exit__(self, *args): self.close()\n"
         "    def write(self, data):\n"
@@ -588,6 +909,7 @@ with tempfile.TemporaryDirectory() as temporary_directory:
     assert "DECK_WIFI " in writes and " -\n" in writes
 
     del environment["DECK_FAKE_GIT_DIRTY"]
+    environment["DECK_FAKE_SERIAL_FRAGMENT"] = "1"
     clean_result_directory = temporary / "clean-live-result"
     clean_live = subprocess.run(
         [
@@ -614,6 +936,49 @@ with tempfile.TemporaryDirectory() as temporary_directory:
     )
     assert clean_summary["status"] == "passed"
     assert clean_summary["source_dirty"] is False
+    del environment["DECK_FAKE_SERIAL_FRAGMENT"]
+
+    environment["DECK_FAKE_SERIAL_OVERLONG"] = "1"
+    overlong_result_directory = temporary / "overlong-live-result"
+    overlong_live = subprocess.run(
+        [
+            sys.executable,
+            str(HARNESS),
+            "run",
+            "--monitor-only",
+            "--port",
+            "/dev/fakeDeck",
+            "--config",
+            str(live_config_path),
+            "--result-dir",
+            str(overlong_result_directory),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert overlong_live.returncode != 0
+    overlong_summary = json.loads(
+        (overlong_result_directory / "summary.json").read_text(encoding="utf-8")
+    )
+    assert overlong_summary["diagnostic_schema_error_count"] == 1
+    overlong_evidence = [
+        json.loads(line)["line"]
+        for line in (overlong_result_directory / "serial.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines()
+    ]
+    assert overlong_evidence.count("[REDACTED INVALID JSON LINE]") == 1
+    assert not any(
+        line.startswith("{") and json.loads(line).get("type") == "boot_ok"
+        for line in overlong_evidence
+    )
+    assert any(
+        line.startswith("{") and json.loads(line).get("type") == "display_ready"
+        for line in overlong_evidence
+    )
+    del environment["DECK_FAKE_SERIAL_OVERLONG"]
 
     environment["DECK_FAKE_SERIAL_MODE"] = "open_fail"
     failed_result_directory = temporary / "failed-live-result"

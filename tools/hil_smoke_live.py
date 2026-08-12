@@ -11,7 +11,13 @@ import sys
 import time
 from typing import Any, TextIO
 
-from hil_smoke_contract import SmokeFailure, parsed_event, sanitize_line, valid_event_schema
+from hil_smoke_contract import (
+    REDACTED_INVALID_JSON,
+    SmokeFailure,
+    parsed_event,
+    sanitize_line,
+    valid_event_schema,
+)
 
 
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -266,6 +272,8 @@ def monitor_live(
     setup_requested = False
     wifi_failure_submitted = False
     physical_actions_requested = False
+    pending_serial = bytearray()
+    discard_serial_until_newline = False
     missing_ssid = f"DECK-HIL-MISSING-{time.monotonic_ns() & 0xffffffff:08x}"
     wifi_failure_command = f"DECK_WIFI {missing_ssid.encode('ascii').hex()} -\n".encode("ascii")
     try:
@@ -280,59 +288,84 @@ def monitor_live(
                     except (OSError, write_timeout):
                         pass
                     next_ready = now + 0.5
-                raw_line = connection.readline()
-                if not raw_line:
+                serial_fragment = connection.readline()
+                if not serial_fragment:
                     continue
-                decoded = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
-                sanitized, _ = sanitize_line(decoded)
-                _write_capture_line(capture, started, sanitized)
-                event = parsed_event(sanitized)
-                if (
-                    not physical_actions_requested
-                    and event is not None
-                    and event.get("type") == "peripheral_state"
-                    and valid_event_schema(event)
-                ):
-                    requested_actions: list[str] = []
-                    if require_key_event:
-                        requested_actions.append("press KEY at least once")
-                    if require_boot_event:
-                        requested_actions.append(
-                            "press BOOT long enough to register a long press"
-                        )
-                    if requested_actions:
-                        _write_capture_line(
-                            capture, started, "[host] physical actions requested"
-                        )
-                        print(
-                            "Physical HIL action required during the run: "
-                            + "; ".join(requested_actions),
-                            file=sys.stderr,
-                        )
-                    physical_actions_requested = True
-                if event is None or event.get("type") != "setup_state":
-                    continue
-                has_active = event.get("wifi_has_active") is True
-                wifi_active = event.get("wifi_config_state") == "active"
-                if (
-                    event.get("active") is False
-                    and has_active
-                    and wifi_active
-                    and not setup_requested
-                ):
-                    try:
-                        connection.write(b"DECK_SETUP\n")
-                        setup_requested = True
-                    except (OSError, write_timeout):
-                        pass
-                elif event.get("active") is True and has_active and wifi_active:
-                    setup_requested = True
-                    if not wifi_failure_submitted:
+                if discard_serial_until_newline:
+                    newline = serial_fragment.find(b"\n")
+                    if newline < 0:
+                        continue
+                    serial_fragment = serial_fragment[newline + 1 :]
+                    discard_serial_until_newline = False
+                    if not serial_fragment:
+                        continue
+                pending_serial.extend(serial_fragment)
+                while pending_serial:
+                    newline = pending_serial.find(b"\n")
+                    if newline < 0:
+                        if len(pending_serial) > 4096:
+                            pending_serial.clear()
+                            discard_serial_until_newline = True
+                            _write_capture_line(
+                                capture, started, REDACTED_INVALID_JSON
+                            )
+                        break
+                    if newline > 4096:
+                        del pending_serial[: newline + 1]
+                        _write_capture_line(capture, started, REDACTED_INVALID_JSON)
+                        continue
+                    raw_line = bytes(pending_serial[:newline])
+                    del pending_serial[: newline + 1]
+                    decoded = raw_line.rstrip(b"\r").decode("utf-8", errors="replace")
+                    sanitized, _ = sanitize_line(decoded)
+                    _write_capture_line(capture, started, sanitized)
+                    event = parsed_event(sanitized)
+                    if (
+                        not physical_actions_requested
+                        and event is not None
+                        and event.get("type") == "peripheral_state"
+                        and valid_event_schema(event)
+                    ):
+                        requested_actions: list[str] = []
+                        if require_key_event:
+                            requested_actions.append("press KEY at least once")
+                        if require_boot_event:
+                            requested_actions.append(
+                                "press BOOT long enough to register a long press"
+                            )
+                        if requested_actions:
+                            _write_capture_line(
+                                capture, started, "[host] physical actions requested"
+                            )
+                            print(
+                                "Physical HIL action required during the run: "
+                                + "; ".join(requested_actions),
+                                file=sys.stderr,
+                            )
+                        physical_actions_requested = True
+                    if event is None or event.get("type") != "setup_state":
+                        continue
+                    has_active = event.get("wifi_has_active") is True
+                    if (
+                        event.get("active") is False
+                        and has_active
+                        and not setup_requested
+                    ):
                         try:
-                            connection.write(wifi_failure_command)
-                            wifi_failure_submitted = True
+                            connection.write(b"DECK_SETUP\n")
+                            setup_requested = True
                         except (OSError, write_timeout):
                             pass
+                    elif event.get("active") is True and has_active:
+                        setup_requested = True
+                        if not wifi_failure_submitted:
+                            try:
+                                connection.write(wifi_failure_command)
+                                wifi_failure_submitted = True
+                            except (OSError, write_timeout):
+                                pass
+            if pending_serial:
+                _write_capture_line(capture, started, REDACTED_INVALID_JSON)
             _write_capture_line(
                 capture,
                 started,

@@ -210,16 +210,20 @@ never requests whole-chip erase, eFuse changes, bootloader/partition/NVS writes,
 security configuration.
 
 During the run, physically press KEY at least once and long-press BOOT at least once when
-prompted. The harness triggers one Setup session and submits a generated nonexistent open
-network, then requires the previous committed Wi-Fi generation to recover. It never reads,
-prints, sends, or stores the committed Wi-Fi password.
+prompted. The harness enters Setup when necessary, submits one generated nonexistent open
+network even when an older failed candidate is already visible, then requires that newly
+observed validation transaction to fail and the previous committed Wi-Fi generation to recover.
+It never reads, prints, sends, or stores the committed Wi-Fi password.
 
 Results are written beneath the ignored `.hil-results/` directory. `serial.jsonl` contains
 timestamped evidence restricted to an allow-list of structured Deck diagnostics; unknown
 console lines and fatal-log details are replaced with fixed redaction markers. `summary.json`
 contains the firmware commit, ESP-IDF version, run interval, reset/watchdog counts,
-display/I2C/Wi-Fi error counts,
-minimum and end-to-end heap data, coverage counters, and SHA-256 hashes. `config.json` is
+display/I2C/Wi-Fi error counts, minimum heap plus initial, configured warm-up baseline, and final
+free-heap data, coverage counters, and SHA-256 hashes. The checked-in contracts use a 60-second
+warm-up. `heap_drop_bytes` retains the initial-to-final measurement; the sustained-decline gate
+uses `stabilized_heap_drop_bytes` from the warm-up baseline so one-time Wi-Fi/Setup initialization
+allocations are not reported as a leak. A missing warm-up sample fails the run. `config.json` is
 the exact reusable run contract. Failed preparation or monitoring returns nonzero and still
-retains a failed summary and available evidence. `tools/hil_smoke_24h.json` is the checked-in
-configuration for the later soak ticket.
+retains a failed summary and available evidence.
+`tools/hil_smoke_24h.json` is the checked-in configuration for the later soak ticket.
