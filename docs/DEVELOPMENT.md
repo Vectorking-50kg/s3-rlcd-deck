@@ -1,12 +1,12 @@
 # S3 RLCD Deck 开发文档
 
-> 版本：0.2（确认后的产品与架构基线）  
-> 更新日期：2026-08-09  
+> 版本：0.3（M0 实现完成后的 M1–M5 执行基线）
+> 更新日期：2026-08-13
 > 目标硬件：Waveshare ESP32-S3-RLCD-4.2 / ESP32-S3-RLCD-DECK  
 > 固件基线：ESP-IDF 6.0.2、LVGL 9.4.x  
 > Companion 基线：Go、macOS 13+、Windows 11 x64
 
-当前状态：本文定义 V1 的产品范围、交互、接口、安全边界、实现路线和验收标准。仓库当前尚未实现这些功能。
+当前状态：本文定义 V1 的产品范围、交互、接口、安全边界、实现路线和验收标准。M0 功能代码已经合并，剩余物理/长稳发布证据由 #1 跟踪；M1–M5 分别由 GitHub 父规格 #20–#24 及其实现票推进。
 
 ## 1. 产品目标
 
@@ -951,6 +951,8 @@ s3-rlcd-deck/
 
 ### M1：Companion 与配对
 
+跟踪规格：[#20](https://github.com/Vectorking-50kg/s3-rlcd-deck/issues/20)
+
 - Go 程序骨架、托盘/菜单栏、嵌入 SPA。
 - 管理入口与 Device Hub 分离。
 - 一次性码配对、证书指纹固定、WSS 心跳。
@@ -958,12 +960,16 @@ s3-rlcd-deck/
 
 ### M2：Codex 首页
 
+跟踪规格：[#21](https://github.com/Vectorking-50kg/s3-rlcd-deck/issues/21)
+
 - 官方 App Server 额度和 Token。
 - abtop 风格只读会话观察。
 - VERIFIED/INFERRED/UNAVAILABLE 契约。
 - Codex 默认首页、动态额度窗口和离线快照。
 
 ### M3：其他 Provider
+
+跟踪规格：[#22](https://github.com/Vectorking-50kg/s3-rlcd-deck/issues/22)
 
 - Cursor 实验适配器。
 - AIHubMix、DeepSeek 模板和通用 HTTP Provider。
@@ -973,6 +979,8 @@ s3-rlcd-deck/
 
 ### M4：串口工具
 
+跟踪规格：[#23](https://github.com/Vectorking-50kg/s3-rlcd-deck/issues/23)
+
 - `DISARMED → USB TX ↔ WEB TX` 状态机。
 - 受控 GPIO17 TX、UART Router、512 KiB PSRAM ring、USB bridge。
 - Companion 8 MiB ring 和多浏览器观察。
@@ -980,6 +988,8 @@ s3-rlcd-deck/
 - 115200 长稳压力测试。
 
 ### M5：产品化
+
+跟踪规格：[#24](https://github.com/Vectorking-50kg/s3-rlcd-deck/issues/24)
 
 - 最多 5 个 Companion、优先级和粘性故障切换。
 - 签名 OTA、A/B 回滚。
@@ -1080,4 +1090,4 @@ s3-rlcd-deck/
 
 ## 21. 下一步
 
-从 M0 开始建立最小 ESP-IDF 工程：完成厂商驱动兼容修正、400×300 基准页、KEY/BOOT、SHTC3、RTC 和 Setup 页面。M0 通过后立即搭建 M1 的 Go Companion、配对和 WSS 骨架；先用固定模拟快照打通 Codex 首页，再接入真实采集器。这样可以在最早阶段同时验证板级显示、跨端协议和恢复路径，避免业务适配器掩盖基础问题。
+M0 功能代码合并后立即搭建 M1 的 Go Companion、配对和 WSS 骨架；先用固定模拟快照打通 Codex 首页，再接入真实采集器。M1 实现可与 M0 剩余物理/长稳证据并行，但 V1 发布仍要求 M0 验收报告最终通过。这样可以尽早验证跨端协议和恢复路径，避免业务适配器掩盖基础问题。

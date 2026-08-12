@@ -24,6 +24,18 @@ _Avoid_: Raw snapshot, provider response
 The single paired Companion to which a Deck is currently connected. Other paired Companions are connection candidates, not simultaneous data sources.
 _Avoid_: Primary server, current agent
 
+**Pairing**:
+The user-authorized establishment of scoped trust between one Deck and one Companion. A successful Pairing creates a Companion Profile on the Deck.
+_Avoid_: Login, device discovery
+
+**Companion Profile**:
+A Deck-owned record of one paired Companion's identity, trust material, connection location, preference, and last successful contact.
+_Avoid_: Server profile, account
+
+**Device Hub**:
+The Companion-facing surface dedicated to paired Deck connections and minimal device health. It is distinct from the management Web used by people.
+_Avoid_: Management API, Web console
+
 **AI Page**:
 A Deck screen that presents an AI Snapshot and keeps the target serial transmitter disarmed.
 _Avoid_: Dashboard, provider screen
@@ -35,6 +47,10 @@ _Avoid_: Terminal session, UART mode
 **TX Owner**:
 The sole source currently authorized to transmit to the target during a Serial Session. The owner is either USB or Web, never both.
 _Avoid_: Controller, writer
+
+**Web TX Lease**:
+The temporary, exclusive grant that allows one authenticated Web client to act as the Web TX Owner during a Serial Session.
+_Avoid_: Browser lock, Web session
 
 **Target**:
 The external 3.3 V TTL UART device connected to the Deck for monitoring or controlled transmission.

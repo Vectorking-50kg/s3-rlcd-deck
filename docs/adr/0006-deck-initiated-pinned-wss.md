@@ -1,0 +1,3 @@
+# Let each Deck initiate a token-authenticated, fingerprint-pinned WSS connection
+
+A Deck usually has a changing DHCP address while the Companion must keep its human management surface separate from device traffic. Each paired Deck will therefore initiate WSS to the Device Hub using a per-Companion device token and a pinned certificate fingerprint; the management Web uses a different listener and authority. Plain LAN polling, shared management/device tokens, and silently trusting replacement certificates were rejected because they weaken revocation, firewall behavior, and protection against local network impersonation.

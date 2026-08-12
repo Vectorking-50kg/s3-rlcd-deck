@@ -1,0 +1,5 @@
+{
+  "type": "device.hello",
+  "type": "device.heartbeat",
+  "protocol_version": 1
+}

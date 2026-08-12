@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "name": "valid minimal envelope",
+      "file": "valid-minimal.json",
+      "accepted": true
+    },
+    {
+      "name": "valid forward field",
+      "file": "valid-forward-field.json",
+      "accepted": true
+    },
+    {
+      "name": "missing protocol version",
+      "file": "invalid-missing-version.json",
+      "accepted": false,
+      "error_code": "malformed_envelope"
+    },
+    {
+      "name": "null protocol version",
+      "file": "invalid-null-version.json",
+      "accepted": false,
+      "error_code": "malformed_envelope"
+    },
+    {
+      "name": "unsupported major version",
+      "file": "invalid-version.json",
+      "accepted": false,
+      "error_code": "unsupported_protocol_version"
+    },
+    {
+      "name": "noncanonical message type",
+      "file": "invalid-type.json",
+      "accepted": false,
+      "error_code": "malformed_envelope"
+    },
+    {
+      "name": "duplicate envelope field",
+      "file": "invalid-duplicate.json",
+      "accepted": false,
+      "error_code": "malformed_envelope"
+    },
+    {
+      "name": "duplicate nested field",
+      "file": "invalid-nested-duplicate.json",
+      "accepted": false,
+      "error_code": "malformed_envelope"
+    },
+    {
+      "name": "invalid UTF-8",
+      "file": "invalid-utf8.hex",
+      "encoding": "hex",
+      "accepted": false,
+      "error_code": "malformed_envelope"
+    },
+    {
+      "name": "trailing document",
+      "file": "invalid-trailing.json",
+      "accepted": false,
+      "error_code": "malformed_envelope"
+    }
+  ]
+}

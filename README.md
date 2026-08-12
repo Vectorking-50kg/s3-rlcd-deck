@@ -12,11 +12,13 @@
 - [开发文档](docs/DEVELOPMENT.md)
 - [AI 用量采集开源方案对比](docs/research/ai-usage-collector-comparison.md)
 
-当前仓库已进入 M0 固件实现阶段；功能边界、验收标准和任务依赖以 GitHub Issues 为准。
+M0 功能代码已合并，正式物理/长稳发布证据仍由对应 GitHub Issues 跟踪；仓库现已进入 M1 Companion 与 Pairing 实现。功能边界、验收标准和任务依赖以 GitHub Issues 为准。
 
 ## 开发
 
 固件工程和可复现命令见 [firmware/README.md](firmware/README.md)。工程要求 ESP-IDF 6.0.2；开发构建提供 HIL 使用的结构化启动诊断，发布构建默认关闭该通道。
+
+Companion 工程和 Go 1.26.x 验证命令见 [companion/README.md](companion/README.md)。
 
 M0 发布门槛、证据哈希与当前阻塞项统一记录在
 [M0 验收报告](docs/acceptance/m0.md)；只有自动 smoke/soak 和第二设备人工验收全部通过时，报告才会生成 `PASS` 结论。
