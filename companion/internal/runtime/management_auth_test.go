@@ -146,8 +146,8 @@ func TestManagementLoginRejectsDeviceTokenAndWrongOrigin(t *testing.T) {
 		origin     string
 		wantStatus int
 	}{
-		"Device Hub token": {config.DeviceHub.BootstrapToken, "http://" + status.ManagementAddress, http.StatusUnauthorized},
-		"wrong Origin":     {config.Management.AdminToken, "http://attacker.invalid", http.StatusForbidden},
+		"Device token": {"paired-device-token-does-not-authorize-management", "http://" + status.ManagementAddress, http.StatusUnauthorized},
+		"wrong Origin": {config.Management.AdminToken, "http://attacker.invalid", http.StatusForbidden},
 	} {
 		t.Run(name, func(t *testing.T) {
 			request, requestErr := http.NewRequest(

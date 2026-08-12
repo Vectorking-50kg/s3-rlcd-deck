@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
 )
 
 const shutdownTimeout = 5 * time.Second
@@ -38,6 +40,7 @@ type Runtime struct {
 	deviceHubHandler  http.Handler
 	shutdownTimeout   time.Duration
 	sessions          *managementSessions
+	pairing           *pairing.Service
 
 	mu      sync.RWMutex
 	status  Status
@@ -63,6 +66,7 @@ func New(config Config) (*Runtime, error) {
 		config:          normalized,
 		shutdownTimeout: shutdownTimeout,
 		sessions:        newManagementSessions(),
+		pairing:         normalized.Pairing,
 		status:          status,
 	}, nil
 }

@@ -66,6 +66,25 @@ func ParseEnvelope(message []byte) (Envelope, error) {
 	return envelope, nil
 }
 
+func DecodeStrictDocument(message []byte, destination any) error {
+	return DecodeStrictDocumentLimit(message, MaxControlMessageBytes, destination)
+}
+
+func DecodeStrictDocumentLimit(message []byte, maximumBytes int, destination any) error {
+	if maximumBytes <= 0 || len(message) > maximumBytes || !utf8.Valid(message) {
+		return ErrMalformedEnvelope
+	}
+	if err := validateJSONDocument(message); err != nil {
+		return errors.Join(ErrMalformedEnvelope, err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(message))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(destination); err != nil {
+		return errors.Join(ErrMalformedEnvelope, err)
+	}
+	return nil
+}
+
 func validateJSONDocument(message []byte) error {
 	decoder := json.NewDecoder(bytes.NewReader(message))
 	decoder.UseNumber()

@@ -15,9 +15,9 @@ func TestRunForceClosesAHandlerAfterGracefulShutdownDeadline(t *testing.T) {
 			AdminToken: "management-test-token-000000000001",
 		},
 		DeviceHub: DeviceHubConfig{
-			Address:        "127.0.0.1:0",
-			BootstrapToken: "device-hub-test-token-000000000001",
+			Address: "127.0.0.1:0",
 		},
+		Pairing: testPairingService(t),
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)

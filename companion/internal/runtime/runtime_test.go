@@ -6,12 +6,32 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
 	companionruntime "github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/runtime"
 )
+
+type runtimeTestClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (clock *runtimeTestClock) Now() time.Time {
+	clock.mu.Lock()
+	defer clock.mu.Unlock()
+	return clock.now
+}
+
+func (clock *runtimeTestClock) Set(now time.Time) {
+	clock.mu.Lock()
+	defer clock.mu.Unlock()
+	clock.now = now
+}
 
 func TestRuntimeRejectsNonLoopbackManagementAddress(t *testing.T) {
 	config := testConfig()
@@ -19,6 +39,15 @@ func TestRuntimeRejectsNonLoopbackManagementAddress(t *testing.T) {
 	_, err := companionruntime.New(config)
 	if !errors.Is(err, companionruntime.ErrManagementAddressNotLoopback) {
 		t.Fatalf("New() error = %v, want ErrManagementAddressNotLoopback", err)
+	}
+}
+
+func TestRuntimeRejectsNonLoopbackDeviceHubUntilPinnedTLSExists(t *testing.T) {
+	config := testConfig()
+	config.DeviceHub.Address = "0.0.0.0:7780"
+	_, err := companionruntime.New(config)
+	if !errors.Is(err, companionruntime.ErrDeviceHubTLSRequired) {
+		t.Fatalf("New() error = %v, want ErrDeviceHubTLSRequired", err)
 	}
 }
 
@@ -149,6 +178,19 @@ func TestRuntimeServesDeviceHubOnAnIndependentAuthenticatedListener(t *testing.T
 	if status.DeviceHubAddress == "" || status.DeviceHubAddress == status.ManagementAddress {
 		t.Fatalf("status = %#v, want independent management and Device Hub addresses", status)
 	}
+	issued, err := config.Pairing.Issue(context.Background())
+	if err != nil {
+		t.Fatalf("Issue() error = %v", err)
+	}
+	credential, err := config.Pairing.Redeem(context.Background(), pairing.RedeemRequest{
+		Code:            issued.Code,
+		DeviceID:        "deck-runtime1",
+		DeviceIdentity:  "ZGV2aWNlLXB1YmxpYy1rZXktbWF0ZXJpYWw",
+		ProtocolVersion: pairing.ProtocolVersion,
+	})
+	if err != nil {
+		t.Fatalf("Redeem() error = %v", err)
+	}
 
 	request, err := http.NewRequest(
 		http.MethodGet,
@@ -158,7 +200,10 @@ func TestRuntimeServesDeviceHubOnAnIndependentAuthenticatedListener(t *testing.T
 	if err != nil {
 		t.Fatalf("NewRequest() error = %v", err)
 	}
-	request.Header.Set("Authorization", "Bearer "+config.DeviceHub.BootstrapToken)
+	request.Header.Set("X-Device-ID", credential.DeviceID)
+	request.Header.Set("X-Device-Identity", "ZGV2aWNlLXB1YmxpYy1rZXktbWF0ZXJpYWw")
+	request.Header.Set("X-Protocol-Version", strconv.Itoa(pairing.ProtocolVersion))
+	request.Header.Set("Authorization", "Bearer "+credential.Token)
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatalf("GET Device Hub health: %v", err)
@@ -193,7 +238,10 @@ func TestRuntimeServesDeviceHubOnAnIndependentAuthenticatedListener(t *testing.T
 	if err != nil {
 		t.Fatalf("NewRequest() error = %v", err)
 	}
-	managementRouteOnDevice.Header.Set("Authorization", "Bearer "+config.DeviceHub.BootstrapToken)
+	managementRouteOnDevice.Header.Set("X-Device-ID", credential.DeviceID)
+	managementRouteOnDevice.Header.Set("X-Device-Identity", "ZGV2aWNlLXB1YmxpYy1rZXktbWF0ZXJpYWw")
+	managementRouteOnDevice.Header.Set("X-Protocol-Version", strconv.Itoa(pairing.ProtocolVersion))
+	managementRouteOnDevice.Header.Set("Authorization", "Bearer "+credential.Token)
 	wrongListenerResponse, err = http.DefaultClient.Do(managementRouteOnDevice)
 	if err != nil {
 		t.Fatalf("GET management route on Device Hub: %v", err)
@@ -216,6 +264,9 @@ func TestRuntimeServesDeviceHubOnAnIndependentAuthenticatedListener(t *testing.T
 				t.Fatalf("NewRequest() error = %v", requestErr)
 			}
 			if token != "" {
+				unauthorizedRequest.Header.Set("X-Device-ID", credential.DeviceID)
+				unauthorizedRequest.Header.Set("X-Device-Identity", "ZGV2aWNlLXB1YmxpYy1rZXktbWF0ZXJpYWw")
+				unauthorizedRequest.Header.Set("X-Protocol-Version", strconv.Itoa(pairing.ProtocolVersion))
 				unauthorizedRequest.Header.Set("Authorization", "Bearer "+token)
 			}
 			unauthorizedResponse, requestErr := http.DefaultClient.Do(unauthorizedRequest)
@@ -236,6 +287,19 @@ func TestRuntimeServesDeviceHubOnAnIndependentAuthenticatedListener(t *testing.T
 }
 
 func testConfig() companionruntime.Config {
+	clock := &runtimeTestClock{now: time.Date(2026, 8, 13, 8, 0, 0, 0, time.UTC)}
+	return testConfigWithPairing(clock, pairing.NewMemoryStore())
+}
+
+func testConfigWithPairing(clock pairing.Clock, store pairing.Store) companionruntime.Config {
+	pairingService, err := pairing.New(pairing.Config{
+		Clock:                  clock,
+		Store:                  store,
+		CertificateFingerprint: testCertificateFingerprint,
+	})
+	if err != nil {
+		panic(err)
+	}
 	return companionruntime.Config{
 		Version: "1.2.3-test",
 		Management: companionruntime.ManagementConfig{
@@ -243,9 +307,9 @@ func testConfig() companionruntime.Config {
 			AdminToken: "management-test-token-000000000001",
 		},
 		DeviceHub: companionruntime.DeviceHubConfig{
-			Address:        "127.0.0.1:0",
-			BootstrapToken: "device-hub-test-token-000000000001",
+			Address: "127.0.0.1:0",
 		},
+		Pairing: pairingService,
 	}
 }
 

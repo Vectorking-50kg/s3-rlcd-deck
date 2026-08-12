@@ -4,12 +4,16 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/protocol"
 )
 
 type rateWindow struct {
@@ -67,8 +71,18 @@ func (limiter *ipRateLimiter) allow(address string, now time.Time) bool {
 }
 
 func (application *Runtime) deviceHubRoutes() http.Handler {
+	limits := application.config.DeviceHub.Limits
+	pairingLimiter := newIPRateLimiter(limits.PairingAttempts, limits.PairingRateWindow)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/device/health", application.handleDeviceHealth)
+	mux.HandleFunc("POST /api/v1/pairing/redeem", func(response http.ResponseWriter, request *http.Request) {
+		if !pairingLimiter.allow(request.RemoteAddr, time.Now()) {
+			response.Header().Set("Retry-After", strconv.Itoa(max(1, int(limits.PairingRateWindow.Seconds()))))
+			http.Error(response, "rate limit exceeded", http.StatusTooManyRequests)
+			return
+		}
+		application.handlePairingRedeem(response, request)
+	})
 	return newDeviceHubGateway(application.config.DeviceHub, mux)
 }
 
@@ -79,6 +93,7 @@ func newDeviceHubGateway(config DeviceHubConfig, next http.Handler) http.Handler
 		config.Limits.RateLimitWindow,
 	)
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Cache-Control", "no-store")
 		select {
 		case concurrency <- struct{}{}:
 			defer func() { <-concurrency }()
@@ -93,11 +108,6 @@ func newDeviceHubGateway(config DeviceHubConfig, next http.Handler) http.Handler
 			http.Error(response, "rate limit exceeded", http.StatusTooManyRequests)
 			return
 		}
-		if !deviceTokenValid(request, config.BootstrapToken) {
-			response.Header().Set("WWW-Authenticate", "Bearer")
-			http.Error(response, "unauthorized", http.StatusUnauthorized)
-			return
-		}
 		if request.ContentLength > config.Limits.MaxBodyBytes {
 			http.Error(response, "request body too large", http.StatusRequestEntityTooLarge)
 			return
@@ -108,6 +118,29 @@ func newDeviceHubGateway(config DeviceHubConfig, next http.Handler) http.Handler
 }
 
 func (application *Runtime) handleDeviceHealth(response http.ResponseWriter, request *http.Request) {
+	deviceID := request.Header.Get("X-Device-ID")
+	deviceIdentity := request.Header.Get("X-Device-Identity")
+	protocolVersion, protocolErr := strconv.Atoi(request.Header.Get("X-Protocol-Version"))
+	token, present := bearerToken(request)
+	valid := false
+	var verifyErr error
+	if present && protocolErr == nil {
+		valid, verifyErr = application.pairing.Verify(request.Context(), pairing.Authentication{
+			DeviceID:        deviceID,
+			Token:           token,
+			DeviceIdentity:  deviceIdentity,
+			ProtocolVersion: protocolVersion,
+		})
+	}
+	if verifyErr != nil {
+		http.Error(response, "device trust unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if !valid {
+		response.Header().Set("WWW-Authenticate", "Bearer")
+		http.Error(response, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	body, err := io.ReadAll(request.Body)
 	if err != nil {
 		var tooLarge *http.MaxBytesError
@@ -129,7 +162,49 @@ func (application *Runtime) handleDeviceHealth(response http.ResponseWriter, req
 	}{Status: "ok"})
 }
 
-func deviceTokenValid(request *http.Request, expected string) bool {
+func (application *Runtime) handlePairingRedeem(response http.ResponseWriter, request *http.Request) {
+	var redeemRequest pairing.RedeemRequest
+	if err := decodeDeviceJSON(request, &redeemRequest); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			http.Error(response, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		http.Error(response, "malformed pairing request", http.StatusBadRequest)
+		return
+	}
+	credential, err := application.pairing.Redeem(request.Context(), redeemRequest)
+	if err != nil {
+		switch {
+		case errors.Is(err, pairing.ErrUnsupportedProtocol):
+			http.Error(response, "unsupported protocol version", http.StatusUpgradeRequired)
+		case errors.Is(err, pairing.ErrInvalidRequest):
+			http.Error(response, "malformed pairing request", http.StatusBadRequest)
+		case errors.Is(err, pairing.ErrCodeUnavailable):
+			http.Error(response, "pairing rejected", http.StatusUnauthorized)
+		default:
+			http.Error(response, "pairing unavailable", http.StatusServiceUnavailable)
+		}
+		return
+	}
+	response.Header().Set("Content-Type", "application/json")
+	response.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(response).Encode(credential)
+}
+
+func decodeDeviceJSON(request *http.Request, destination any) error {
+	mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		return errors.New("content type must be application/json")
+	}
+	message, err := io.ReadAll(request.Body)
+	if err != nil {
+		return err
+	}
+	return protocol.DecodeStrictDocument(message, destination)
+}
+
+func bearerToken(request *http.Request) (string, bool) {
 	scheme, token, found := strings.Cut(request.Header.Get("Authorization"), " ")
-	return found && scheme == "Bearer" && constantTimeTokenEqual(token, expected)
+	return token, found && scheme == "Bearer" && token != ""
 }

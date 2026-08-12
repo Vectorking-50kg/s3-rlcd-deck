@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://s3-rlcd-deck.local/schema/pairing-v1.schema.json",
+  "title": "S3 RLCD Deck Pairing HTTP documents v1",
+  "$defs": {
+    "redeem_request": {
+      "type": "object",
+      "required": ["code", "device_id", "device_identity", "protocol_version"],
+      "properties": {
+        "code": {"type": "string", "pattern": "^[0-9]{6}$"},
+        "device_id": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 64,
+          "pattern": "^[a-z0-9][a-z0-9_-]{7,63}$"
+        },
+        "device_identity": {
+          "type": "string",
+          "minLength": 22,
+          "maxLength": 683,
+          "pattern": "^[A-Za-z0-9_-]+$"
+        },
+        "protocol_version": {"const": 1}
+      },
+      "additionalProperties": false
+    },
+    "credential": {
+      "type": "object",
+      "required": ["device_id", "token", "certificate_fingerprint", "protocol_version"],
+      "properties": {
+        "device_id": {"type": "string"},
+        "token": {
+          "type": "string",
+          "minLength": 43,
+          "maxLength": 43,
+          "pattern": "^[A-Za-z0-9_-]{43}$"
+        },
+        "certificate_fingerprint": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "protocol_version": {"const": 1}
+      },
+      "additionalProperties": false
+    }
+  }
+}

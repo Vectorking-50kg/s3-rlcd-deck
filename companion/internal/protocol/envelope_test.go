@@ -101,6 +101,21 @@ func TestParseEnvelopeRejectsInvalidUTF8(t *testing.T) {
 	}
 }
 
+func TestDecodeStrictDocumentRejectsDuplicateAndUnknownFields(t *testing.T) {
+	type document struct {
+		Code string `json:"code"`
+	}
+	for _, message := range [][]byte{
+		[]byte(`{"code":"123456","code":"654321"}`),
+		[]byte(`{"code":"123456","future":true}`),
+	} {
+		var decoded document
+		if err := protocol.DecodeStrictDocument(message, &decoded); !errors.Is(err, protocol.ErrMalformedEnvelope) {
+			t.Fatalf("DecodeStrictDocument(%s) error = %v, want malformed", message, err)
+		}
+	}
+}
+
 func TestParseEnvelopeClassifiesMissingAndNullVersionAsMalformed(t *testing.T) {
 	for _, message := range [][]byte{
 		[]byte(`{"type":"device.hello"}`),

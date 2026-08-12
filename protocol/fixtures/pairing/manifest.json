@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {"name": "valid redeem request", "file": "valid-redeem.json", "accepted": true},
+    {"name": "unexpected secret field", "file": "invalid-extra-field.json", "accepted": false},
+    {"name": "duplicate pairing code", "file": "invalid-duplicate-code.json", "accepted": false},
+    {"name": "unsupported protocol version", "file": "invalid-version.json", "accepted": false}
+  ]
+}
