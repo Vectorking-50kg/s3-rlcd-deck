@@ -73,7 +73,6 @@ func TestDeviceHubRejectsOversizedBodiesAndRateLimitsByIP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRequest() error = %v", err)
 	}
-	oversizedRequest.Header.Set("Authorization", "Bearer "+config.DeviceHub.BootstrapToken)
 	response, err := http.DefaultClient.Do(oversizedRequest)
 	if err != nil {
 		t.Fatalf("oversized request: %v", err)
@@ -87,7 +86,6 @@ func TestDeviceHubRejectsOversizedBodiesAndRateLimitsByIP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRequest() error = %v", err)
 	}
-	rateLimitedRequest.Header.Set("Authorization", "Bearer "+config.DeviceHub.BootstrapToken)
 	response, err = http.DefaultClient.Do(rateLimitedRequest)
 	if err != nil {
 		t.Fatalf("rate-limited request: %v", err)

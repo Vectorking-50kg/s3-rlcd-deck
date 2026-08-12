@@ -7,8 +7,11 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/deviceidentity"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
 	companionruntime "github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/runtime"
 )
 
@@ -19,7 +22,6 @@ var (
 
 const (
 	managementTokenEnvironment = "S3DECK_MANAGEMENT_TOKEN"
-	deviceHubTokenEnvironment  = "S3DECK_DEVICE_HUB_TOKEN"
 )
 
 func main() {
@@ -50,6 +52,11 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		"",
 		"exact browser Origin allowed for LAN management",
 	)
+	dataDirectory := flags.String(
+		"data-directory",
+		defaultDataDirectory(),
+		"protected directory for Companion identity and revocable device trust",
+	)
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
@@ -61,19 +68,42 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "s3deck-companion %s (commit %s)\n", version, commit)
 		return 0
 	}
+	managementToken := os.Getenv(managementTokenEnvironment)
+	if managementToken == "" {
+		fmt.Fprintf(stderr, "cannot configure Companion: %s is required\n", managementTokenEnvironment)
+		return 2
+	}
 
+	store, err := pairing.OpenFileStore(filepath.Join(*dataDirectory, "pairing.json"))
+	if err != nil {
+		fmt.Fprintf(stderr, "cannot open pairing trust: %v\n", err)
+		return 2
+	}
+	identity, err := deviceidentity.LoadOrCreate(filepath.Join(*dataDirectory, "device-hub-identity.json"))
+	if err != nil {
+		fmt.Fprintf(stderr, "cannot load Device Hub identity: %v\n", err)
+		return 2
+	}
+	pairingService, err := pairing.New(pairing.Config{
+		Store:                  store,
+		CertificateFingerprint: identity.Fingerprint(),
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "cannot configure pairing: %v\n", err)
+		return 2
+	}
 	application, err := companionruntime.New(companionruntime.Config{
 		Version: version,
 		Management: companionruntime.ManagementConfig{
 			Address:       *managementAddress,
 			AllowLAN:      *allowLANManagement,
 			AllowedOrigin: *managementOrigin,
-			AdminToken:    os.Getenv(managementTokenEnvironment),
+			AdminToken:    managementToken,
 		},
 		DeviceHub: companionruntime.DeviceHubConfig{
-			Address:        *deviceHubAddress,
-			BootstrapToken: os.Getenv(deviceHubTokenEnvironment),
+			Address: *deviceHubAddress,
 		},
+		Pairing: pairingService,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "cannot configure Companion: %v\n", err)
@@ -86,4 +116,12 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+func defaultDataDirectory() string {
+	base, err := os.UserConfigDir()
+	if err != nil || base == "" {
+		return ".s3deck-companion"
+	}
+	return filepath.Join(base, "s3-rlcd-deck")
 }

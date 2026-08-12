@@ -6,6 +6,8 @@ import (
 	"net"
 	"net/url"
 	"time"
+
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
 )
 
 const (
@@ -16,13 +18,13 @@ const (
 
 var (
 	ErrManagementAddressNotLoopback = errors.New("management address must be loopback unless LAN management is explicitly enabled")
-	ErrTokensMustDiffer             = errors.New("management and Device Hub tokens must differ")
 )
 
 type Config struct {
 	Version    string
 	Management ManagementConfig
 	DeviceHub  DeviceHubConfig
+	Pairing    *pairing.Service
 }
 
 type ManagementConfig struct {
@@ -46,9 +48,8 @@ type ManagementLimits struct {
 }
 
 type DeviceHubConfig struct {
-	Address        string
-	BootstrapToken string
-	Limits         DeviceHubLimits
+	Address string
+	Limits  DeviceHubLimits
 }
 
 type DeviceHubLimits struct {
@@ -62,6 +63,8 @@ type DeviceHubLimits struct {
 	MaxConcurrentPerIP int
 	RateLimitRequests  int
 	RateLimitWindow    time.Duration
+	PairingAttempts    int
+	PairingRateWindow  time.Duration
 }
 
 func normalizeConfig(config Config) (Config, error) {
@@ -77,11 +80,8 @@ func normalizeConfig(config Config) (Config, error) {
 	if len(config.Management.AdminToken) < minimumTokenBytes {
 		return Config{}, fmt.Errorf("management admin token must contain at least %d bytes", minimumTokenBytes)
 	}
-	if len(config.DeviceHub.BootstrapToken) < minimumTokenBytes {
-		return Config{}, fmt.Errorf("Device Hub bootstrap token must contain at least %d bytes", minimumTokenBytes)
-	}
-	if constantTimeTokenEqual(config.Management.AdminToken, config.DeviceHub.BootstrapToken) {
-		return Config{}, ErrTokensMustDiffer
+	if config.Pairing == nil {
+		return Config{}, errors.New("pairing service is required")
 	}
 	managementIP, err := addressIP(config.Management.Address)
 	if err != nil {
@@ -181,6 +181,12 @@ func normalizeDeviceHubLimits(limits DeviceHubLimits) DeviceHubLimits {
 	}
 	if limits.RateLimitWindow <= 0 {
 		limits.RateLimitWindow = time.Minute
+	}
+	if limits.PairingAttempts <= 0 {
+		limits.PairingAttempts = 10
+	}
+	if limits.PairingRateWindow <= 0 {
+		limits.PairingRateWindow = time.Minute
 	}
 	return limits
 }

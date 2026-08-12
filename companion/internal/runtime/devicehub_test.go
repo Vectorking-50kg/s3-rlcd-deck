@@ -14,13 +14,13 @@ func TestDeviceHubRejectsConcurrentWorkBeyondItsLimit(t *testing.T) {
 			AdminToken: "management-test-token-000000000001",
 		},
 		DeviceHub: DeviceHubConfig{
-			Address:        "127.0.0.1:0",
-			BootstrapToken: "device-hub-test-token-000000000001",
+			Address: "127.0.0.1:0",
 			Limits: DeviceHubLimits{
 				MaxConcurrent:     1,
 				RateLimitRequests: 10,
 			},
 		},
+		Pairing: testPairingService(t),
 	})
 	if err != nil {
 		t.Fatalf("normalizeConfig() error = %v", err)
@@ -39,7 +39,6 @@ func TestDeviceHubRejectsConcurrentWorkBeyondItsLimit(t *testing.T) {
 	go func() {
 		request, requestErr := http.NewRequest(http.MethodGet, server.URL, nil)
 		if requestErr == nil {
-			request.Header.Set("Authorization", "Bearer "+config.DeviceHub.BootstrapToken)
 			var response *http.Response
 			response, requestErr = http.DefaultClient.Do(request)
 			if requestErr == nil {
@@ -54,7 +53,6 @@ func TestDeviceHubRejectsConcurrentWorkBeyondItsLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRequest() error = %v", err)
 	}
-	request.Header.Set("Authorization", "Bearer "+config.DeviceHub.BootstrapToken)
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatalf("second request: %v", err)

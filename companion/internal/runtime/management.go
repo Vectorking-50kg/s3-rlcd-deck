@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/protocol"
 	webapp "github.com/Vectorking-50kg/s3-rlcd-deck/companion/web"
 )
 
@@ -62,11 +64,61 @@ func (application *Runtime) managementRoutes() http.Handler {
 		limits.SensitiveRateWindow,
 		application.requireManagementWrite(application.handleLogout),
 	))
+	mux.HandleFunc("POST /api/v1/pairing/codes", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.requireManagementWrite(application.handleIssuePairingCode),
+	))
+	mux.HandleFunc("POST /api/v1/devices/{deviceID}/rotate", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.requireManagementWrite(application.handleRotateDeviceToken),
+	))
+	mux.HandleFunc("DELETE /api/v1/devices/{deviceID}", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.requireManagementWrite(application.handleRevokeDevice),
+	))
 	mux.HandleFunc("/api/", func(response http.ResponseWriter, _ *http.Request) {
 		http.Error(response, "not found", http.StatusNotFound)
 	})
 	mux.Handle("/", webapp.Handler())
 	return mux
+}
+
+func (application *Runtime) handleIssuePairingCode(response http.ResponseWriter, request *http.Request) {
+	issued, err := application.pairing.Issue(request.Context())
+	if err != nil {
+		http.Error(response, "pairing code unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	writeManagementJSON(response, issued)
+}
+
+func (application *Runtime) handleRotateDeviceToken(response http.ResponseWriter, request *http.Request) {
+	credential, err := application.pairing.Rotate(request.Context(), request.PathValue("deviceID"))
+	if err != nil {
+		if errors.Is(err, pairing.ErrTrustNotFound) || errors.Is(err, pairing.ErrInvalidRequest) {
+			http.Error(response, "device not found", http.StatusNotFound)
+			return
+		}
+		http.Error(response, "device token rotation unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	writeManagementJSON(response, credential)
+}
+
+func (application *Runtime) handleRevokeDevice(response http.ResponseWriter, request *http.Request) {
+	err := application.pairing.Revoke(request.Context(), request.PathValue("deviceID"))
+	if err != nil {
+		if errors.Is(err, pairing.ErrTrustNotFound) || errors.Is(err, pairing.ErrInvalidRequest) {
+			http.Error(response, "device not found", http.StatusNotFound)
+			return
+		}
+		http.Error(response, "device revocation unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	response.WriteHeader(http.StatusNoContent)
 }
 
 func (application *Runtime) handleBootstrap(response http.ResponseWriter, _ *http.Request) {
@@ -244,15 +296,11 @@ func decodeManagementJSON(response http.ResponseWriter, request *http.Request, d
 		return errors.New("content type must be application/json")
 	}
 	request.Body = http.MaxBytesReader(response, request.Body, managementLoginMaxBytes)
-	decoder := json.NewDecoder(request.Body)
-	decoder.DisallowUnknownFields()
-	if err = decoder.Decode(destination); err != nil {
+	message, err := io.ReadAll(request.Body)
+	if err != nil {
 		return err
 	}
-	if err = decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return errors.New("request must contain one JSON document")
-	}
-	return nil
+	return protocol.DecodeStrictDocument(message, destination)
 }
 
 func writeManagementJSON(response http.ResponseWriter, document any) {
