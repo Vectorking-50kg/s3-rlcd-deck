@@ -40,7 +40,9 @@ type Status struct {
 }
 
 type Runtime struct {
-	config Config
+	config          Config
+	handler         http.Handler
+	shutdownTimeout time.Duration
 
 	mu      sync.RWMutex
 	status  Status
@@ -63,7 +65,8 @@ func New(config Config) (*Runtime, error) {
 		return nil, ErrManagementAddressNotLoopback
 	}
 	return &Runtime{
-		config: config,
+		config:          config,
+		shutdownTimeout: shutdownTimeout,
 		status: Status{
 			State:             StateNew,
 			Version:           config.Version,
@@ -94,8 +97,12 @@ func (application *Runtime) Run(ctx context.Context) error {
 	}
 	application.setState(StateReady, listener.Addr().String())
 
+	handler := application.handler
+	if handler == nil {
+		handler = application.routes()
+	}
 	server := &http.Server{
-		Handler:           application.routes(),
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	serveResult := make(chan error, 1)
@@ -109,13 +116,23 @@ func (application *Runtime) Run(ctx context.Context) error {
 		}
 		return fmt.Errorf("serve management web: %w", err)
 	case <-ctx.Done():
-		shutdownContext, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		shutdownContext, cancel := context.WithTimeout(
+			context.Background(),
+			application.shutdownTimeout,
+		)
 		defer cancel()
-		err = server.Shutdown(shutdownContext)
+		shutdownErr := server.Shutdown(shutdownContext)
+		var closeErr error
+		if shutdownErr != nil {
+			closeErr = server.Close()
+		}
 		serveErr := <-serveResult
 		application.setState(StateStopped, listener.Addr().String())
-		if err != nil {
-			return fmt.Errorf("shut down management web: %w", err)
+		if shutdownErr != nil {
+			return fmt.Errorf(
+				"shut down management web: %w",
+				errors.Join(shutdownErr, closeErr),
+			)
 		}
 		if !errors.Is(serveErr, http.ErrServerClosed) {
 			return fmt.Errorf("serve management web: %w", serveErr)

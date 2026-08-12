@@ -47,6 +47,7 @@ __pycache__/
 *.hex
 *.map
 *.uf2
+!protocol/fixtures/**/*.hex
 
 # Logs and temporary files
 .hil-results/

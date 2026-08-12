@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"regexp"
+	"unicode/utf8"
 )
 
 const (
@@ -33,11 +34,26 @@ func ParseEnvelope(message []byte) (Envelope, error) {
 	if len(message) > MaxControlMessageBytes {
 		return Envelope{}, ErrMessageTooLarge
 	}
+	if !utf8.Valid(message) {
+		return Envelope{}, ErrMalformedEnvelope
+	}
 	if err := validateJSONDocument(message); err != nil {
 		return Envelope{}, errors.Join(ErrMalformedEnvelope, err)
 	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(message, &document); err != nil {
+		return Envelope{}, errors.Join(ErrMalformedEnvelope, err)
+	}
+	typeValue, typePresent := document["type"]
+	versionValue, versionPresent := document["protocol_version"]
+	if !typePresent || !versionPresent || bytes.Equal(bytes.TrimSpace(versionValue), []byte("null")) {
+		return Envelope{}, ErrMalformedEnvelope
+	}
 	var envelope Envelope
-	if err := json.Unmarshal(message, &envelope); err != nil {
+	if err := json.Unmarshal(typeValue, &envelope.Type); err != nil {
+		return Envelope{}, errors.Join(ErrMalformedEnvelope, err)
+	}
+	if err := json.Unmarshal(versionValue, &envelope.ProtocolVersion); err != nil {
 		return Envelope{}, errors.Join(ErrMalformedEnvelope, err)
 	}
 	if len(envelope.Type) > 64 || !messageTypePattern.MatchString(envelope.Type) {
