@@ -47,6 +47,8 @@ typedef struct {
     uint32_t boot_event_count;
     uint32_t rtc_error_count;
     uint32_t sensor_error_count;
+    uint32_t free_heap_bytes;
+    uint32_t minimum_free_heap_bytes;
 } deck_peripheral_diagnostic_info_t;
 
 typedef struct {

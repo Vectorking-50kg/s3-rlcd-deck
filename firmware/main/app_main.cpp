@@ -292,6 +292,8 @@ void peripheral_snapshot(void *, const deck_peripheral_snapshot_t *snapshot)
         snapshot->boot_event_count,
         snapshot->rtc_error_count,
         snapshot->sensor_error_count,
+        esp_get_free_heap_size(),
+        esp_get_minimum_free_heap_size(),
     };
     const deck_diagnostic_sink_t sink = {write_stdout, nullptr};
     (void)deck_peripheral_diagnostics_emit(&info, sink);
@@ -399,7 +401,16 @@ bool decode_diagnostic_hex(
 
 void handle_diagnostic_control_line(char *line)
 {
-    if (line == nullptr || application_setup == nullptr) {
+    if (line == nullptr) {
+        return;
+    }
+    if (std::strcmp(line, "DECK_IDENTIFY") == 0) {
+        static constexpr char identity[] =
+            "{\"type\":\"deck_identity\",\"model\":\"s3-rlcd-deck\",\"protocol\":1}\n";
+        write_stdout(nullptr, identity, sizeof(identity) - 1);
+        return;
+    }
+    if (application_setup == nullptr) {
         return;
     }
     if (std::strcmp(line, "DECK_SETUP") == 0) {

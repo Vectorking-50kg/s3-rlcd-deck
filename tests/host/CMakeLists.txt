@@ -135,3 +135,11 @@ add_test(
     NAME hil_recovery_settings_contract
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_hil_recovery_settings.py
 )
+add_test(
+    NAME hil_smoke_contract
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_hil_smoke.py
+)
+add_test(
+    NAME hil_app_flash_contract
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_hil_app_flash.py
+)

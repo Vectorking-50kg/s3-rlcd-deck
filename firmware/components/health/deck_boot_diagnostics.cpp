@@ -116,7 +116,8 @@ bool deck_peripheral_diagnostics_emit(
         "\"key_event\":\"%s\","
         "\"key_event_count\":%" PRIu32 ",\"boot_event\":\"%s\","
         "\"boot_event_count\":%" PRIu32 ",\"rtc_errors\":%" PRIu32 ","
-        "\"sensor_errors\":%" PRIu32 "}\n",
+        "\"sensor_errors\":%" PRIu32 ",\"free_heap_bytes\":%" PRIu32 ","
+        "\"minimum_free_heap_bytes\":%" PRIu32 "}\n",
         info->rtc_available ? "true" : "false",
         info->rtc_hour,
         info->rtc_minute,
@@ -130,7 +131,9 @@ bool deck_peripheral_diagnostics_emit(
         button_event_name(info->boot_event),
         info->boot_event_count,
         info->rtc_error_count,
-        info->sensor_error_count
+        info->sensor_error_count,
+        info->free_heap_bytes,
+        info->minimum_free_heap_bytes
     );
     if (size < 0 || static_cast<size_t>(size) >= sizeof(line)) {
         return false;
