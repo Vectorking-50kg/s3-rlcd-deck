@@ -42,10 +42,23 @@ int16_t application_temperature_offset_tenths_c =
 #include <stdio.h>
 #include <unistd.h>
 
+#include "driver/usb_serial_jtag.h"
+#include "driver/usb_serial_jtag_vfs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 namespace {
+
+bool initialize_diagnostic_console_driver()
+{
+    usb_serial_jtag_driver_config_t configuration =
+        USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+    if (usb_serial_jtag_driver_install(&configuration) != ESP_OK) {
+        return false;
+    }
+    usb_serial_jtag_vfs_use_driver();
+    return true;
+}
 
 const char *reset_reason_name(esp_reset_reason_t reason)
 {
@@ -623,6 +636,7 @@ extern "C" void app_main(void)
 {
     const esp_app_desc_t *app = esp_app_get_description();
 #ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
+    const bool diagnostic_console_ready = initialize_diagnostic_console_driver();
     wait_for_diagnostic_host_ready();
     const deck_boot_info_t info = {
         app->version,
@@ -632,6 +646,11 @@ extern "C" void app_main(void)
     };
     const deck_diagnostic_sink_t sink = {write_stdout, nullptr};
     deck_boot_diagnostics_emit(&info, sink);
+    if (!diagnostic_console_ready) {
+        static constexpr char error[] =
+            "{\"type\":\"diagnostic_error\",\"stage\":\"console_driver\"}\n";
+        write_stdout(nullptr, error, sizeof(error) - 1);
+    }
 #endif
 
     application_panel = deck_rlcd_panel_create();
