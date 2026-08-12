@@ -2,6 +2,7 @@
 
 #include "deck_setup_mode.h"
 #include "deck_device_settings.h"
+#include "deck_companion_profiles.h"
 #include "deck_wifi_config.h"
 
 #ifdef __cplusplus
@@ -47,6 +48,19 @@ bool deck_setup_service_submit_wifi(
 bool deck_setup_service_submit_temperature_offset(
     deck_setup_service_t *service,
     int16_t temperature_offset_tenths_c
+);
+
+bool deck_setup_service_pair_companion(
+    deck_setup_service_t *service,
+    const deck_companion_pair_request_t *request
+);
+bool deck_setup_service_select_companion(
+    deck_setup_service_t *service,
+    const char *profile_id
+);
+bool deck_setup_service_revoke_companion(
+    deck_setup_service_t *service,
+    const char *profile_id
 );
 
 bool deck_setup_service_request_wifi_clear(

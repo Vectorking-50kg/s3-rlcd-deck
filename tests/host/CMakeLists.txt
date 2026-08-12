@@ -86,11 +86,13 @@ deck_add_host_test(
         test_setup_mode.cpp
         ../../firmware/components/setup_mode/deck_setup_mode.cpp
         ../../firmware/components/setup_mode/deck_setup_http.cpp
+        ../../firmware/components/companion_profiles/deck_companion_profiles.cpp
         ../../firmware/components/device_settings/deck_device_settings.cpp
         ../../firmware/components/transaction_store/deck_transaction_store.cpp
         ../../firmware/components/wifi_config/deck_wifi_config.cpp
     INCLUDE_DIRS
         ../../firmware/components/device_settings/include
+        ../../firmware/components/companion_profiles/include
         ../../firmware/components/setup_mode/include
         ../../firmware/components/transaction_store/include
         ../../firmware/components/wifi_config/include
@@ -113,6 +115,16 @@ deck_add_host_test(
         ../../firmware/components/transaction_store/deck_transaction_store.cpp
     INCLUDE_DIRS
         ../../firmware/components/device_settings/include
+        ../../firmware/components/transaction_store/include
+)
+deck_add_host_test(
+    test_companion_profiles
+    SOURCES
+        test_companion_profiles.cpp
+        ../../firmware/components/companion_profiles/deck_companion_profiles.cpp
+        ../../firmware/components/transaction_store/deck_transaction_store.cpp
+    INCLUDE_DIRS
+        ../../firmware/components/companion_profiles/include
         ../../firmware/components/transaction_store/include
 )
 deck_add_host_test(

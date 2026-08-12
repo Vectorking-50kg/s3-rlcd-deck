@@ -21,23 +21,39 @@ constexpr char kPage[] =
     "<input name=offset type=number min=-15 max=15 step=.1 value=-4.0 required>"
     "</label> <button>Save offset</button></form>"
     "<h2>Wi-Fi recovery</h2><button id=clear type=button>Clear Wi-Fi...</button>"
+    "<h2>Companion pairing</h2><form id=pair><label>Hub host:port "
+    "<input name=hub_address maxlength=95 required></label> <label>Six-digit code "
+    "<input name=code inputmode=numeric pattern='[0-9]{6}' maxlength=6 required></label> "
+    "<button>Pair Companion</button></form><div id=companions></div>"
     "<pre id=state>Loading...</pre>"
-    "<p><strong>Companion pairing is planned for M1.</strong></p>"
-    "<script>async function load(method='GET',path='/api/status'){let r=await "
-    "fetch(path,{method});state.textContent=JSON.stringify(await r.json(),null,2)}"
+    "<script>function show(j){state.textContent=JSON.stringify(j,null,2);"
+    "companions.replaceChildren();for(let p of(j.companions?.profiles||[])){let row="
+    "document.createElement('p'),label=document.createElement('span');label.textContent="
+    "p.display_name+' ('+p.hub_address+') ';row.append(label);for(let a of [['Active',"
+    "'/api/companions/select'],['Revoke','/api/companions/revoke']]){let b=document."
+    "createElement('button');b.textContent=a[0];b.disabled=a[0]=='Active'&&j.companions."
+    "active_profile_id==p.profile_id;b.onclick=async()=>{let r=await fetch(a[1],{method:"
+    "'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new "
+    "URLSearchParams({profile_id:p.profile_id})});show(await r.json());if(r.ok)setTimeout("
+    "load,250)};row.append(b)}companions.append(row)}}async function load(method='GET',"
+    "path='/api/status'){let r=await fetch(path,{method});show(await r.json())}"
     "scan.onclick=()=>load('POST','/api/scan');wifi.onsubmit=async e=>{e.preventDefault();"
     "let r=await fetch('/api/wifi',{method:'POST',headers:{'Content-Type':"
     "'application/x-www-form-urlencoded'},body:new URLSearchParams(new FormData(wifi))});"
-    "state.textContent=JSON.stringify(await r.json(),null,2);if(r.ok)setTimeout(load,500)};"
+    "show(await r.json());if(r.ok)setTimeout(load,500)};"
+    "pair.onsubmit=async e=>{e.preventDefault();let r=await fetch('/api/companions/pair',"
+    "{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:"
+    "new URLSearchParams(new FormData(pair))});state.textContent=JSON.stringify(await "
+    "r.json());pair.code.value='';if(r.ok)setTimeout(load,250)};"
     "temp.onsubmit=async e=>{e.preventDefault();let r=await fetch('/api/temperature',"
     "{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},"
-    "body:new URLSearchParams(new FormData(temp))});state.textContent=JSON.stringify("
-    "await r.json(),null,2);if(r.ok)setTimeout(load,250)};clear.onclick=async()=>{let r="
+    "body:new URLSearchParams(new FormData(temp))});show(await r.json());if(r.ok)"
+    "setTimeout(load,250)};clear.onclick=async()=>{let r="
     "await fetch('/api/wifi/clear/request',{method:'POST'});let j=await r.json();if(!r.ok)"
-    "{state.textContent=JSON.stringify(j,null,2);return}if(confirm('Clear saved Wi-Fi and "
+    "{show(j);return}if(confirm('Clear saved Wi-Fi and "
     "remain in Setup Mode?')){r=await fetch('/api/wifi/clear/confirm',{method:'POST',"
     "headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams("
-    "{token:j.token})});state.textContent=JSON.stringify(await r.json(),null,2);"
+    "{token:j.token})});show(await r.json());"
     "if(r.ok)setTimeout(load,250)}};"
     "load()</script></body></html>";
 
@@ -49,6 +65,9 @@ constexpr deck_setup_http_route_spec_t kRoutes[] = {
     {DECK_SETUP_HTTP_TEMPERATURE, DECK_SETUP_HTTP_POST, "/api/temperature"},
     {DECK_SETUP_HTTP_WIFI_CLEAR_REQUEST, DECK_SETUP_HTTP_POST, "/api/wifi/clear/request"},
     {DECK_SETUP_HTTP_WIFI_CLEAR_CONFIRM, DECK_SETUP_HTTP_POST, "/api/wifi/clear/confirm"},
+    {DECK_SETUP_HTTP_COMPANION_PAIR, DECK_SETUP_HTTP_POST, "/api/companions/pair"},
+    {DECK_SETUP_HTTP_COMPANION_SELECT, DECK_SETUP_HTTP_POST, "/api/companions/select"},
+    {DECK_SETUP_HTTP_COMPANION_REVOKE, DECK_SETUP_HTTP_POST, "/api/companions/revoke"},
 };
 
 class BufferWriter {
@@ -427,10 +446,114 @@ bool deck_setup_http_parse_confirmation_request(
     return true;
 }
 
+deck_setup_companion_request_result_t deck_setup_http_parse_companion_pair_request(
+    const char *body,
+    size_t body_size,
+    deck_companion_pair_request_t *request
+)
+{
+    constexpr size_t kMaximumBodySize = 160;
+    if (body == nullptr || request == nullptr || body_size == 0 ||
+        body_size > kMaximumBodySize) {
+        return DECK_SETUP_COMPANION_REQUEST_MALFORMED;
+    }
+    *request = {};
+    bool saw_address = false;
+    bool saw_code = false;
+    size_t offset = 0;
+    while (offset < body_size) {
+        size_t end = offset;
+        while (end < body_size && body[end] != '&') {
+            ++end;
+        }
+        size_t equals = offset;
+        while (equals < end && body[equals] != '=') {
+            ++equals;
+        }
+        if (equals == end) {
+            return DECK_SETUP_COMPANION_REQUEST_MALFORMED;
+        }
+        char key[20];
+        if (!decode_form_component(body + offset, equals - offset, key, sizeof(key))) {
+            return DECK_SETUP_COMPANION_REQUEST_MALFORMED;
+        }
+        if (std::strcmp(key, "hub_address") == 0) {
+            if (saw_address || !decode_form_component(
+                                   body + equals + 1,
+                                   end - equals - 1,
+                                   request->hub_address,
+                                   sizeof(request->hub_address)
+                               )) {
+                return DECK_SETUP_COMPANION_REQUEST_MALFORMED;
+            }
+            saw_address = true;
+        } else if (std::strcmp(key, "code") == 0) {
+            if (saw_code || !decode_form_component(
+                                body + equals + 1,
+                                end - equals - 1,
+                                request->code,
+                                sizeof(request->code)
+                            )) {
+                return DECK_SETUP_COMPANION_REQUEST_MALFORMED;
+            }
+            saw_code = true;
+        } else {
+            return DECK_SETUP_COMPANION_REQUEST_MALFORMED;
+        }
+        offset = end + 1;
+    }
+    if (!saw_address || !saw_code) {
+        return DECK_SETUP_COMPANION_REQUEST_MALFORMED;
+    }
+    if (!deck_companion_pairing_code_valid(request->code)) {
+        return DECK_SETUP_COMPANION_REQUEST_INVALID_CODE;
+    }
+    if (!deck_companion_hub_address_valid(request->hub_address)) {
+        return DECK_SETUP_COMPANION_REQUEST_INVALID_ADDRESS;
+    }
+    return DECK_SETUP_COMPANION_REQUEST_OK;
+}
+
+bool deck_setup_http_parse_companion_profile_request(
+    const char *body,
+    size_t body_size,
+    char *profile_id,
+    size_t profile_id_capacity
+)
+{
+    constexpr char kPrefix[] = "profile_id=";
+    if (body == nullptr || profile_id == nullptr ||
+        profile_id_capacity < DECK_COMPANION_PROFILE_ID_CAPACITY ||
+        body_size < sizeof(kPrefix) - 1 || body_size > 128 ||
+        std::memcmp(body, kPrefix, sizeof(kPrefix) - 1) != 0 ||
+        std::memchr(body, '&', body_size) != nullptr ||
+        !decode_form_component(
+            body + sizeof(kPrefix) - 1,
+            body_size - sizeof(kPrefix) + 1,
+            profile_id,
+            profile_id_capacity
+        ) || std::strlen(profile_id) != 71 ||
+        std::memcmp(profile_id, "sha256:", 7) != 0) {
+        if (profile_id != nullptr && profile_id_capacity != 0) {
+            profile_id[0] = '\0';
+        }
+        return false;
+    }
+    for (size_t index = 7; index < 71; ++index) {
+        if (!((profile_id[index] >= '0' && profile_id[index] <= '9') ||
+              (profile_id[index] >= 'a' && profile_id[index] <= 'f'))) {
+            profile_id[0] = '\0';
+            return false;
+        }
+    }
+    return true;
+}
+
 bool deck_setup_http_render_status(
     const deck_setup_snapshot_t *snapshot,
     const deck_wifi_config_snapshot_t *wifi,
     const deck_device_settings_snapshot_t *settings,
+    const deck_companion_profiles_snapshot_t *companions,
     const deck_setup_scan_result_t *networks,
     size_t network_count,
     char *buffer,
@@ -438,6 +561,7 @@ bool deck_setup_http_render_status(
 )
 {
     if (snapshot == nullptr || wifi == nullptr || settings == nullptr ||
+        companions == nullptr ||
         (networks == nullptr && network_count != 0)) {
         return false;
     }
@@ -449,7 +573,7 @@ bool deck_setup_http_render_status(
         static_cast<unsigned>(snapshot->session_id)
     );
     writer.append_json_string(snapshot->address);
-    writer.append(",\"pairing\":\"m1_not_available\",\"wifi\":{");
+    writer.append(",\"wifi\":{");
     writer.append(
         "\"state\":\"%s\",\"record\":\"%s\",\"candidate_record\":\"%s\","
         "\"has_active\":%s,\"has_candidate\":%s,\"generation\":%u,"
@@ -468,7 +592,7 @@ bool deck_setup_http_render_status(
     writer.append(
         "\"state\":\"%s\",\"record\":\"%s\",\"candidate_record\":\"%s\","
         "\"has_active\":%s,\"has_candidate\":%s,\"generation\":%u,"
-        "\"temperature_offset_tenths_c\":%d},\"networks\":[",
+        "\"temperature_offset_tenths_c\":%d},",
         deck_device_settings_state_name(settings->state),
         deck_device_settings_record_status_name(settings->record_status),
         deck_device_settings_record_status_name(settings->candidate_record_status),
@@ -477,6 +601,36 @@ bool deck_setup_http_render_status(
         static_cast<unsigned>(settings->generation),
         static_cast<int>(settings->temperature_offset_tenths_c)
     );
+    writer.append("\"companions\":{");
+    writer.append(
+        "\"generation\":%u,\"storage_faulted\":%s,\"has_active\":%s,"
+        "\"active_profile_id\":",
+        static_cast<unsigned>(companions->generation),
+        companions->storage_faulted ? "true" : "false",
+        companions->has_active ? "true" : "false"
+    );
+    writer.append_json_string(companions->active_profile_id);
+    writer.append(",\"profiles\":[");
+    for (size_t index = 0; index < companions->count; ++index) {
+        if (index != 0) {
+            writer.append(",");
+        }
+        const deck_companion_profile_view_t &profile = companions->profiles[index];
+        writer.append("{\"profile_version\":%u,\"profile_id\":", static_cast<unsigned>(profile.profile_version));
+        writer.append_json_string(profile.profile_id);
+        writer.append(",\"display_name\":");
+        writer.append_json_string(profile.display_name);
+        writer.append(",\"hub_address\":");
+        writer.append_json_string(profile.hub_address);
+        writer.append(",\"certificate_fingerprint\":");
+        writer.append_json_string(profile.certificate_fingerprint);
+        writer.append(
+            ",\"priority\":%ld,\"last_success_unix_ms\":%llu}",
+            static_cast<long>(profile.priority),
+            static_cast<unsigned long long>(profile.last_success_unix_ms)
+        );
+    }
+    writer.append("]},\"networks\":[");
     for (size_t index = 0; index < network_count; ++index) {
         if (index != 0) {
             writer.append(",");
