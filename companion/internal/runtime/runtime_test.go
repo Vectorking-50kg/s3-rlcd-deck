@@ -14,20 +14,17 @@ import (
 )
 
 func TestRuntimeRejectsNonLoopbackManagementAddress(t *testing.T) {
-	_, err := companionruntime.New(companionruntime.Config{
-		ManagementAddress: "0.0.0.0:7777",
-		Version:           "1.2.3-test",
-	})
+	config := testConfig()
+	config.Management.Address = "0.0.0.0:7777"
+	_, err := companionruntime.New(config)
 	if !errors.Is(err, companionruntime.ErrManagementAddressNotLoopback) {
 		t.Fatalf("New() error = %v, want ErrManagementAddressNotLoopback", err)
 	}
 }
 
 func TestRuntimeServesReadOnlyStatus(t *testing.T) {
-	application, err := companionruntime.New(companionruntime.Config{
-		ManagementAddress: "127.0.0.1:0",
-		Version:           "1.2.3-test",
-	})
+	config := testConfig()
+	application, err := companionruntime.New(config)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -37,7 +34,13 @@ func TestRuntimeServesReadOnlyStatus(t *testing.T) {
 	go func() { done <- application.Run(ctx) }()
 
 	status := waitForState(t, application, companionruntime.StateReady)
-	response, err := http.Get("http://" + status.ManagementAddress + "/api/v1/status")
+	client, session, _ := loginManagement(t, status.ManagementAddress, config.Management.AdminToken)
+	request, err := http.NewRequest(http.MethodGet, "http://"+status.ManagementAddress+"/api/v1/status", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	request.AddCookie(session)
+	response, err := client.Do(request)
 	if err != nil {
 		t.Fatalf("GET status: %v", err)
 	}
@@ -62,11 +65,49 @@ func TestRuntimeServesReadOnlyStatus(t *testing.T) {
 	}
 }
 
+func loginManagement(
+	t *testing.T,
+	address string,
+	adminToken string,
+) (*http.Client, *http.Cookie, string) {
+	t.Helper()
+	request, err := http.NewRequest(
+		http.MethodPost,
+		"http://"+address+"/api/v1/login",
+		strings.NewReader(`{"token":"`+adminToken+`"}`),
+	)
+	if err != nil {
+		t.Fatalf("NewRequest(login) error = %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", "http://"+address)
+	client := &http.Client{}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatalf("POST login: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("POST login = %d %q, want 200", response.StatusCode, body)
+	}
+	var document struct {
+		CSRFToken string `json:"csrf_token"`
+	}
+	if err = json.NewDecoder(response.Body).Decode(&document); err != nil {
+		t.Fatalf("decode login: %v", err)
+	}
+	for _, cookie := range response.Cookies() {
+		if cookie.Name == "s3deck_session" {
+			return client, cookie, document.CSRFToken
+		}
+	}
+	t.Fatal("login did not return a session cookie")
+	return nil, nil, ""
+}
+
 func TestRuntimeServesEmbeddedWebApplication(t *testing.T) {
-	application, err := companionruntime.New(companionruntime.Config{
-		ManagementAddress: "127.0.0.1:0",
-		Version:           "1.2.3-test",
-	})
+	application, err := companionruntime.New(testConfig())
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -92,6 +133,119 @@ func TestRuntimeServesEmbeddedWebApplication(t *testing.T) {
 	cancel()
 	if err = <-done; err != nil {
 		t.Fatalf("Run() error = %v", err)
+	}
+}
+
+func TestRuntimeServesDeviceHubOnAnIndependentAuthenticatedListener(t *testing.T) {
+	config := testConfig()
+	application, err := companionruntime.New(config)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- application.Run(ctx) }()
+	status := waitForState(t, application, companionruntime.StateReady)
+	if status.DeviceHubAddress == "" || status.DeviceHubAddress == status.ManagementAddress {
+		t.Fatalf("status = %#v, want independent management and Device Hub addresses", status)
+	}
+
+	request, err := http.NewRequest(
+		http.MethodGet,
+		"http://"+status.DeviceHubAddress+"/api/v1/device/health",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	request.Header.Set("Authorization", "Bearer "+config.DeviceHub.BootstrapToken)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("GET Device Hub health: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("Device Hub health status = %d, want 200", response.StatusCode)
+	}
+	deviceRouteOnManagement, err := http.NewRequest(
+		http.MethodGet,
+		"http://"+status.ManagementAddress+"/api/v1/device/health",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	client, session, _ := loginManagement(t, status.ManagementAddress, config.Management.AdminToken)
+	deviceRouteOnManagement.AddCookie(session)
+	wrongListenerResponse, err := client.Do(deviceRouteOnManagement)
+	if err != nil {
+		t.Fatalf("GET Device route on management listener: %v", err)
+	}
+	wrongListenerResponse.Body.Close()
+	if wrongListenerResponse.StatusCode != http.StatusNotFound {
+		t.Fatalf("Device route on management listener = %d, want 404", wrongListenerResponse.StatusCode)
+	}
+	managementRouteOnDevice, err := http.NewRequest(
+		http.MethodGet,
+		"http://"+status.DeviceHubAddress+"/api/v1/bootstrap",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	managementRouteOnDevice.Header.Set("Authorization", "Bearer "+config.DeviceHub.BootstrapToken)
+	wrongListenerResponse, err = http.DefaultClient.Do(managementRouteOnDevice)
+	if err != nil {
+		t.Fatalf("GET management route on Device Hub: %v", err)
+	}
+	wrongListenerResponse.Body.Close()
+	if wrongListenerResponse.StatusCode != http.StatusNotFound {
+		t.Fatalf("management route on Device Hub = %d, want 404", wrongListenerResponse.StatusCode)
+	}
+	for name, token := range map[string]string{
+		"missing token":    "",
+		"management token": config.Management.AdminToken,
+	} {
+		t.Run(name, func(t *testing.T) {
+			unauthorizedRequest, requestErr := http.NewRequest(
+				http.MethodGet,
+				"http://"+status.DeviceHubAddress+"/api/v1/device/health",
+				nil,
+			)
+			if requestErr != nil {
+				t.Fatalf("NewRequest() error = %v", requestErr)
+			}
+			if token != "" {
+				unauthorizedRequest.Header.Set("Authorization", "Bearer "+token)
+			}
+			unauthorizedResponse, requestErr := http.DefaultClient.Do(unauthorizedRequest)
+			if requestErr != nil {
+				t.Fatalf("GET Device Hub health: %v", requestErr)
+			}
+			unauthorizedResponse.Body.Close()
+			if unauthorizedResponse.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("Device Hub cross-token status = %d, want 401", unauthorizedResponse.StatusCode)
+			}
+		})
+	}
+
+	cancel()
+	if err = <-done; err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+}
+
+func testConfig() companionruntime.Config {
+	return companionruntime.Config{
+		Version: "1.2.3-test",
+		Management: companionruntime.ManagementConfig{
+			Address:    "127.0.0.1:0",
+			AdminToken: "management-test-token-000000000001",
+		},
+		DeviceHub: companionruntime.DeviceHubConfig{
+			Address:        "127.0.0.1:0",
+			BootstrapToken: "device-hub-test-token-000000000001",
+		},
 	}
 }
 
