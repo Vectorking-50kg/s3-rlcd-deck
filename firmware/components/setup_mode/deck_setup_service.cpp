@@ -44,7 +44,7 @@ constexpr EventBits_t kApStartedBit = BIT0;
 constexpr EventBits_t kApStoppedBit = BIT1;
 constexpr EventBits_t kStaGotIpBit = BIT2;
 constexpr uint64_t kValidationTimeoutMs =
-    CONFIG_DECK_SETUP_INACTIVITY_TIMEOUT_SECONDS < 30 ? 5'000 : 20'000;
+    static_cast<uint64_t>(CONFIG_DECK_WIFI_VALIDATION_TIMEOUT_SECONDS) * 1'000U;
 constexpr uint64_t kClearConfirmationLifetimeMs = 60'000;
 
 enum class CommandType : uint8_t {
@@ -1277,10 +1277,16 @@ void service_task(void *task_context)
         deck_setup_mode_result_t tick_result = DECK_SETUP_MODE_UNCHANGED;
         bool validation_timed_out = false;
         if (xSemaphoreTake(service->state_mutex, portMAX_DELAY) == pdTRUE) {
-            tick_result = deck_setup_mode_tick(service->mode, monotonic_ms());
+            const uint64_t now_ms = monotonic_ms();
+            deck_wifi_config_snapshot_t wifi{};
+            if (deck_wifi_config_snapshot(service->wifi_config, &wifi) &&
+                wifi.state == DECK_WIFI_CONFIG_VALIDATING) {
+                (void)deck_setup_mode_activity(service->mode, now_ms);
+            }
+            tick_result = deck_setup_mode_tick(service->mode, now_ms);
             validation_timed_out = deck_wifi_config_tick(
                 service->wifi_config,
-                monotonic_ms()
+                now_ms
             );
             xSemaphoreGive(service->state_mutex);
         }

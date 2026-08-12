@@ -51,8 +51,10 @@ included in diagnostic events, screen errors, or HIL reports.
 
 Handled page, status, scan, and submission requests refresh the inactivity timer.
 Development builds use 12 seconds for automated HIL; release builds use the required 600
-seconds. When Setup closes after a failed candidate, the service restores and reconnects the
-last committed station configuration.
+seconds. Wi-Fi validation independently allows 20 seconds for association and DHCP in both
+variants, and an in-flight validation keeps Setup active until it reaches a result. When
+Setup closes after a failed candidate, the service restores and reconnects the last
+committed station configuration.
 
 The same recovery page owns the Deck's temperature calibration. Offsets are parsed as
 decimal tenths of a degree, range checked from -15.0 C through +15.0 C, and committed in
