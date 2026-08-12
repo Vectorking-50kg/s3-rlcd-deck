@@ -17,3 +17,6 @@
 ## 开发
 
 固件工程和可复现命令见 [firmware/README.md](firmware/README.md)。工程要求 ESP-IDF 6.0.2；开发构建提供 HIL 使用的结构化启动诊断，发布构建默认关闭该通道。
+
+M0 发布门槛、证据哈希与当前阻塞项统一记录在
+[M0 验收报告](docs/acceptance/m0.md)；只有自动 smoke/soak 和第二设备人工验收全部通过时，报告才会生成 `PASS` 结论。
