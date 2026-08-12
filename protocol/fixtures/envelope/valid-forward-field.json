@@ -1,0 +1,7 @@
+{
+  "type": "device.heartbeat",
+  "protocol_version": 1,
+  "future_minor_field": {
+    "ignored": true
+  }
+}

@@ -1,0 +1,27 @@
+:root {
+  color-scheme: light dark;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+
+body {
+  display: grid;
+  min-height: 100vh;
+  margin: 0;
+  place-items: center;
+  background: canvas;
+  color: canvastext;
+}
+
+main {
+  width: min(36rem, calc(100vw - 3rem));
+}
+
+.eyebrow,
+.boundary {
+  color: color-mix(in srgb, canvastext 65%, canvas);
+}
+
+h1 {
+  margin-block: 0.25rem 1rem;
+  font-size: clamp(2.5rem, 10vw, 5rem);
+}

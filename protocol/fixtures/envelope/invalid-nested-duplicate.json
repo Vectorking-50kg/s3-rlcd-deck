@@ -1,0 +1,8 @@
+{
+  "type": "device.hello",
+  "protocol_version": 1,
+  "capability": {
+    "name": "display",
+    "name": "serial"
+  }
+}

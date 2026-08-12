@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "name": "valid minimal envelope",
+      "file": "valid-minimal.json",
+      "accepted": true
+    },
+    {
+      "name": "valid forward field",
+      "file": "valid-forward-field.json",
+      "accepted": true
+    },
+    {
+      "name": "missing protocol version",
+      "file": "invalid-missing-version.json",
+      "accepted": false
+    },
+    {
+      "name": "unsupported major version",
+      "file": "invalid-version.json",
+      "accepted": false
+    },
+    {
+      "name": "noncanonical message type",
+      "file": "invalid-type.json",
+      "accepted": false
+    },
+    {
+      "name": "duplicate envelope field",
+      "file": "invalid-duplicate.json",
+      "accepted": false
+    },
+    {
+      "name": "duplicate nested field",
+      "file": "invalid-nested-duplicate.json",
+      "accepted": false
+    },
+    {
+      "name": "trailing document",
+      "file": "invalid-trailing.json",
+      "accepted": false
+    }
+  ]
+}

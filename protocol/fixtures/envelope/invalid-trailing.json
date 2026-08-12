@@ -1,0 +1,2 @@
+{"type":"device.hello","protocol_version":1}
+{"type":"device.heartbeat","protocol_version":1}
