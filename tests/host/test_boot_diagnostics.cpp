@@ -134,6 +134,12 @@ int main()
         "S3-RLCD-A1B2",
         "192.168.4.1",
         nullptr,
+        "validating",
+        "valid",
+        "corrupt",
+        true,
+        true,
+        7,
     };
     require(
         deck_setup_diagnostics_emit(&setup_info, sink),
@@ -144,7 +150,11 @@ int main()
             "{\"type\":\"setup_state\",\"active\":true,"
             "\"reason\":\"no_wifi_config\",\"session_id\":7,"
             "\"ssid\":\"S3-RLCD-A1B2\",\"address\":\"192.168.4.1\","
-            "\"error_stage\":\"\"}\n",
+            "\"error_stage\":\"\",\"wifi_config_state\":\"validating\","
+            "\"wifi_record_status\":\"valid\","
+            "\"wifi_candidate_record_status\":\"corrupt\","
+            "\"wifi_has_active\":true,\"wifi_has_candidate\":true,"
+            "\"wifi_generation\":7}\n",
         "expected setup diagnostics to omit the ephemeral password"
     );
 }

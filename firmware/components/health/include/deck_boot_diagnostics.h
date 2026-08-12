@@ -56,6 +56,12 @@ typedef struct {
     const char *ssid;
     const char *address;
     const char *error_stage;
+    const char *wifi_config_state;
+    const char *wifi_record_status;
+    const char *wifi_candidate_record_status;
+    bool wifi_has_active;
+    bool wifi_has_candidate;
+    uint32_t wifi_generation;
 } deck_setup_diagnostic_info_t;
 
 typedef void (*deck_diagnostic_write_fn)(void *context, const char *data, size_t size);

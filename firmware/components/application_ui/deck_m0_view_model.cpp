@@ -46,6 +46,48 @@ const char *setup_state_name(deck_setup_state_t state)
     }
 }
 
+const char *wifi_config_state_name(deck_wifi_config_view_state_t state)
+{
+    switch (state) {
+        case DECK_WIFI_CONFIG_VIEW_ACTIVE:
+            return "ACTIVE";
+        case DECK_WIFI_CONFIG_VIEW_VALIDATING:
+            return "VALIDATING";
+        case DECK_WIFI_CONFIG_VIEW_AUTH_FAILED:
+            return "AUTH_FAILED";
+        case DECK_WIFI_CONFIG_VIEW_TIMED_OUT:
+            return "TIMED_OUT";
+        case DECK_WIFI_CONFIG_VIEW_CONNECTION_FAILED:
+            return "CONNECTION_FAILED";
+        case DECK_WIFI_CONFIG_VIEW_STORAGE_ERROR:
+            return "STORAGE_ERROR";
+        case DECK_WIFI_CONFIG_VIEW_NO_ACTIVE:
+        default:
+            return "NO_ACTIVE";
+    }
+}
+
+const char *wifi_record_status_name(deck_wifi_record_view_status_t status)
+{
+    switch (status) {
+        case DECK_WIFI_RECORD_VIEW_VALID:
+            return "VALID";
+        case DECK_WIFI_RECORD_VIEW_RECOVERED_PREVIOUS:
+            return "RECOVERED";
+        case DECK_WIFI_RECORD_VIEW_CORRUPT:
+            return "CORRUPT";
+        case DECK_WIFI_RECORD_VIEW_UNSUPPORTED_SCHEMA:
+            return "UNSUPPORTED";
+        case DECK_WIFI_RECORD_VIEW_MIGRATION_FAILED:
+            return "MIGRATION_FAILED";
+        case DECK_WIFI_RECORD_VIEW_IO_ERROR:
+            return "IO_ERROR";
+        case DECK_WIFI_RECORD_VIEW_EMPTY:
+        default:
+            return "EMPTY";
+    }
+}
+
 bool same_text(const char *left, const char *right)
 {
     if (left == nullptr || right == nullptr) {
@@ -80,6 +122,10 @@ bool deck_m0_view_model_equal(const deck_m0_view_model_t *left, const deck_m0_vi
            left->key_event == right->key_event &&
            left->key_event_count == right->key_event_count && left->boot_event == right->boot_event &&
            left->boot_event_count == right->boot_event_count && left->wifi_state == right->wifi_state &&
+           left->wifi_config_state == right->wifi_config_state &&
+           left->wifi_record_status == right->wifi_record_status &&
+           left->wifi_candidate_record_status == right->wifi_candidate_record_status &&
+           left->wifi_config_generation == right->wifi_config_generation &&
            left->setup_state == right->setup_state &&
            memcmp(left->setup_ssid, right->setup_ssid, sizeof(left->setup_ssid)) == 0 &&
            memcmp(left->setup_password, right->setup_password, sizeof(left->setup_password)) == 0 &&
@@ -165,13 +211,19 @@ bool deck_m0_view_model_format(const deck_m0_view_model_t *model, char *buffer, 
         return false;
     }
 
-    char setup[192];
+    char setup[256];
     const int setup_size = model->setup_state == DECK_SETUP_ACTIVE
                                ? snprintf(
                                      setup,
                                      sizeof(setup),
-                                     "Wi-Fi %s / Setup ACTIVE\nAP %s\nPASS %s\nHTTP http://%s",
+                                     "Wi-Fi %s / CFG %s #%" PRIu32
+                                     " / REC %s/%s / Setup ACTIVE\n"
+                                     "AP %s\nPASS %s\nHTTP http://%s",
                                      wifi_state_name(model->wifi_state),
+                                     wifi_config_state_name(model->wifi_config_state),
+                                     model->wifi_config_generation,
+                                     wifi_record_status_name(model->wifi_record_status),
+                                     wifi_record_status_name(model->wifi_candidate_record_status),
                                      model->setup_ssid,
                                      model->setup_password,
                                      model->setup_address
@@ -179,8 +231,13 @@ bool deck_m0_view_model_format(const deck_m0_view_model_t *model, char *buffer, 
                                : snprintf(
                                      setup,
                                      sizeof(setup),
-                                     "Wi-Fi %s / Setup %s",
+                                     "Wi-Fi %s / CFG %s #%" PRIu32
+                                     " / REC %s/%s / Setup %s",
                                      wifi_state_name(model->wifi_state),
+                                     wifi_config_state_name(model->wifi_config_state),
+                                     model->wifi_config_generation,
+                                     wifi_record_status_name(model->wifi_record_status),
+                                     wifi_record_status_name(model->wifi_candidate_record_status),
                                      setup_state_name(model->setup_state)
                                  );
     if (setup_size < 0 || static_cast<size_t>(setup_size) >= sizeof(setup)) {

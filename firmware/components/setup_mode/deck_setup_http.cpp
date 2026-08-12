@@ -11,18 +11,26 @@ constexpr char kPage[] =
     "content='width=device-width,initial-scale=1'><title>Deck Setup / Recovery</title>"
     "<style>body{font:16px system-ui;max-width:42rem;margin:2rem auto;padding:0 1rem}"
     "button{padding:.7rem 1rem}pre{white-space:pre-wrap}</style></head><body>"
-    "<h1>Deck Setup / Recovery</h1><p>This temporary HTTP page only reports status and "
-    "nearby networks. Wi-Fi changes are enabled by the next M0 step.</p>"
-    "<button id=scan>Scan networks</button><pre id=state>Loading...</pre>"
+    "<h1>Deck Setup / Recovery</h1><p>Submit a network for transactional validation. "
+    "The last working configuration stays active until validation succeeds.</p>"
+    "<form id=wifi><label>SSID <input name=ssid maxlength=32 required></label> "
+    "<label>Password <input name=password type=password maxlength=63></label> "
+    "<button>Validate and activate</button></form>"
+    "<button id=scan type=button>Scan networks</button><pre id=state>Loading...</pre>"
     "<p><strong>Companion pairing is planned for M1.</strong></p>"
     "<script>async function load(method='GET',path='/api/status'){let r=await "
     "fetch(path,{method});state.textContent=JSON.stringify(await r.json(),null,2)}"
-    "scan.onclick=()=>load('POST','/api/scan');load()</script></body></html>";
+    "scan.onclick=()=>load('POST','/api/scan');wifi.onsubmit=async e=>{e.preventDefault();"
+    "let r=await fetch('/api/wifi',{method:'POST',headers:{'Content-Type':"
+    "'application/x-www-form-urlencoded'},body:new URLSearchParams(new FormData(wifi))});"
+    "state.textContent=JSON.stringify(await r.json(),null,2);if(r.ok)setTimeout(load,500)};"
+    "load()</script></body></html>";
 
 constexpr deck_setup_http_route_spec_t kRoutes[] = {
     {DECK_SETUP_HTTP_PAGE, DECK_SETUP_HTTP_GET, "/"},
     {DECK_SETUP_HTTP_STATUS, DECK_SETUP_HTTP_GET, "/api/status"},
     {DECK_SETUP_HTTP_SCAN, DECK_SETUP_HTTP_POST, "/api/scan"},
+    {DECK_SETUP_HTTP_WIFI, DECK_SETUP_HTTP_POST, "/api/wifi"},
 };
 
 class BufferWriter {
@@ -91,6 +99,56 @@ const char *reason_name(deck_setup_reason_t reason)
         default:
             return "none";
     }
+}
+
+int hex_value(char value)
+{
+    if (value >= '0' && value <= '9') {
+        return value - '0';
+    }
+    if (value >= 'a' && value <= 'f') {
+        return value - 'a' + 10;
+    }
+    if (value >= 'A' && value <= 'F') {
+        return value - 'A' + 10;
+    }
+    return -1;
+}
+
+bool decode_form_component(
+    const char *input,
+    size_t input_size,
+    char *output,
+    size_t output_capacity
+)
+{
+    if (input == nullptr || output == nullptr || output_capacity == 0) {
+        return false;
+    }
+    size_t output_size = 0;
+    for (size_t index = 0; index < input_size; ++index) {
+        unsigned char byte = static_cast<unsigned char>(input[index]);
+        if (byte == '%') {
+            if (index + 2 >= input_size) {
+                return false;
+            }
+            const int high = hex_value(input[index + 1]);
+            const int low = hex_value(input[index + 2]);
+            if (high < 0 || low < 0) {
+                return false;
+            }
+            byte = static_cast<unsigned char>((high << 4) | low);
+            index += 2;
+        } else if (byte == '+') {
+            byte = ' ';
+        }
+        if (byte < 0x20U || byte == 0x7fU || output_size + 1 >= output_capacity) {
+            return false;
+        }
+        output[output_size++] = static_cast<char>(byte);
+    }
+    output[output_size] = '\0';
+    return true;
 }
 
 }  // namespace
@@ -165,15 +223,92 @@ bool deck_setup_http_render_page(char *buffer, size_t buffer_size)
     return true;
 }
 
+deck_setup_wifi_request_result_t deck_setup_http_parse_wifi_request(
+    const char *body,
+    size_t body_size,
+    deck_wifi_credentials_t *credentials
+)
+{
+    constexpr size_t kMaximumBodySize = 256;
+    if (body == nullptr || credentials == nullptr || body_size == 0 ||
+        body_size > kMaximumBodySize) {
+        return DECK_SETUP_WIFI_REQUEST_MALFORMED;
+    }
+    *credentials = {};
+    bool saw_ssid = false;
+    bool saw_password = false;
+    size_t offset = 0;
+    while (offset < body_size) {
+        size_t end = offset;
+        while (end < body_size && body[end] != '&') {
+            ++end;
+        }
+        size_t equals = offset;
+        while (equals < end && body[equals] != '=') {
+            ++equals;
+        }
+        if (equals == end) {
+            return DECK_SETUP_WIFI_REQUEST_MALFORMED;
+        }
+        char key[16];
+        if (!decode_form_component(body + offset, equals - offset, key, sizeof(key))) {
+            return DECK_SETUP_WIFI_REQUEST_MALFORMED;
+        }
+        if (std::strcmp(key, "ssid") == 0) {
+            if (saw_ssid || !decode_form_component(
+                                body + equals + 1,
+                                end - equals - 1,
+                                credentials->ssid,
+                                sizeof(credentials->ssid)
+                            )) {
+                return DECK_SETUP_WIFI_REQUEST_MALFORMED;
+            }
+            saw_ssid = true;
+        } else if (std::strcmp(key, "password") == 0) {
+            if (saw_password) {
+                return DECK_SETUP_WIFI_REQUEST_MALFORMED;
+            }
+            if (end == equals + 1) {
+                credentials->password[0] = '\0';
+            } else if (!decode_form_component(
+                           body + equals + 1,
+                           end - equals - 1,
+                           credentials->password,
+                           sizeof(credentials->password)
+                       )) {
+                return DECK_SETUP_WIFI_REQUEST_MALFORMED;
+            }
+            saw_password = true;
+        } else {
+            return DECK_SETUP_WIFI_REQUEST_MALFORMED;
+        }
+        offset = end + 1;
+    }
+    if (!saw_ssid || !saw_password) {
+        return DECK_SETUP_WIFI_REQUEST_MALFORMED;
+    }
+    const size_t ssid_size = std::strlen(credentials->ssid);
+    if (ssid_size == 0 || ssid_size >= DECK_WIFI_SSID_CAPACITY) {
+        return DECK_SETUP_WIFI_REQUEST_INVALID_SSID;
+    }
+    const size_t password_size = std::strlen(credentials->password);
+    if (password_size != 0 && password_size < 8) {
+        return DECK_SETUP_WIFI_REQUEST_INVALID_PASSWORD;
+    }
+    return DECK_SETUP_WIFI_REQUEST_OK;
+}
+
 bool deck_setup_http_render_status(
     const deck_setup_snapshot_t *snapshot,
+    const deck_wifi_config_snapshot_t *wifi,
     const deck_setup_scan_result_t *networks,
     size_t network_count,
     char *buffer,
     size_t buffer_size
 )
 {
-    if (snapshot == nullptr || (networks == nullptr && network_count != 0)) {
+    if (snapshot == nullptr || wifi == nullptr ||
+        (networks == nullptr && network_count != 0)) {
         return false;
     }
     BufferWriter writer(buffer, buffer_size);
@@ -184,7 +319,22 @@ bool deck_setup_http_render_status(
         static_cast<unsigned>(snapshot->session_id)
     );
     writer.append_json_string(snapshot->address);
-    writer.append(",\"pairing\":\"m1_not_available\",\"networks\":[");
+    writer.append(",\"pairing\":\"m1_not_available\",\"wifi\":{");
+    writer.append(
+        "\"state\":\"%s\",\"record\":\"%s\",\"candidate_record\":\"%s\","
+        "\"has_active\":%s,\"has_candidate\":%s,\"generation\":%u,"
+        "\"active_ssid\":",
+        deck_wifi_config_state_name(wifi->state),
+        deck_wifi_record_status_name(wifi->record_status),
+        deck_wifi_record_status_name(wifi->candidate_record_status),
+        wifi->has_active ? "true" : "false",
+        wifi->has_candidate ? "true" : "false",
+        static_cast<unsigned>(wifi->generation)
+    );
+    writer.append_json_string(wifi->active_ssid);
+    writer.append(",\"candidate_ssid\":");
+    writer.append_json_string(wifi->candidate_ssid);
+    writer.append("},\"networks\":[");
     for (size_t index = 0; index < network_count; ++index) {
         if (index != 0) {
             writer.append(",");

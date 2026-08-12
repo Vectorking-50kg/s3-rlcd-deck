@@ -34,14 +34,28 @@ uint32_t handled_boot_long_press_count = 0;
 
 #ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
 
+#include <cerrno>
 #include <fcntl.h>
 #include <stdio.h>
 #include <unistd.h>
 
+#include "driver/usb_serial_jtag.h"
+#include "driver/usb_serial_jtag_vfs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 namespace {
+
+bool initialize_diagnostic_console_driver()
+{
+    usb_serial_jtag_driver_config_t configuration =
+        USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+    if (usb_serial_jtag_driver_install(&configuration) != ESP_OK) {
+        return false;
+    }
+    usb_serial_jtag_vfs_use_driver();
+    return true;
+}
 
 const char *reset_reason_name(esp_reset_reason_t reason)
 {
@@ -193,6 +207,10 @@ deck_m0_view_model_t make_initial_model(
         DECK_BUTTON_NONE,
         0,
         DECK_WIFI_UNAVAILABLE,
+        DECK_WIFI_CONFIG_VIEW_NO_ACTIVE,
+        DECK_WIFI_RECORD_VIEW_EMPTY,
+        DECK_WIFI_RECORD_VIEW_EMPTY,
+        0,
         DECK_SETUP_UNAVAILABLE,
         {},
         {},
@@ -292,6 +310,161 @@ const char *setup_reason_name(deck_setup_reason_t reason)
 }
 #endif
 
+deck_wifi_config_view_state_t wifi_config_view_state(deck_wifi_config_state_t state)
+{
+    switch (state) {
+        case DECK_WIFI_CONFIG_ACTIVE:
+            return DECK_WIFI_CONFIG_VIEW_ACTIVE;
+        case DECK_WIFI_CONFIG_VALIDATING:
+            return DECK_WIFI_CONFIG_VIEW_VALIDATING;
+        case DECK_WIFI_CONFIG_AUTH_FAILED:
+            return DECK_WIFI_CONFIG_VIEW_AUTH_FAILED;
+        case DECK_WIFI_CONFIG_TIMED_OUT:
+            return DECK_WIFI_CONFIG_VIEW_TIMED_OUT;
+        case DECK_WIFI_CONFIG_CONNECTION_FAILED:
+            return DECK_WIFI_CONFIG_VIEW_CONNECTION_FAILED;
+        case DECK_WIFI_CONFIG_STORAGE_ERROR:
+            return DECK_WIFI_CONFIG_VIEW_STORAGE_ERROR;
+        case DECK_WIFI_CONFIG_NO_ACTIVE:
+        default:
+            return DECK_WIFI_CONFIG_VIEW_NO_ACTIVE;
+    }
+}
+
+deck_wifi_record_view_status_t wifi_record_view_status(deck_wifi_record_status_t status)
+{
+    switch (status) {
+        case DECK_WIFI_RECORD_VALID:
+            return DECK_WIFI_RECORD_VIEW_VALID;
+        case DECK_WIFI_RECORD_RECOVERED_PREVIOUS:
+            return DECK_WIFI_RECORD_VIEW_RECOVERED_PREVIOUS;
+        case DECK_WIFI_RECORD_CORRUPT:
+            return DECK_WIFI_RECORD_VIEW_CORRUPT;
+        case DECK_WIFI_RECORD_UNSUPPORTED_SCHEMA:
+            return DECK_WIFI_RECORD_VIEW_UNSUPPORTED_SCHEMA;
+        case DECK_WIFI_RECORD_MIGRATION_FAILED:
+            return DECK_WIFI_RECORD_VIEW_MIGRATION_FAILED;
+        case DECK_WIFI_RECORD_IO_ERROR:
+            return DECK_WIFI_RECORD_VIEW_IO_ERROR;
+        case DECK_WIFI_RECORD_EMPTY:
+        default:
+            return DECK_WIFI_RECORD_VIEW_EMPTY;
+    }
+}
+
+#ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
+int diagnostic_hex_value(char value)
+{
+    if (value >= '0' && value <= '9') {
+        return value - '0';
+    }
+    if (value >= 'a' && value <= 'f') {
+        return value - 'a' + 10;
+    }
+    if (value >= 'A' && value <= 'F') {
+        return value - 'A' + 10;
+    }
+    return -1;
+}
+
+bool decode_diagnostic_hex(
+    const char *encoded,
+    size_t encoded_size,
+    char *output,
+    size_t output_capacity
+)
+{
+    if (encoded == nullptr || output == nullptr || encoded_size % 2 != 0 ||
+        encoded_size / 2 >= output_capacity) {
+        return false;
+    }
+    for (size_t index = 0; index < encoded_size; index += 2) {
+        const int high = diagnostic_hex_value(encoded[index]);
+        const int low = diagnostic_hex_value(encoded[index + 1]);
+        if (high < 0 || low < 0) {
+            return false;
+        }
+        const unsigned char byte = static_cast<unsigned char>((high << 4) | low);
+        if (byte < 0x20U || byte == 0x7fU) {
+            return false;
+        }
+        output[index / 2] = static_cast<char>(byte);
+    }
+    output[encoded_size / 2] = '\0';
+    return true;
+}
+
+void handle_diagnostic_control_line(char *line)
+{
+    if (line == nullptr || application_setup == nullptr) {
+        return;
+    }
+    if (std::strcmp(line, "DECK_SETUP") == 0) {
+        (void)deck_setup_service_enter_from_boot(application_setup);
+        return;
+    }
+    if (std::strcmp(line, "DECK_RESTART") == 0) {
+        esp_restart();
+        return;
+    }
+    constexpr char kWifiPrefix[] = "DECK_WIFI ";
+    if (std::strncmp(line, kWifiPrefix, sizeof(kWifiPrefix) - 1) != 0) {
+        return;
+    }
+    char *ssid = line + sizeof(kWifiPrefix) - 1;
+    char *separator = std::strchr(ssid, ' ');
+    if (separator == nullptr) {
+        return;
+    }
+    *separator = '\0';
+    const char *password = separator + 1;
+    deck_wifi_credentials_t credentials{};
+    const bool ssid_ok = decode_diagnostic_hex(
+        ssid,
+        std::strlen(ssid),
+        credentials.ssid,
+        sizeof(credentials.ssid)
+    );
+    const bool password_ok = std::strcmp(password, "-") == 0 ||
+                             decode_diagnostic_hex(
+                                 password,
+                                 std::strlen(password),
+                                 credentials.password,
+                                 sizeof(credentials.password)
+                             );
+    if (ssid_ok && password_ok) {
+        (void)deck_setup_service_submit_wifi(application_setup, &credentials);
+    }
+    deck_wifi_credentials_clear(&credentials);
+}
+
+void diagnostic_control_task(void *)
+{
+    char line[256];
+    size_t line_size = 0;
+    while (true) {
+        char input[32];
+        const ssize_t size = read(STDIN_FILENO, input, sizeof(input));
+        if (size < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
+        for (ssize_t index = 0; index < size; ++index) {
+            if (input[index] == '\n') {
+                line[line_size] = '\0';
+                handle_diagnostic_control_line(line);
+                line_size = 0;
+            } else if (input[index] != '\r' && line_size + 1 < sizeof(line)) {
+                line[line_size++] = input[index];
+            } else if (line_size + 1 >= sizeof(line)) {
+                line_size = 0;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
+#endif
+
 void setup_event(void *, const deck_setup_service_event_t *event)
 {
     if (event == nullptr) {
@@ -299,14 +472,25 @@ void setup_event(void *, const deck_setup_service_event_t *event)
     }
     if (application_model_mutex != nullptr &&
         xSemaphoreTake(application_model_mutex, portMAX_DELAY) == pdTRUE) {
-        application_model.setup_state = event->state == DECK_SETUP_SERVICE_ACTIVE
+        application_model.setup_state = event->setup.active
                                             ? DECK_SETUP_ACTIVE
-                                            : event->state == DECK_SETUP_SERVICE_INACTIVE
-                                                  ? DECK_SETUP_IDLE
-                                                  : DECK_SETUP_UNAVAILABLE;
-        application_model.wifi_state = event->state == DECK_SETUP_SERVICE_ERROR
+                                            : event->state == DECK_SETUP_SERVICE_ERROR
+                                                  ? DECK_SETUP_UNAVAILABLE
+                                                  : DECK_SETUP_IDLE;
+        application_model.wifi_state = event->state == DECK_SETUP_SERVICE_ERROR ||
+                                               event->wifi.state == DECK_WIFI_CONFIG_STORAGE_ERROR
                                            ? DECK_WIFI_UNAVAILABLE
-                                           : DECK_WIFI_DISCONNECTED;
+                                           : event->wifi.state == DECK_WIFI_CONFIG_ACTIVE
+                                                 ? DECK_WIFI_CONNECTED
+                                                 : DECK_WIFI_DISCONNECTED;
+        application_model.wifi_config_state = wifi_config_view_state(event->wifi.state);
+        application_model.wifi_record_status = wifi_record_view_status(
+            event->wifi.record_status
+        );
+        application_model.wifi_candidate_record_status = wifi_record_view_status(
+            event->wifi.candidate_record_status
+        );
+        application_model.wifi_config_generation = event->wifi.generation;
         std::memcpy(
             application_model.setup_ssid,
             event->setup.ssid,
@@ -328,12 +512,18 @@ void setup_event(void *, const deck_setup_service_event_t *event)
     (void)publish_application_model(&published);
 #ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
     const deck_setup_diagnostic_info_t info = {
-        event->state == DECK_SETUP_SERVICE_ACTIVE,
+        event->setup.active,
         setup_reason_name(event->setup.reason),
         event->setup.session_id,
         event->setup.ssid,
         event->setup.address,
         event->error_stage,
+        deck_wifi_config_state_name(event->wifi.state),
+        deck_wifi_record_status_name(event->wifi.record_status),
+        deck_wifi_record_status_name(event->wifi.candidate_record_status),
+        event->wifi.has_active,
+        event->wifi.has_candidate,
+        event->wifi.generation,
     };
     const deck_diagnostic_sink_t sink = {write_stdout, nullptr};
     (void)deck_setup_diagnostics_emit(&info, sink);
@@ -345,16 +535,32 @@ void start_setup_after_ui_ready()
     if (application_setup != nullptr) {
         return;
     }
-    // The transactional active Wi-Fi store is introduced by #6. Until then no
-    // persisted configuration is considered valid, so first boot enters Setup.
-    application_setup = deck_setup_service_start(false, setup_event, nullptr);
+    application_setup = deck_setup_service_start(setup_event, nullptr);
 #ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
     if (application_setup == nullptr) {
         static constexpr char error[] =
             "{\"type\":\"setup_state\",\"active\":false,\"reason\":\"none\","
             "\"session_id\":0,\"ssid\":\"\",\"address\":\"192.168.4.1\","
-            "\"error_stage\":\"start\"}\n";
+            "\"error_stage\":\"start\",\"wifi_config_state\":\"no_active\","
+            "\"wifi_record_status\":\"empty\","
+            "\"wifi_candidate_record_status\":\"empty\","
+            "\"wifi_has_active\":false,\"wifi_has_candidate\":false,"
+            "\"wifi_generation\":0}\n";
         write_stdout(nullptr, error, sizeof(error) - 1);
+    } else {
+        if (xTaskCreatePinnedToCore(
+                diagnostic_control_task,
+                "diagnostic_control",
+                4'096,
+                nullptr,
+                1,
+                nullptr,
+                0
+            ) != pdPASS) {
+            static constexpr char control_error[] =
+                "{\"type\":\"diagnostic_error\",\"stage\":\"control\"}\n";
+            write_stdout(nullptr, control_error, sizeof(control_error) - 1);
+        }
     }
 #endif
 }
@@ -402,6 +608,7 @@ extern "C" void app_main(void)
 {
     const esp_app_desc_t *app = esp_app_get_description();
 #ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
+    const bool diagnostic_console_ready = initialize_diagnostic_console_driver();
     wait_for_diagnostic_host_ready();
     const deck_boot_info_t info = {
         app->version,
@@ -411,6 +618,11 @@ extern "C" void app_main(void)
     };
     const deck_diagnostic_sink_t sink = {write_stdout, nullptr};
     deck_boot_diagnostics_emit(&info, sink);
+    if (!diagnostic_console_ready) {
+        static constexpr char error[] =
+            "{\"type\":\"diagnostic_error\",\"stage\":\"console_driver\"}\n";
+        write_stdout(nullptr, error, sizeof(error) - 1);
+    }
 #endif
 
     application_panel = deck_rlcd_panel_create();
