@@ -33,6 +33,13 @@ RECORD_STATES = {
     "migration_failed",
     "io_error",
 }
+RUNTIME_DIAGNOSTIC_TYPES = {
+    "boot_ok",
+    "display_ready",
+    "display_progress",
+    "peripheral_state",
+    "setup_state",
+}
 
 
 class HilFailure(RuntimeError):
@@ -135,6 +142,7 @@ def open_serial(serial_module: Any, port: str, deadline: float) -> Any:
 
 def restart(serial_module: Any, connection: Any, port: str, timeout_seconds: float) -> Any:
     connection.write(b"DECK_RESTART\n")
+    connection.flush()
     connection.close()
     time.sleep(0.75)
     return open_serial(serial_module, port, time.monotonic() + timeout_seconds)
@@ -147,6 +155,24 @@ def ensure_setup_active(connection: Any, event: dict[str, Any], timeout_seconds:
     return read_event(
         connection,
         lambda current: current.get("type") == "setup_state" and current.get("active") is True,
+        timeout_seconds,
+        "enter Setup Mode",
+    )
+
+
+def enter_setup_session(connection: Any, timeout_seconds: float) -> dict[str, Any]:
+    """Start a fresh Setup session without relying on a one-shot startup event."""
+    read_event(
+        connection,
+        lambda current: current.get("type") in RUNTIME_DIAGNOSTIC_TYPES,
+        timeout_seconds,
+        "diagnostic runtime readiness",
+    )
+    connection.write(b"DECK_SETUP\n")
+    return read_event(
+        connection,
+        lambda current: current.get("type") == "setup_state"
+        and current.get("active") is True,
         timeout_seconds,
         "enter Setup Mode",
     )
@@ -188,13 +214,7 @@ def main() -> int:
             time.monotonic() + arguments.stage_timeout,
         )
         try:
-            initial = read_event(
-                connection,
-                lambda event: event.get("type") == "setup_state",
-                arguments.stage_timeout,
-                "initial state",
-            )
-            active_setup = ensure_setup_active(connection, initial, arguments.stage_timeout)
+            active_setup = enter_setup_session(connection, arguments.stage_timeout)
             initial_generation = active_setup["wifi_generation"]
 
             connection.write(correct_command)

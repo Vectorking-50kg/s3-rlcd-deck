@@ -51,8 +51,10 @@ included in diagnostic events, screen errors, or HIL reports.
 
 Handled page, status, scan, and submission requests refresh the inactivity timer.
 Development builds use 12 seconds for automated HIL; release builds use the required 600
-seconds. When Setup closes after a failed candidate, the service restores and reconnects the
-last committed station configuration.
+seconds. Wi-Fi validation independently allows 20 seconds for association and DHCP in both
+variants, and an in-flight validation keeps Setup active until it reaches a result. When
+Setup closes after a failed candidate, the service restores and reconnects the last
+committed station configuration.
 
 The same recovery page owns the Deck's temperature calibration. Offsets are parsed as
 decimal tenths of a degree, range checked from -15.0 C through +15.0 C, and committed in
@@ -182,6 +184,18 @@ namespace. It preserves `deck_settings`, other NVS namespaces, the rest of Flash
 
 ## Long-duration HIL
 
+For fast development feedback, use the 90-second contract. It exercises the display and
+peripheral diagnostics, Setup cycle, recoverable Wi-Fi failure, and stabilized-heap gate without
+waiting for manual button input. The recommended command includes the safe app-only flash so the
+observation starts from a fresh boot. It is not release evidence and cannot replace the physical
+button coverage or duration of the two-hour and 24-hour gates:
+
+```bash
+"$IDF_PYTHON_ENV_PATH/bin/python" tools/hil_smoke.py run \
+  --config tools/hil_smoke_dev.json \
+  --result-dir ".hil-results/dev-$(date -u +%Y%m%dT%H%M%SZ)"
+```
+
 After the transactional Wi-Fi HIL has committed a reachable test network, the unified
 harness can build, app-flash, monitor, exercise an unreachable Wi-Fi candidate, and produce
 auditable evidence for the two-hour M0 smoke. Activate ESP-IDF 6.0.2 and inspect the
@@ -198,24 +212,30 @@ non-destructive plan before starting:
 The port may be supplied with `--port`; otherwise the harness sends a read-only identity
 handshake to candidate Espressif serial devices and requires exactly one response identifying
 `s3-rlcd-deck`. Firmware older than this harness does not implement that handshake: run
-`discover` while the new development firmware is active, or supply the inspected port
-explicitly for the initial app-only flash. If automatic download does not work on the board,
-put the verified Deck in ROM download mode immediately before the explicit-port `run`.
-The default run executes Host tests, the development build, and only ESP-IDF's `app-flash`
-target before monitoring. It never requests whole-chip erase, eFuse changes,
-bootloader/partition writes, or irreversible security configuration.
+`discover` while the new development firmware is active, or supply the physically inspected
+port explicitly for the initial app-only flash. The default run executes Host tests and the
+development build, resolves the exact USB-JTAG adapter serial from that port, reads the Deck's
+partition table without modifying it, and requires an exact match with the generated table.
+Only then does it program and verify the same image in both OTA application slots. Writing both
+slots guarantees the monitored image is current regardless of the OTA selection record. It
+never requests whole-chip erase, eFuse changes, bootloader/partition/NVS writes, or irreversible
+security configuration.
 
 During the run, physically press KEY at least once and long-press BOOT at least once when
-prompted. The harness triggers one Setup session and submits a generated nonexistent open
-network, then requires the previous committed Wi-Fi generation to recover. It never reads,
-prints, sends, or stores the committed Wi-Fi password.
+prompted. The harness enters Setup when necessary, submits one generated nonexistent open
+network even when an older failed candidate is already visible, then requires that newly
+observed validation transaction to fail and the previous committed Wi-Fi generation to recover.
+It never reads, prints, sends, or stores the committed Wi-Fi password.
 
 Results are written beneath the ignored `.hil-results/` directory. `serial.jsonl` contains
 timestamped evidence restricted to an allow-list of structured Deck diagnostics; unknown
 console lines and fatal-log details are replaced with fixed redaction markers. `summary.json`
 contains the firmware commit, ESP-IDF version, run interval, reset/watchdog counts,
-display/I2C/Wi-Fi error counts,
-minimum and end-to-end heap data, coverage counters, and SHA-256 hashes. `config.json` is
+display/I2C/Wi-Fi error counts, minimum heap plus initial, configured warm-up baseline, and final
+free-heap data, coverage counters, and SHA-256 hashes. The checked-in contracts use a 60-second
+warm-up. `heap_drop_bytes` retains the initial-to-final measurement; the sustained-decline gate
+uses `stabilized_heap_drop_bytes` from the warm-up baseline so one-time Wi-Fi/Setup initialization
+allocations are not reported as a leak. A missing warm-up sample fails the run. `config.json` is
 the exact reusable run contract. Failed preparation or monitoring returns nonzero and still
-retains a failed summary and available evidence. `tools/hil_smoke_24h.json` is the checked-in
-configuration for the later soak ticket.
+retains a failed summary and available evidence.
+`tools/hil_smoke_24h.json` is the checked-in configuration for the later soak ticket.

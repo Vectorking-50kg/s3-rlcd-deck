@@ -13,15 +13,15 @@ CHECKED_MANIFEST = REPOSITORY_ROOT / "docs" / "acceptance" / "m0-manifest.json"
 CHECKED_REPORT = REPOSITORY_ROOT / "docs" / "acceptance" / "m0.md"
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
 RAW_HASH = "1" * 64
-SMOKE_CONFIG_HASH = "3d7a66ae283e651583824009eb2c139aeeefa6264073de336a8def737949d13c"
-SOAK_CONFIG_HASH = "f8a572aea23e52a150262b136c42969f6c8840ed06f151d6d14b9d0c4cad424f"
+SMOKE_CONFIG_HASH = "c22759f6d60040a266bffd42245a0718a9ecfb37de40e0f86886ac4c720af254"
+SOAK_CONFIG_HASH = "c4040adff4cf3a77711cb5449f4584d81a7325b398f30a8cd01f74fa59210b10"
 
 
 def smoke_summary(
     duration: int, started: str, ended: str, config_hash: str
 ) -> dict[str, object]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "passed",
         "firmware_commit": COMMIT,
         "firmware_version": "0.2.0-dev",
@@ -38,9 +38,13 @@ def smoke_summary(
         "setup_error_count": 0,
         "diagnostic_schema_error_count": 0,
         "minimum_free_heap_bytes": 98000,
-        "initial_free_heap_bytes": 100000,
+        "initial_free_heap_bytes": 150000,
+        "heap_warmup_seconds": 60.0,
+        "heap_baseline_elapsed_seconds": 61.0,
+        "heap_baseline_free_heap_bytes": 100000,
         "final_free_heap_bytes": 99500,
-        "heap_drop_bytes": 500,
+        "heap_drop_bytes": 50500,
+        "stabilized_heap_drop_bytes": 500,
         "display_updates": duration // 60,
         "peripheral_samples": duration,
         "setup_cycles": 1,
@@ -194,6 +198,52 @@ with tempfile.TemporaryDirectory() as temporary_directory:
     assert "Human Setup Mode evidence is missing" in blocked_report
     assert "M0 remains blocked" in blocked_report
 
+    failed_status_smoke = smoke_summary(
+        7200,
+        "2026-08-12T01:00:00Z",
+        "2026-08-12T03:00:00Z",
+        SMOKE_CONFIG_HASH,
+    )
+    failed_status_smoke["status"] = "failed"
+    failed_status_smoke_path = evidence_directory / "failed-status-smoke.json"
+    failed_status_smoke_path.write_text(
+        json.dumps(failed_status_smoke), encoding="utf-8"
+    )
+    failed_status_setup = json.loads(setup_path.read_text(encoding="utf-8"))
+    failed_status_setup["status"] = "failed"
+    failed_status_setup_path = evidence_directory / "failed-status-setup.json"
+    failed_status_setup_path.write_text(
+        json.dumps(failed_status_setup), encoding="utf-8"
+    )
+    failed_status_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    failed_status_manifest["smoke_summary"] = "evidence/failed-status-smoke.json"
+    failed_status_manifest["setup_result"] = "evidence/failed-status-setup.json"
+    failed_status_manifest_path = temporary / "failed-status-manifest.json"
+    failed_status_manifest_path.write_text(
+        json.dumps(failed_status_manifest), encoding="utf-8"
+    )
+    failed_status_report_path = temporary / "failed-status-m0.md"
+    failed_status = subprocess.run(
+        [
+            sys.executable,
+            str(REPORT_TOOL),
+            "--manifest",
+            str(failed_status_manifest_path),
+            "--output",
+            str(failed_status_report_path),
+        ],
+        cwd=REPOSITORY_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert failed_status.returncode == 1
+    failed_status_report = failed_status_report_path.read_text(encoding="utf-8")
+    assert "2-hour smoke evidence status is not passed" in failed_status_report
+    assert (
+        "Human Setup Mode evidence status is not passed" in failed_status_report
+    )
+
     spoofed_manifest = dict(blocked_manifest)
     spoofed_manifest["known_limitations"] = ["**Status:** PASS"]
     spoofed_manifest_path = temporary / "spoofed-manifest.json"
@@ -282,6 +332,7 @@ with tempfile.TemporaryDirectory() as temporary_directory:
     unsafe_smoke["minimum_free_heap_bytes"] = -1
     unsafe_smoke["final_free_heap_bytes"] = 1
     unsafe_smoke["heap_drop_bytes"] = 99999
+    unsafe_smoke["stabilized_heap_drop_bytes"] = 99999
     unsafe_smoke_path = evidence_directory / "unsafe-smoke.json"
     unsafe_smoke_path.write_text(json.dumps(unsafe_smoke), encoding="utf-8")
     wrong_commit_setup = json.loads(setup_path.read_text(encoding="utf-8"))
@@ -350,6 +401,79 @@ with tempfile.TemporaryDirectory() as temporary_directory:
     assert "2-hour smoke evidence schema is invalid" in leaky_report
     assert "sensitive-value-that-must-not-be-rendered" not in leaky_report
 
+    oversized_smoke = smoke_summary(
+        7200,
+        "2026-08-12T01:00:00Z",
+        "2026-08-12T03:00:00Z",
+        SMOKE_CONFIG_HASH,
+    )
+    oversized_smoke["duration_seconds"] = 10**1000
+    oversized_smoke_path = evidence_directory / "oversized-smoke.json"
+    oversized_smoke_path.write_text(json.dumps(oversized_smoke), encoding="utf-8")
+    oversized_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    oversized_manifest["smoke_summary"] = "evidence/oversized-smoke.json"
+    oversized_manifest_path = temporary / "oversized-manifest.json"
+    oversized_manifest_path.write_text(json.dumps(oversized_manifest), encoding="utf-8")
+    oversized_report_path = temporary / "oversized-m0.md"
+    oversized = subprocess.run(
+        [
+            sys.executable,
+            str(REPORT_TOOL),
+            "--manifest",
+            str(oversized_manifest_path),
+            "--output",
+            str(oversized_report_path),
+        ],
+        cwd=REPOSITORY_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert oversized.returncode == 1
+    oversized_report = oversized_report_path.read_text(encoding="utf-8")
+    assert "**Status:** BLOCKED" in oversized_report
+    assert "2-hour smoke duration is not finite" in oversized_report
+
+    injected_timestamp = smoke_summary(
+        7200,
+        "2026-08-12\n01:00:00Z",
+        "2026-08-12T03:00:00Z",
+        SMOKE_CONFIG_HASH,
+    )
+    injected_timestamp_path = evidence_directory / "injected-timestamp.json"
+    injected_timestamp_path.write_text(
+        json.dumps(injected_timestamp), encoding="utf-8"
+    )
+    injected_device = json.loads(setup_path.read_text(encoding="utf-8"))
+    injected_device["device"] = "phone\r**Status:** PASS"
+    injected_device_path = evidence_directory / "injected-device.json"
+    injected_device_path.write_text(json.dumps(injected_device), encoding="utf-8")
+    injected_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    injected_manifest["smoke_summary"] = "evidence/injected-timestamp.json"
+    injected_manifest["setup_result"] = "evidence/injected-device.json"
+    injected_manifest_path = temporary / "injected-manifest.json"
+    injected_manifest_path.write_text(json.dumps(injected_manifest), encoding="utf-8")
+    injected_report_path = temporary / "injected-m0.md"
+    injected = subprocess.run(
+        [
+            sys.executable,
+            str(REPORT_TOOL),
+            "--manifest",
+            str(injected_manifest_path),
+            "--output",
+            str(injected_report_path),
+        ],
+        cwd=REPOSITORY_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert injected.returncode == 1
+    injected_report = injected_report_path.read_text(encoding="utf-8")
+    assert "2-hour smoke evidence schema is invalid" in injected_report
+    assert "Human Setup Mode evidence schema is invalid" in injected_report
+    assert "**Status:** PASS" not in injected_report
+
     unsafe_redaction_setup = json.loads(setup_path.read_text(encoding="utf-8"))
     unsafe_redaction_setup["redaction_statement"] = (
         "do-not-copy-this-sensitive-value"
@@ -410,6 +534,28 @@ with tempfile.TemporaryDirectory() as temporary_directory:
     assert secret.returncode != 0
     assert not secret_report_path.exists()
     assert "do-not-copy-this-value" not in secret.stderr
+
+    control_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    control_manifest["test_commands"]["smoke"] = "python smoke.py\r**Status:** PASS"
+    control_manifest_path = temporary / "control-manifest.json"
+    control_manifest_path.write_text(json.dumps(control_manifest), encoding="utf-8")
+    control_report_path = temporary / "control-m0.md"
+    control = subprocess.run(
+        [
+            sys.executable,
+            str(REPORT_TOOL),
+            "--manifest",
+            str(control_manifest_path),
+            "--output",
+            str(control_report_path),
+        ],
+        cwd=REPOSITORY_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert control.returncode != 0
+    assert not control_report_path.exists()
 
     escaped_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     escaped_manifest["smoke_summary"] = str(smoke_path)

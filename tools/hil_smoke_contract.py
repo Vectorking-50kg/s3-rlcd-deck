@@ -5,6 +5,7 @@
 import datetime
 import hashlib
 import json
+import math
 import pathlib
 from dataclasses import dataclass
 from typing import Any
@@ -41,6 +42,7 @@ class SmokeFailure(RuntimeError):
 @dataclass(frozen=True)
 class SmokeConfig:
     duration_seconds: float
+    heap_warmup_seconds: float
     minimum_display_updates: int
     minimum_peripheral_samples: int
     require_key_event: bool
@@ -135,6 +137,7 @@ def load_config(path: pathlib.Path) -> tuple[SmokeConfig, dict[str, Any]]:
     required = {
         "schema_version": int,
         "duration_seconds": (int, float),
+        "heap_warmup_seconds": (int, float),
         "minimum_display_updates": int,
         "minimum_peripheral_samples": int,
         "require_key_event": bool,
@@ -148,10 +151,14 @@ def load_config(path: pathlib.Path) -> tuple[SmokeConfig, dict[str, Any]]:
         for name, expected in required.items()
     ):
         raise SmokeFailure("smoke config is missing a required field or has a wrong type")
-    if document["schema_version"] != 1:
+    if document["schema_version"] != 2:
         raise SmokeFailure("unsupported smoke config schema")
     if (
-        document["duration_seconds"] <= 0
+        not math.isfinite(float(document["duration_seconds"]))
+        or not math.isfinite(float(document["heap_warmup_seconds"]))
+        or document["duration_seconds"] <= 0
+        or document["heap_warmup_seconds"] < 0
+        or document["heap_warmup_seconds"] >= document["duration_seconds"]
         or document["minimum_display_updates"] < 1
         or document["minimum_peripheral_samples"] < 1
         or document["maximum_heap_drop_bytes"] < 0
@@ -162,6 +169,7 @@ def load_config(path: pathlib.Path) -> tuple[SmokeConfig, dict[str, Any]]:
     return (
         SmokeConfig(
             float(document["duration_seconds"]),
+            float(document["heap_warmup_seconds"]),
             document["minimum_display_updates"],
             document["minimum_peripheral_samples"],
             document["require_key_event"],
@@ -300,18 +308,31 @@ def analyze_capture(
     last_boot_count: int | None = None
     first_free_heap: int | None = None
     last_free_heap: int | None = None
+    heap_samples: list[tuple[float, int]] = []
     minimum_free_heap: int | None = None
     i2c_error_count = 0
     active_setup_sessions: set[int] = set()
     setup_cycles = 0
     setup_error_count = 0
     wifi_error_count = 0
+    wifi_validation_generation: int | None = None
     wifi_failure_generation: int | None = None
     wifi_failure_recoveries = 0
+    wifi_has_observed_active = False
+    previous_wifi_state: str | None = None
+    setup_state_events_seen = 0
+    setup_sessions_seen: set[int] = set()
+    persisted_failure_signatures: set[tuple[str, int, str]] = set()
     diagnostic_schema_error_count = 0
+    host_observation_started = False
+    host_observation_complete = False
 
     for envelope in envelopes:
         line = envelope["line"]
+        if line == "[host] observation started":
+            host_observation_started = True
+        elif line == "[host] observation complete":
+            host_observation_complete = True
         if line == REDACTED_FATAL_LINE:
             failures.append("fatal target log observed")
             continue
@@ -353,6 +374,7 @@ def analyze_capture(
             if first_free_heap is None:
                 first_free_heap = event["free_heap_bytes"]
             last_free_heap = event["free_heap_bytes"]
+            heap_samples.append((envelope["elapsed_seconds"], event["free_heap_bytes"]))
             minimum_free_heap = (
                 event["minimum_free_heap_bytes"]
                 if minimum_free_heap is None
@@ -363,6 +385,8 @@ def analyze_capture(
             )
         elif event_type == "setup_state":
             session_id = event["session_id"]
+            first_event_for_session = session_id not in setup_sessions_seen
+            setup_sessions_seen.add(session_id)
             if event["active"]:
                 active_setup_sessions.add(session_id)
             elif session_id in active_setup_sessions:
@@ -371,17 +395,71 @@ def analyze_capture(
             wifi_state = event["wifi_config_state"]
             if event["error_stage"] and wifi_state not in WIFI_FAILURE_STATES:
                 setup_error_count += 1
-            if wifi_state in WIFI_FAILURE_STATES:
-                if wifi_failure_generation is None:
-                    wifi_error_count += 1
-                wifi_failure_generation = event["wifi_generation"]
-            elif wifi_state == "active" and wifi_failure_generation is not None:
+            if wifi_state == "validating":
+                wifi_validation_generation = event["wifi_generation"]
+            elif wifi_state in WIFI_FAILURE_STATES:
+                failure_signature = (
+                    wifi_state,
+                    event["wifi_generation"],
+                    event["wifi_candidate_record_status"],
+                )
+                validated_failure = (
+                    wifi_validation_generation == event["wifi_generation"]
+                )
+                inherited_startup_failure = (
+                    setup_state_events_seen == 0
+                    and not wifi_has_observed_active
+                    and not validated_failure
+                    and event["wifi_has_candidate"]
+                    and wifi_state != "storage_error"
+                )
+                reopened_persisted_candidate = (
+                    first_event_for_session
+                    and event["active"]
+                    and event["reason"] == "boot_long_press"
+                    and not validated_failure
+                    and event["wifi_has_candidate"]
+                    and wifi_state != "storage_error"
+                    and failure_signature in persisted_failure_signatures
+                )
+                new_failure_episode = previous_wifi_state not in WIFI_FAILURE_STATES
+                new_storage_failure = (
+                    wifi_state == "storage_error"
+                    and previous_wifi_state != "storage_error"
+                )
                 if (
-                    event["wifi_generation"] == wifi_failure_generation
-                    and event["wifi_has_active"] is True
+                    (new_failure_episode or new_storage_failure)
+                    and not inherited_startup_failure
+                    and not reopened_persisted_candidate
                 ):
-                    wifi_failure_recoveries += 1
-                    wifi_failure_generation = None
+                    wifi_error_count += 1
+                    wifi_failure_generation = event["wifi_generation"]
+                if (
+                    event["wifi_has_candidate"]
+                    and wifi_state != "storage_error"
+                    and (
+                        inherited_startup_failure
+                        or validated_failure
+                        or (
+                            (new_failure_episode or new_storage_failure)
+                            and not reopened_persisted_candidate
+                        )
+                    )
+                ):
+                    persisted_failure_signatures.add(failure_signature)
+                if validated_failure:
+                    wifi_validation_generation = None
+            elif wifi_state == "active":
+                wifi_has_observed_active = True
+                if wifi_failure_generation is not None:
+                    if (
+                        event["wifi_generation"] == wifi_failure_generation
+                        and event["wifi_has_active"] is True
+                    ):
+                        wifi_failure_recoveries += 1
+                        wifi_failure_generation = None
+            previous_wifi_state = wifi_state
+            setup_state_events_seen += 1
 
     duration_seconds = envelopes[-1]["elapsed_seconds"]
     reset_count = max(0, len(boot_events) - 1)
@@ -403,14 +481,30 @@ def analyze_capture(
         if first_boot_count is not None and last_boot_count is not None
         else 0
     )
+    heap_baseline = next(
+        (
+            (elapsed, free_heap)
+            for elapsed, free_heap in heap_samples
+            if elapsed >= config.heap_warmup_seconds
+        ),
+        (None, None),
+    )
+    heap_baseline_elapsed_seconds, heap_baseline_free_heap = heap_baseline
     heap_drop_bytes = (
         max(0, first_free_heap - last_free_heap)
         if first_free_heap is not None and last_free_heap is not None
         else 0
     )
+    stabilized_heap_drop_bytes = (
+        max(0, heap_baseline_free_heap - last_free_heap)
+        if heap_baseline_free_heap is not None and last_free_heap is not None
+        else None
+    )
 
     if not boot_events:
         failures.append("no boot_ok event observed")
+    if host_observation_started and not host_observation_complete:
+        failures.append("live observation did not complete")
     if duration_seconds < config.duration_seconds:
         failures.append("configured smoke duration was not reached")
     if reset_count:
@@ -441,14 +535,16 @@ def analyze_capture(
         failures.append("additional Wi-Fi failure observed")
     if not config.require_wifi_failure_recovery and wifi_error_count:
         failures.append("unexpected Wi-Fi failure observed")
-    if heap_drop_bytes > config.maximum_heap_drop_bytes:
+    if heap_baseline_free_heap is None:
+        failures.append("stabilized heap baseline missing")
+    elif stabilized_heap_drop_bytes > config.maximum_heap_drop_bytes:
         failures.append("sustained free-heap decline exceeded limit")
     if first_free_heap is None or last_free_heap is None or minimum_free_heap is None:
         failures.append("heap evidence missing")
 
     firmware_version = boot_events[0]["firmware_version"] if boot_events else ""
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "passed" if not failures else "failed",
         "firmware_commit": firmware_commit,
         "firmware_version": firmware_version,
@@ -466,8 +562,12 @@ def analyze_capture(
         "diagnostic_schema_error_count": diagnostic_schema_error_count,
         "minimum_free_heap_bytes": minimum_free_heap,
         "initial_free_heap_bytes": first_free_heap,
+        "heap_warmup_seconds": config.heap_warmup_seconds,
+        "heap_baseline_elapsed_seconds": heap_baseline_elapsed_seconds,
+        "heap_baseline_free_heap_bytes": heap_baseline_free_heap,
         "final_free_heap_bytes": last_free_heap,
         "heap_drop_bytes": heap_drop_bytes,
+        "stabilized_heap_drop_bytes": stabilized_heap_drop_bytes,
         "display_updates": display_updates,
         "peripheral_samples": peripheral_samples,
         "setup_cycles": setup_cycles,
@@ -487,7 +587,7 @@ def empty_failure_summary(
     source_dirty: bool = False,
 ) -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "failed",
         "firmware_commit": firmware_commit_value,
         "firmware_version": "",
@@ -505,8 +605,12 @@ def empty_failure_summary(
         "diagnostic_schema_error_count": 0,
         "minimum_free_heap_bytes": None,
         "initial_free_heap_bytes": None,
+        "heap_warmup_seconds": None,
+        "heap_baseline_elapsed_seconds": None,
+        "heap_baseline_free_heap_bytes": None,
         "final_free_heap_bytes": None,
         "heap_drop_bytes": 0,
+        "stabilized_heap_drop_bytes": None,
         "display_updates": 0,
         "peripheral_samples": 0,
         "setup_cycles": 0,

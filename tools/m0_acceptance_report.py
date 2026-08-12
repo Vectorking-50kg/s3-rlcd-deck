@@ -36,8 +36,12 @@ HIL_SUMMARY_SCHEMA: dict[str, type | tuple[type, ...]] = {
     "diagnostic_schema_error_count": int,
     "minimum_free_heap_bytes": int,
     "initial_free_heap_bytes": int,
+    "heap_warmup_seconds": (int, float),
+    "heap_baseline_elapsed_seconds": (int, float),
+    "heap_baseline_free_heap_bytes": int,
     "final_free_heap_bytes": int,
     "heap_drop_bytes": int,
+    "stabilized_heap_drop_bytes": int,
     "display_updates": int,
     "peripheral_samples": int,
     "setup_cycles": int,
@@ -97,6 +101,9 @@ SECRET_COMMAND_PATTERNS = (
     re.compile(r"(?:password|token|credential|ssid)\s*[:=]", re.IGNORECASE),
     re.compile(r"\bDECK_WIFI\s", re.IGNORECASE),
 )
+RFC3339_TIMESTAMP = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})"
+)
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[1]
 CONTROLLED_CONFIG_PATHS = {
     "2-hour smoke": REPOSITORY_ROOT / "tools" / "hil_smoke_2h.json",
@@ -105,6 +112,7 @@ CONTROLLED_CONFIG_PATHS = {
 CONTROLLED_CONFIG_SCHEMA: dict[str, object] = {
     "schema_version": int,
     "duration_seconds": (int, float),
+    "heap_warmup_seconds": (int, float),
     "minimum_display_updates": int,
     "minimum_peripheral_samples": int,
     "require_key_event": bool,
@@ -150,14 +158,24 @@ def load_optional_evidence(
     return load_json(evidence_path(manifest_path, value))
 
 
+def is_finite_number(value: int | float) -> bool:
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
 def controlled_config(label: str) -> tuple[dict[str, Any], str]:
     path = CONTROLLED_CONFIG_PATHS[label]
     document = load_json(path)
     if (
         not exact_schema(document, CONTROLLED_CONFIG_SCHEMA)
-        or document["schema_version"] != 1
-        or not math.isfinite(document["duration_seconds"])
+        or document["schema_version"] != 2
+        or not is_finite_number(document["duration_seconds"])
+        or not is_finite_number(document["heap_warmup_seconds"])
         or document["duration_seconds"] <= 0
+        or document["heap_warmup_seconds"] < 0
+        or document["heap_warmup_seconds"] >= document["duration_seconds"]
         or document["minimum_display_updates"] < 1
         or document["minimum_peripheral_samples"] < 1
         or document["maximum_heap_drop_bytes"] < 0
@@ -177,6 +195,8 @@ def controlled_config(label: str) -> tuple[dict[str, Any], str]:
 
 
 def parse_timestamp(value: str) -> datetime.datetime | None:
+    if RFC3339_TIMESTAMP.fullmatch(value) is None:
+        return None
     try:
         parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
@@ -193,6 +213,10 @@ def markdown_escape(value: str) -> str:
     for marker in ("`", "*", "_", "[", "]", "|", "<", ">"):
         escaped = escaped.replace(marker, f"\\{marker}")
     return escaped
+
+
+def contains_control_character(value: str) -> bool:
+    return any(ord(character) < 32 or ord(character) == 127 for character in value)
 
 
 def exact_schema(document: dict[str, Any], schema: dict[str, object]) -> bool:
@@ -219,7 +243,7 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     if set(commands) != {"host", "smoke", "soak", "setup"} or any(
         type(value) is not str
         or not value
-        or "\n" in value
+        or contains_control_character(value)
         or "`" in value
         or len(value) > 512
         for value in commands.values()
@@ -233,7 +257,10 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         raise ReportFailure("manifest test commands may contain credential material")
     for name in ("known_limitations", "out_of_scope"):
         if any(
-            type(value) is not str or not value or "\n" in value or len(value) > 256
+            type(value) is not str
+            or not value
+            or contains_control_character(value)
+            or len(value) > 256
             for value in manifest[name]
         ):
             raise ReportFailure(f"manifest {name} entries are invalid")
@@ -255,16 +282,18 @@ def validate_hil_summary(
     if not hil_summary_safe_to_render(summary):
         return [f"{label} evidence schema is invalid."]
     blockers: list[str] = []
-    if summary["schema_version"] != 1 or summary["status"] not in {"passed", "failed"}:
+    if summary["schema_version"] != 2 or summary["status"] not in {"passed", "failed"}:
         blockers.append(f"{label} evidence schema is invalid.")
         return blockers
+    if summary["status"] != "passed":
+        blockers.append(f"{label} evidence status is not passed.")
     if summary["firmware_commit"] != expected_commit:
         blockers.append(f"{label} firmware commit does not match manifest.")
     if summary["toolchain_version"] != "ESP-IDF v6.0.2":
         blockers.append(f"{label} toolchain is not ESP-IDF v6.0.2.")
     if summary["source_dirty"]:
         blockers.append(f"{label} source tree was dirty.")
-    if not math.isfinite(summary["duration_seconds"]):
+    if not is_finite_number(summary["duration_seconds"]):
         blockers.append(f"{label} duration is not finite.")
     elif summary["duration_seconds"] < config["duration_seconds"]:
         blockers.append(f"{label} duration is shorter than required.")
@@ -276,6 +305,15 @@ def validate_hil_summary(
         blockers.append(f"{label} timestamp interval is shorter than required.")
     if summary["config_sha256"] != expected_config_hash:
         blockers.append(f"{label} config hash does not match the controlled config.")
+    if (
+        not is_finite_number(summary["heap_warmup_seconds"])
+        or not is_finite_number(summary["heap_baseline_elapsed_seconds"])
+        or summary["heap_warmup_seconds"] != config["heap_warmup_seconds"]
+        or summary["heap_baseline_elapsed_seconds"]
+        < summary["heap_warmup_seconds"]
+        or summary["heap_baseline_elapsed_seconds"] > summary["duration_seconds"]
+    ):
+        blockers.append(f"{label} stabilized heap timing is invalid.")
     numeric_fields = (
         "reset_count",
         "watchdog_count",
@@ -286,8 +324,12 @@ def validate_hil_summary(
         "diagnostic_schema_error_count",
         "minimum_free_heap_bytes",
         "initial_free_heap_bytes",
+        "heap_warmup_seconds",
+        "heap_baseline_elapsed_seconds",
+        "heap_baseline_free_heap_bytes",
         "final_free_heap_bytes",
         "heap_drop_bytes",
+        "stabilized_heap_drop_bytes",
         "display_updates",
         "peripheral_samples",
         "setup_cycles",
@@ -323,16 +365,26 @@ def validate_hil_summary(
     expected_heap_drop = max(
         0, summary["initial_free_heap_bytes"] - summary["final_free_heap_bytes"]
     )
+    expected_stabilized_heap_drop = max(
+        0,
+        summary["heap_baseline_free_heap_bytes"]
+        - summary["final_free_heap_bytes"],
+    )
     if (
         summary["minimum_free_heap_bytes"] <= 0
         or summary["initial_free_heap_bytes"] <= 0
+        or summary["heap_baseline_free_heap_bytes"] <= 0
         or summary["final_free_heap_bytes"] <= 0
         or summary["minimum_free_heap_bytes"] > summary["initial_free_heap_bytes"]
+        or summary["minimum_free_heap_bytes"]
+        > summary["heap_baseline_free_heap_bytes"]
         or summary["minimum_free_heap_bytes"] > summary["final_free_heap_bytes"]
         or summary["heap_drop_bytes"] != expected_heap_drop
+        or summary["stabilized_heap_drop_bytes"]
+        != expected_stabilized_heap_drop
     ):
         blockers.append(f"{label} heap values are invalid.")
-    if summary["heap_drop_bytes"] > config["maximum_heap_drop_bytes"]:
+    if summary["stabilized_heap_drop_bytes"] > config["maximum_heap_drop_bytes"]:
         blockers.append(f"{label} heap decline exceeds the controlled config.")
     return blockers
 
@@ -362,6 +414,8 @@ def validate_setup_result(
     ):
         return ["Human Setup Mode evidence schema is invalid."]
     blockers: list[str] = []
+    if setup["status"] != "passed":
+        blockers.append("Human Setup Mode evidence status is not passed.")
     if setup["firmware_commit"] != expected_commit:
         blockers.append("Human Setup Mode firmware commit does not match manifest.")
     started = parse_timestamp(setup["started_at"])
@@ -379,7 +433,7 @@ def setup_result_safe_to_render(setup: dict[str, Any]) -> bool:
         and setup["status"] in {"passed", "failed"}
         and re.fullmatch(r"[0-9a-f]{40}", setup["firmware_commit"]) is not None
         and bool(setup["device"])
-        and "\n" not in setup["device"]
+        and not contains_control_character(setup["device"])
         and len(setup["device"]) <= 128
         and valid_timestamp(setup["started_at"])
         and valid_timestamp(setup["ended_at"])

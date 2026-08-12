@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "status": "failed",
-  "firmware_commit": "9d6b8de24ea156ced10fe925b75164ababb30f55",
+  "firmware_commit": "3f338c3bb76b53220d54cec76afec9bcf690b6c3",
   "device": "Replace with phone or second-device model",
   "started_at": "2026-08-12T00:00:00Z",
   "ended_at": "2026-08-12T00:00:00Z",

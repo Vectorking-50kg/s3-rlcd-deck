@@ -8,4 +8,13 @@ config DECK_SETUP_INACTIVITY_TIMEOUT_SECONDS
         Stop the ephemeral AP and HTTP recovery page after this many seconds
         without a handled page, status, or scan request.
 
+config DECK_WIFI_VALIDATION_TIMEOUT_SECONDS
+    int "Wi-Fi validation timeout in seconds"
+    range 10 120
+    default 20
+    help
+        Allow station association and DHCP to complete before rejecting a
+        candidate or declaring a stored active network unreachable. This is
+        independent of the shorter development-only Setup inactivity timeout.
+
 endmenu
