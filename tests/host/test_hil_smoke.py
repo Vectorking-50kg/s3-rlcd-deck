@@ -110,6 +110,8 @@ with tempfile.TemporaryDirectory() as temporary_directory:
     assert dev_config["schema_version"] == 2
     assert dev_config["duration_seconds"] == 90
     assert dev_config["heap_warmup_seconds"] == 60
+    assert dev_config["require_key_event"] is False
+    assert dev_config["require_boot_event"] is False
     ignored_result = subprocess.run(
         ["git", "check-ignore", ".hil-results/probe/serial.jsonl"],
         cwd=REPOSITORY_ROOT,

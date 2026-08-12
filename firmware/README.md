@@ -184,14 +184,14 @@ namespace. It preserves `deck_settings`, other NVS namespaces, the rest of Flash
 
 ## Long-duration HIL
 
-For fast development feedback, use the 90-second contract after an intentional firmware build
-or app-only flash. It exercises the same diagnostics, physical buttons, Setup cycle, recoverable
-Wi-Fi failure, and stabilized-heap gate, but it is not release evidence and cannot replace the
-two-hour or 24-hour gates:
+For fast development feedback, use the 90-second contract. It exercises the display and
+peripheral diagnostics, Setup cycle, recoverable Wi-Fi failure, and stabilized-heap gate without
+waiting for manual button input. The recommended command includes the safe app-only flash so the
+observation starts from a fresh boot. It is not release evidence and cannot replace the physical
+button coverage or duration of the two-hour and 24-hour gates:
 
 ```bash
 "$IDF_PYTHON_ENV_PATH/bin/python" tools/hil_smoke.py run \
-  --monitor-only \
   --config tools/hil_smoke_dev.json \
   --result-dir ".hil-results/dev-$(date -u +%Y%m%dT%H%M%SZ)"
 ```
