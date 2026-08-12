@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "deck_transaction_store.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -18,41 +20,21 @@ typedef struct {
     char password[DECK_WIFI_PASSWORD_CAPACITY];
 } deck_wifi_credentials_t;
 
-typedef enum {
-    DECK_WIFI_STORAGE_CANDIDATE = 0,
-    DECK_WIFI_STORAGE_SLOT_0,
-    DECK_WIFI_STORAGE_SLOT_1,
-    DECK_WIFI_STORAGE_ACTIVE_MARKER,
-    DECK_WIFI_STORAGE_KEY_COUNT,
-} deck_wifi_storage_key_t;
+typedef deck_transaction_storage_key_t deck_wifi_storage_key_t;
+typedef deck_transaction_storage_result_t deck_wifi_storage_result_t;
+typedef deck_transaction_storage_read_fn deck_wifi_storage_read_fn;
+typedef deck_transaction_storage_write_fn deck_wifi_storage_write_fn;
+typedef deck_transaction_storage_erase_fn deck_wifi_storage_erase_fn;
+typedef deck_transaction_storage_adapter_t deck_wifi_storage_adapter_t;
 
-typedef enum {
-    DECK_WIFI_STORAGE_OK = 0,
-    DECK_WIFI_STORAGE_NOT_FOUND,
-    DECK_WIFI_STORAGE_ERROR,
-} deck_wifi_storage_result_t;
-
-typedef deck_wifi_storage_result_t (*deck_wifi_storage_read_fn)(
-    void *context,
-    deck_wifi_storage_key_t key,
-    uint8_t *output,
-    size_t capacity,
-    size_t *size
-);
-typedef bool (*deck_wifi_storage_write_fn)(
-    void *context,
-    deck_wifi_storage_key_t key,
-    const uint8_t *data,
-    size_t size
-);
-typedef bool (*deck_wifi_storage_erase_fn)(void *context, deck_wifi_storage_key_t key);
-
-typedef struct {
-    deck_wifi_storage_read_fn read;
-    deck_wifi_storage_write_fn write;
-    deck_wifi_storage_erase_fn erase;
-    void *context;
-} deck_wifi_storage_adapter_t;
+#define DECK_WIFI_STORAGE_CANDIDATE DECK_TRANSACTION_STORAGE_CANDIDATE
+#define DECK_WIFI_STORAGE_SLOT_0 DECK_TRANSACTION_STORAGE_SLOT_0
+#define DECK_WIFI_STORAGE_SLOT_1 DECK_TRANSACTION_STORAGE_SLOT_1
+#define DECK_WIFI_STORAGE_ACTIVE_MARKER DECK_TRANSACTION_STORAGE_ACTIVE_MARKER
+#define DECK_WIFI_STORAGE_KEY_COUNT DECK_TRANSACTION_STORAGE_KEY_COUNT
+#define DECK_WIFI_STORAGE_OK DECK_TRANSACTION_STORAGE_OK
+#define DECK_WIFI_STORAGE_NOT_FOUND DECK_TRANSACTION_STORAGE_NOT_FOUND
+#define DECK_WIFI_STORAGE_ERROR DECK_TRANSACTION_STORAGE_ERROR
 
 typedef bool (*deck_wifi_validation_begin_fn)(
     void *context,
@@ -122,6 +104,11 @@ typedef enum {
     DECK_WIFI_VALIDATION_CONNECTION_FAILED,
 } deck_wifi_validation_result_t;
 
+typedef enum {
+    DECK_WIFI_CLEAR_CLEARED = 0,
+    DECK_WIFI_CLEAR_STORAGE_ERROR,
+} deck_wifi_clear_result_t;
+
 deck_wifi_config_t *deck_wifi_config_create(const deck_wifi_config_options_t *options);
 void deck_wifi_config_destroy(deck_wifi_config_t *config);
 
@@ -136,6 +123,7 @@ bool deck_wifi_config_validation_result(
 );
 bool deck_wifi_config_tick(deck_wifi_config_t *config, uint64_t now_ms);
 bool deck_wifi_config_active_connection(deck_wifi_config_t *config, bool connected);
+deck_wifi_clear_result_t deck_wifi_config_clear(deck_wifi_config_t *config);
 bool deck_wifi_config_snapshot(
     const deck_wifi_config_t *config,
     deck_wifi_config_snapshot_t *snapshot

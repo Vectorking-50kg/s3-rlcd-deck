@@ -1,9 +1,7 @@
 idf_component_register(
-    SRCS
-        "deck_wifi_config.cpp"
-        "deck_wifi_config_nvs.cpp"
+    SRCS "deck_transaction_store.cpp" "deck_transaction_nvs.cpp"
     INCLUDE_DIRS "include"
-    REQUIRES transaction_store
+    REQUIRES nvs_flash
 )
 
 target_compile_features(${COMPONENT_LIB} PRIVATE cxx_std_17)

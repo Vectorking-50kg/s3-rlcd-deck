@@ -1,11 +1,14 @@
 #include "deck_setup_service.h"
 
 #include "deck_setup_http.h"
+#include "deck_setup_confirmation.h"
+#include "deck_device_settings_nvs.h"
 #include "deck_wifi_config_nvs.h"
 #include "sdkconfig.h"
 
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <new>
 
@@ -42,6 +45,7 @@ constexpr EventBits_t kApStoppedBit = BIT1;
 constexpr EventBits_t kStaGotIpBit = BIT2;
 constexpr uint64_t kValidationTimeoutMs =
     static_cast<uint64_t>(CONFIG_DECK_WIFI_VALIDATION_TIMEOUT_SECONDS) * 1'000U;
+constexpr uint64_t kClearConfirmationLifetimeMs = 60'000;
 
 enum class CommandType : uint8_t {
     enter_from_boot,
@@ -49,11 +53,14 @@ enum class CommandType : uint8_t {
     validation_connected,
     validation_auth_failed,
     validation_connection_failed,
+    submit_temperature_offset,
+    clear_wifi,
 };
 
 struct Command {
     CommandType type;
     deck_wifi_credentials_t credentials;
+    int16_t temperature_offset_tenths_c;
 };
 
 enum class EnterSessionResult : uint8_t {
@@ -65,6 +72,7 @@ struct ServiceNotification {
     deck_setup_service_state_t state;
     deck_setup_snapshot_t setup;
     deck_wifi_config_snapshot_t wifi;
+    deck_device_settings_snapshot_t settings;
     char error_stage[kErrorStageCapacity];
 };
 
@@ -80,6 +88,17 @@ bool fill_random(void *, uint8_t *output, size_t size)
     }
     esp_fill_random(output, size);
     return true;
+}
+
+void secure_clear(char *buffer, size_t size)
+{
+    if (buffer == nullptr) {
+        return;
+    }
+    volatile char *bytes = buffer;
+    for (size_t index = 0; index < size; ++index) {
+        bytes[index] = '\0';
+    }
 }
 
 }  // namespace
@@ -99,6 +118,9 @@ struct deck_setup_service {
     httpd_handle_t http_server;
     deck_wifi_nvs_storage_t *wifi_storage;
     deck_wifi_config_t *wifi_config;
+    deck_device_settings_nvs_storage_t *settings_storage;
+    deck_device_settings_t *settings;
+    deck_setup_confirmation_t *clear_confirmation;
     deck_setup_scan_result_t scan_results[kMaximumScanResults];
     size_t scan_count;
     bool wifi_started;
@@ -123,6 +145,7 @@ bool copy_state(
     deck_setup_service_t *service,
     deck_setup_snapshot_t *snapshot,
     deck_wifi_config_snapshot_t *wifi,
+    deck_device_settings_snapshot_t *settings,
     deck_setup_scan_result_t *networks,
     size_t network_capacity,
     size_t *network_count
@@ -138,7 +161,15 @@ bool copy_state(
         wifi_copied = service->wifi_config == nullptr ||
                       deck_wifi_config_snapshot(service->wifi_config, wifi);
     }
-    const bool copied = snapshot_locked(service, snapshot) && wifi_copied;
+    bool settings_copied = true;
+    if (settings != nullptr) {
+        *settings = {};
+        settings->temperature_offset_tenths_c =
+            DECK_DEVICE_SETTINGS_DEFAULT_TEMPERATURE_OFFSET_TENTHS_C;
+        settings_copied = service->settings == nullptr ||
+                          deck_device_settings_snapshot(service->settings, settings);
+    }
+    const bool copied = snapshot_locked(service, snapshot) && wifi_copied && settings_copied;
     const size_t count = std::min(service->scan_count, network_capacity);
     if (networks != nullptr && count != 0) {
         std::memcpy(networks, service->scan_results, count * sizeof(networks[0]));
@@ -156,11 +187,20 @@ void notify(
 {
     deck_setup_snapshot_t snapshot{};
     deck_wifi_config_snapshot_t wifi{};
+    deck_device_settings_snapshot_t settings{};
     size_t unused_count = 0;
-    if (!copy_state(service, &snapshot, &wifi, nullptr, 0, &unused_count)) {
+    if (!copy_state(
+            service,
+            &snapshot,
+            &wifi,
+            &settings,
+            nullptr,
+            0,
+            &unused_count
+        )) {
         return;
     }
-    ServiceNotification notification{state, snapshot, wifi, {}};
+    ServiceNotification notification{state, snapshot, wifi, settings, {}};
     if (error_stage != nullptr) {
         const size_t copy_size =
             std::min(strlen(error_stage), sizeof(notification.error_stage) - 1);
@@ -182,6 +222,7 @@ void publisher_task(void *task_context)
             notification.state,
             notification.setup,
             notification.wifi,
+            notification.settings,
             notification.error_stage[0] == '\0' ? nullptr : notification.error_stage,
         };
         service->callback(service->callback_context, &event);
@@ -229,6 +270,7 @@ void wifi_event(void *context, esp_event_base_t, int32_t event_id, void *event_d
                 ? CommandType::validation_auth_failed
                 : CommandType::validation_connection_failed,
             {},
+            0,
         };
         (void)enqueue_command(service, command);
     }
@@ -242,7 +284,7 @@ void ip_event(void *context, esp_event_base_t, int32_t event_id, void *)
     }
     xEventGroupSetBits(service->wifi_events, kStaGotIpBit);
     if (service->accepting_commands.load(std::memory_order_acquire)) {
-        const Command command = {CommandType::validation_connected, {}};
+        const Command command = {CommandType::validation_connected, {}, 0};
         (void)enqueue_command(service, command);
     }
 }
@@ -264,6 +306,32 @@ esp_err_t send_json(httpd_req_t *request, const char *body)
     return httpd_resp_send(request, body, HTTPD_RESP_USE_STRLEN);
 }
 
+bool receive_body(
+    httpd_req_t *request,
+    char *body,
+    size_t body_capacity,
+    size_t *received
+)
+{
+    if (request == nullptr || body == nullptr || received == nullptr ||
+        request->content_len == 0 || request->content_len > body_capacity) {
+        return false;
+    }
+    *received = 0;
+    while (*received < request->content_len) {
+        const int result = httpd_req_recv(
+            request,
+            body + *received,
+            request->content_len - *received
+        );
+        if (result <= 0) {
+            return false;
+        }
+        *received += static_cast<size_t>(result);
+    }
+    return true;
+}
+
 esp_err_t page_handler(httpd_req_t *request)
 {
     auto *service = static_cast<deck_setup_service_t *>(request->user_ctx);
@@ -271,7 +339,7 @@ esp_err_t page_handler(httpd_req_t *request)
         httpd_resp_set_status(request, "503 Service Unavailable");
         return send_json(request, "{\"error\":\"setup_inactive\"}");
     }
-    char page[2'048];
+    char page[4'096];
     if (!deck_setup_http_render_page(page, sizeof(page))) {
         return httpd_resp_send_500(request);
     }
@@ -284,12 +352,14 @@ esp_err_t render_status(deck_setup_service_t *service, httpd_req_t *request)
 {
     deck_setup_snapshot_t snapshot{};
     deck_wifi_config_snapshot_t wifi{};
+    deck_device_settings_snapshot_t settings{};
     deck_setup_scan_result_t networks[kMaximumScanResults]{};
     size_t network_count = 0;
     if (!copy_state(
             service,
             &snapshot,
             &wifi,
+            &settings,
             networks,
             kMaximumScanResults,
             &network_count
@@ -300,6 +370,7 @@ esp_err_t render_status(deck_setup_service_t *service, httpd_req_t *request)
     if (!deck_setup_http_render_status(
             &snapshot,
             &wifi,
+            &settings,
             networks,
             network_count,
             response,
@@ -391,26 +462,15 @@ esp_err_t wifi_handler(httpd_req_t *request)
         return send_json(request, "{\"accepted\":false,\"error\":\"setup_inactive\"}");
     }
     constexpr size_t kMaximumBodySize = 256;
-    if (request->content_len == 0 || request->content_len > kMaximumBodySize) {
+    char body[kMaximumBodySize];
+    size_t received = 0;
+    if (!receive_body(request, body, sizeof(body), &received)) {
+        secure_clear(body, sizeof(body));
         httpd_resp_set_status(request, "400 Bad Request");
         return send_json(request, "{\"accepted\":false,\"error\":\"malformed\"}");
     }
-    char body[kMaximumBodySize];
-    size_t received = 0;
-    while (received < request->content_len) {
-        const int result = httpd_req_recv(
-            request,
-            body + received,
-            request->content_len - received
-        );
-        if (result <= 0) {
-            httpd_resp_set_status(request, "400 Bad Request");
-            return send_json(request, "{\"accepted\":false,\"error\":\"malformed\"}");
-        }
-        received += static_cast<size_t>(result);
-    }
 
-    Command command{CommandType::submit_wifi, {}};
+    Command command{CommandType::submit_wifi, {}, 0};
     const deck_setup_wifi_request_result_t parsed = deck_setup_http_parse_wifi_request(
         body,
         received,
@@ -418,6 +478,7 @@ esp_err_t wifi_handler(httpd_req_t *request)
     );
     if (parsed != DECK_SETUP_WIFI_REQUEST_OK) {
         deck_wifi_credentials_clear(&command.credentials);
+        secure_clear(body, sizeof(body));
         httpd_resp_set_status(request, "400 Bad Request");
         if (parsed == DECK_SETUP_WIFI_REQUEST_INVALID_SSID) {
             return send_json(request, "{\"accepted\":false,\"error\":\"invalid_ssid\"}");
@@ -429,12 +490,130 @@ esp_err_t wifi_handler(httpd_req_t *request)
     }
     const bool queued = deck_setup_service_submit_wifi(service, &command.credentials);
     deck_wifi_credentials_clear(&command.credentials);
+    secure_clear(body, sizeof(body));
     if (!queued) {
         httpd_resp_set_status(request, "503 Service Unavailable");
         return send_json(request, "{\"accepted\":false,\"error\":\"busy\"}");
     }
     httpd_resp_set_status(request, "202 Accepted");
     return send_json(request, "{\"accepted\":true,\"state\":\"queued\"}");
+}
+
+esp_err_t temperature_handler(httpd_req_t *request)
+{
+    auto *service = static_cast<deck_setup_service_t *>(request->user_ctx);
+    if (!mark_activity(service)) {
+        httpd_resp_set_status(request, "503 Service Unavailable");
+        return send_json(request, "{\"accepted\":false,\"error\":\"setup_inactive\"}");
+    }
+    char body[64];
+    size_t received = 0;
+    if (!receive_body(request, body, sizeof(body), &received)) {
+        httpd_resp_set_status(request, "400 Bad Request");
+        return send_json(request, "{\"accepted\":false,\"error\":\"malformed\"}");
+    }
+    int16_t offset = 0;
+    const deck_setup_temperature_request_result_t parsed =
+        deck_setup_http_parse_temperature_request(body, received, &offset);
+    if (parsed != DECK_SETUP_TEMPERATURE_REQUEST_OK) {
+        httpd_resp_set_status(request, "400 Bad Request");
+        switch (parsed) {
+            case DECK_SETUP_TEMPERATURE_REQUEST_NOT_NUMERIC:
+                return send_json(request, "{\"accepted\":false,\"error\":\"not_numeric\"}");
+            case DECK_SETUP_TEMPERATURE_REQUEST_OUT_OF_RANGE:
+                return send_json(request, "{\"accepted\":false,\"error\":\"out_of_range\"}");
+            case DECK_SETUP_TEMPERATURE_REQUEST_NOT_EXACT_TENTH:
+                return send_json(request, "{\"accepted\":false,\"error\":\"not_exact_tenth\"}");
+            case DECK_SETUP_TEMPERATURE_REQUEST_MALFORMED:
+            case DECK_SETUP_TEMPERATURE_REQUEST_OK:
+            default:
+                return send_json(request, "{\"accepted\":false,\"error\":\"malformed\"}");
+        }
+    }
+    if (!deck_setup_service_submit_temperature_offset(service, offset)) {
+        httpd_resp_set_status(request, "503 Service Unavailable");
+        return send_json(request, "{\"accepted\":false,\"error\":\"busy\"}");
+    }
+    httpd_resp_set_status(request, "202 Accepted");
+    return send_json(request, "{\"accepted\":true,\"state\":\"queued\"}");
+}
+
+esp_err_t wifi_clear_request_handler(httpd_req_t *request)
+{
+    auto *service = static_cast<deck_setup_service_t *>(request->user_ctx);
+    if (!mark_activity(service)) {
+        httpd_resp_set_status(request, "503 Service Unavailable");
+        return send_json(request, "{\"accepted\":false,\"error\":\"setup_inactive\"}");
+    }
+    char token[DECK_SETUP_CONFIRMATION_TOKEN_CAPACITY];
+    if (!deck_setup_service_request_wifi_clear(service, token, sizeof(token))) {
+        httpd_resp_set_status(request, "503 Service Unavailable");
+        return send_json(request, "{\"accepted\":false,\"error\":\"confirmation_unavailable\"}");
+    }
+    char response[96];
+    const int size = snprintf(
+        response,
+        sizeof(response),
+        "{\"accepted\":true,\"token\":\"%s\",\"expires_in_ms\":%u}",
+        token,
+        static_cast<unsigned>(kClearConfirmationLifetimeMs)
+    );
+    if (size < 0 || static_cast<size_t>(size) >= sizeof(response)) {
+        return httpd_resp_send_500(request);
+    }
+    const esp_err_t send_result = send_json(request, response);
+    secure_clear(token, sizeof(token));
+    secure_clear(response, sizeof(response));
+    return send_result;
+}
+
+esp_err_t wifi_clear_confirm_handler(httpd_req_t *request)
+{
+    auto *service = static_cast<deck_setup_service_t *>(request->user_ctx);
+    if (!mark_activity(service)) {
+        httpd_resp_set_status(request, "503 Service Unavailable");
+        return send_json(request, "{\"accepted\":false,\"error\":\"setup_inactive\"}");
+    }
+    char body[64];
+    size_t received = 0;
+    char token[DECK_SETUP_CONFIRMATION_TOKEN_CAPACITY];
+    if (!receive_body(request, body, sizeof(body), &received) ||
+        !deck_setup_http_parse_confirmation_request(
+            body,
+            received,
+            token,
+            sizeof(token)
+        )) {
+        secure_clear(token, sizeof(token));
+        secure_clear(body, sizeof(body));
+        httpd_resp_set_status(request, "400 Bad Request");
+        return send_json(request, "{\"accepted\":false,\"error\":\"malformed\"}");
+    }
+    const deck_setup_wifi_clear_confirm_result_t result =
+        deck_setup_service_confirm_wifi_clear(service, token);
+    secure_clear(token, sizeof(token));
+    secure_clear(body, sizeof(body));
+    switch (result) {
+        case DECK_SETUP_WIFI_CLEAR_QUEUED:
+            httpd_resp_set_status(request, "202 Accepted");
+            return send_json(request, "{\"accepted\":true,\"state\":\"queued\"}");
+        case DECK_SETUP_WIFI_CLEAR_INACTIVE:
+            httpd_resp_set_status(request, "503 Service Unavailable");
+            return send_json(request, "{\"accepted\":false,\"error\":\"setup_inactive\"}");
+        case DECK_SETUP_WIFI_CLEAR_NOT_ISSUED:
+            httpd_resp_set_status(request, "409 Conflict");
+            return send_json(request, "{\"accepted\":false,\"error\":\"not_issued\"}");
+        case DECK_SETUP_WIFI_CLEAR_MISMATCH:
+            httpd_resp_set_status(request, "403 Forbidden");
+            return send_json(request, "{\"accepted\":false,\"error\":\"confirmation_mismatch\"}");
+        case DECK_SETUP_WIFI_CLEAR_EXPIRED:
+            httpd_resp_set_status(request, "410 Gone");
+            return send_json(request, "{\"accepted\":false,\"error\":\"confirmation_expired\"}");
+        case DECK_SETUP_WIFI_CLEAR_BUSY:
+        default:
+            httpd_resp_set_status(request, "503 Service Unavailable");
+            return send_json(request, "{\"accepted\":false,\"error\":\"busy\"}");
+    }
 }
 
 esp_err_t accept_ap_session(httpd_handle_t, int socket_fd)
@@ -465,6 +644,12 @@ HttpHandler handler_for_route(deck_setup_http_route_t route)
             return scan_handler;
         case DECK_SETUP_HTTP_WIFI:
             return wifi_handler;
+        case DECK_SETUP_HTTP_TEMPERATURE:
+            return temperature_handler;
+        case DECK_SETUP_HTTP_WIFI_CLEAR_REQUEST:
+            return wifi_clear_request_handler;
+        case DECK_SETUP_HTTP_WIFI_CLEAR_CONFIRM:
+            return wifi_clear_confirm_handler;
         case DECK_SETUP_HTTP_NOT_FOUND:
         case DECK_SETUP_HTTP_METHOD_NOT_ALLOWED:
         default:
@@ -480,7 +665,7 @@ const char *start_http_server(deck_setup_service_t *service)
         return "http_routes";
     }
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.stack_size = 8'192;
+    config.stack_size = 12'288;
     config.max_uri_handlers = static_cast<uint16_t>(route_count);
     config.open_fn = accept_ap_session;
     if (httpd_start(&service->http_server, &config) != ESP_OK) {
@@ -743,7 +928,10 @@ void cancel_wifi_validation(void *context)
         xSemaphoreTake(service->network_mutex, portMAX_DELAY) != pdTRUE) {
         return;
     }
-    (void)esp_wifi_disconnect();
+    service->suppress_disconnect.store(true, std::memory_order_release);
+    if (esp_wifi_disconnect() != ESP_OK) {
+        service->suppress_disconnect.store(false, std::memory_order_release);
+    }
     xSemaphoreGive(service->network_mutex);
 }
 
@@ -850,6 +1038,20 @@ const char *initialize_wifi(deck_setup_service_t *service)
     service->wifi_config = deck_wifi_config_create(&options);
     if (service->wifi_config == nullptr) {
         return "wifi_config";
+    }
+    service->settings_storage = deck_device_settings_nvs_storage_open();
+    deck_device_settings_storage_adapter_t settings_adapter{};
+    if (service->settings_storage == nullptr ||
+        !deck_device_settings_nvs_storage_adapter(
+            service->settings_storage,
+            &settings_adapter
+        )) {
+        return "settings_store";
+    }
+    const deck_device_settings_options_t settings_options = {settings_adapter};
+    service->settings = deck_device_settings_create(&settings_options);
+    if (service->settings == nullptr) {
+        return "settings_config";
     }
     return nullptr;
 }
@@ -1014,6 +1216,58 @@ void service_task(void *task_context)
                     }
                     break;
                 }
+                case CommandType::submit_temperature_offset: {
+                    deck_device_settings_update_result_t result =
+                        DECK_DEVICE_SETTINGS_STORAGE_FAILURE;
+                    bool setup_active = false;
+                    if (xSemaphoreTake(service->state_mutex, portMAX_DELAY) == pdTRUE) {
+                        deck_setup_snapshot_t setup{};
+                        setup_active = snapshot_locked(service, &setup) && setup.active;
+                        if (setup_active) {
+                            result = deck_device_settings_submit_temperature_offset(
+                                service->settings,
+                                command.temperature_offset_tenths_c
+                            );
+                        }
+                        xSemaphoreGive(service->state_mutex);
+                    }
+                    notify(
+                        service,
+                        result == DECK_DEVICE_SETTINGS_STORAGE_FAILURE
+                            ? DECK_SETUP_SERVICE_ERROR
+                            : setup_active ? DECK_SETUP_SERVICE_ACTIVE
+                                           : DECK_SETUP_SERVICE_INACTIVE,
+                        result == DECK_DEVICE_SETTINGS_STORAGE_FAILURE
+                            ? "temperature_commit"
+                            : nullptr
+                    );
+                    break;
+                }
+                case CommandType::clear_wifi: {
+                    deck_wifi_clear_result_t result = DECK_WIFI_CLEAR_STORAGE_ERROR;
+                    bool setup_active = false;
+                    if (xSemaphoreTake(service->state_mutex, portMAX_DELAY) == pdTRUE) {
+                        deck_setup_snapshot_t setup{};
+                        setup_active = snapshot_locked(service, &setup) && setup.active;
+                        if (setup_active) {
+                            result = deck_wifi_config_clear(service->wifi_config);
+                        }
+                        xSemaphoreGive(service->state_mutex);
+                    }
+                    if (result == DECK_WIFI_CLEAR_CLEARED) {
+                        service->active_station_restore_pending = false;
+                        cancel_wifi_validation(service);
+                    }
+                    notify(
+                        service,
+                        result == DECK_WIFI_CLEAR_STORAGE_ERROR
+                            ? DECK_SETUP_SERVICE_ERROR
+                            : setup_active ? DECK_SETUP_SERVICE_ACTIVE
+                                           : DECK_SETUP_SERVICE_INACTIVE,
+                        result == DECK_WIFI_CLEAR_STORAGE_ERROR ? "wifi_clear" : nullptr
+                    );
+                    break;
+                }
             }
         }
         if (service->command_overflow.exchange(false, std::memory_order_acq_rel)) {
@@ -1064,6 +1318,9 @@ void release_unstarted(deck_setup_service_t *service)
     deck_setup_mode_destroy(service->mode);
     deck_wifi_config_destroy(service->wifi_config);
     deck_wifi_nvs_storage_close(service->wifi_storage);
+    deck_device_settings_destroy(service->settings);
+    deck_device_settings_nvs_storage_close(service->settings_storage);
+    deck_setup_confirmation_destroy(service->clear_confirmation);
     if (service->publisher_task != nullptr) {
         vTaskDelete(service->publisher_task);
     }
@@ -1116,9 +1373,18 @@ deck_setup_service_t *deck_setup_service_start(
         nullptr,
     };
     service->mode = deck_setup_mode_create(&mode_config);
+    const deck_setup_confirmation_options_t confirmation_options = {
+        kClearConfirmationLifetimeMs,
+        fill_random,
+        nullptr,
+    };
+    service->clear_confirmation = deck_setup_confirmation_create(
+        &confirmation_options
+    );
     if (service->state_mutex == nullptr || service->network_mutex == nullptr ||
         service->commands == nullptr || service->notifications == nullptr ||
-        service->wifi_events == nullptr || service->mode == nullptr) {
+        service->wifi_events == nullptr || service->mode == nullptr ||
+        service->clear_confirmation == nullptr) {
         release_unstarted(service);
         return nullptr;
     }
@@ -1155,7 +1421,7 @@ bool deck_setup_service_enter_from_boot(deck_setup_service_t *service)
         !service->accepting_commands.load(std::memory_order_acquire)) {
         return false;
     }
-    const Command command = {CommandType::enter_from_boot, {}};
+    const Command command = {CommandType::enter_from_boot, {}, 0};
     return enqueue_command(service, command);
 }
 
@@ -1177,6 +1443,99 @@ bool deck_setup_service_submit_wifi(
     if (!setup_active) {
         return false;
     }
-    const Command command = {CommandType::submit_wifi, *credentials};
+    const Command command = {CommandType::submit_wifi, *credentials, 0};
     return enqueue_command(service, command);
+}
+
+bool deck_setup_service_submit_temperature_offset(
+    deck_setup_service_t *service,
+    int16_t temperature_offset_tenths_c
+)
+{
+    if (service == nullptr ||
+        temperature_offset_tenths_c <
+            DECK_DEVICE_SETTINGS_MINIMUM_TEMPERATURE_OFFSET_TENTHS_C ||
+        temperature_offset_tenths_c >
+            DECK_DEVICE_SETTINGS_MAXIMUM_TEMPERATURE_OFFSET_TENTHS_C ||
+        !service->accepting_commands.load(std::memory_order_acquire)) {
+        return false;
+    }
+    deck_setup_snapshot_t setup{};
+    if (xSemaphoreTake(service->state_mutex, portMAX_DELAY) != pdTRUE) {
+        return false;
+    }
+    const bool setup_active = snapshot_locked(service, &setup) && setup.active;
+    xSemaphoreGive(service->state_mutex);
+    if (!setup_active) {
+        return false;
+    }
+    const Command command = {
+        CommandType::submit_temperature_offset,
+        {},
+        temperature_offset_tenths_c,
+    };
+    return enqueue_command(service, command);
+}
+
+bool deck_setup_service_request_wifi_clear(
+    deck_setup_service_t *service,
+    char *token,
+    size_t token_capacity
+)
+{
+    if (service == nullptr || token == nullptr ||
+        !service->accepting_commands.load(std::memory_order_acquire) ||
+        xSemaphoreTake(service->state_mutex, portMAX_DELAY) != pdTRUE) {
+        return false;
+    }
+    deck_setup_snapshot_t setup{};
+    const bool active = snapshot_locked(service, &setup) && setup.active;
+    const bool issued = active && deck_setup_confirmation_issue(
+                                      service->clear_confirmation,
+                                      setup.session_id,
+                                      monotonic_ms(),
+                                      token,
+                                      token_capacity
+                                  );
+    xSemaphoreGive(service->state_mutex);
+    return issued;
+}
+
+deck_setup_wifi_clear_confirm_result_t deck_setup_service_confirm_wifi_clear(
+    deck_setup_service_t *service,
+    const char *token
+)
+{
+    if (service == nullptr || token == nullptr ||
+        !service->accepting_commands.load(std::memory_order_acquire) ||
+        xSemaphoreTake(service->state_mutex, portMAX_DELAY) != pdTRUE) {
+        return DECK_SETUP_WIFI_CLEAR_INACTIVE;
+    }
+    deck_setup_snapshot_t setup{};
+    if (!snapshot_locked(service, &setup) || !setup.active) {
+        xSemaphoreGive(service->state_mutex);
+        return DECK_SETUP_WIFI_CLEAR_INACTIVE;
+    }
+    const deck_setup_confirmation_result_t confirmation =
+        deck_setup_confirmation_consume(
+            service->clear_confirmation,
+            setup.session_id,
+            token,
+            monotonic_ms()
+        );
+    xSemaphoreGive(service->state_mutex);
+    switch (confirmation) {
+        case DECK_SETUP_CONFIRMATION_NOT_ISSUED:
+            return DECK_SETUP_WIFI_CLEAR_NOT_ISSUED;
+        case DECK_SETUP_CONFIRMATION_MISMATCH:
+            return DECK_SETUP_WIFI_CLEAR_MISMATCH;
+        case DECK_SETUP_CONFIRMATION_EXPIRED:
+            return DECK_SETUP_WIFI_CLEAR_EXPIRED;
+        case DECK_SETUP_CONFIRMATION_CONFIRMED:
+        default:
+            break;
+    }
+    const Command command = {CommandType::clear_wifi, {}, 0};
+    return enqueue_command(service, command) ? DECK_SETUP_WIFI_CLEAR_QUEUED
+                                             : DECK_SETUP_WIFI_CLEAR_BUSY;
 }

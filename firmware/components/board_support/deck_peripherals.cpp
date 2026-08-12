@@ -24,7 +24,6 @@ constexpr uint16_t kShtc3Address = 0x70;
 constexpr uint32_t kI2cFrequencyHz = 400'000;
 constexpr int kI2cTimeoutMs = 50;
 constexpr uint32_t kPeripheralPollMs = 1'000;
-constexpr int16_t kDefaultTemperatureOffsetTenthsC = -40;
 constexpr uint32_t kInputTaskStackBytes = 3'072;
 constexpr uint32_t kI2cTaskStackBytes = 4'096;
 constexpr uint32_t kPublisherTaskStackBytes = 4'096;
@@ -200,6 +199,7 @@ void i2c_task(void *task_context)
 }  // namespace
 
 deck_peripherals_t *deck_peripherals_start(
+    int16_t temperature_offset_tenths_c,
     deck_peripheral_snapshot_fn callback,
     void *callback_context
 )
@@ -244,7 +244,7 @@ deck_peripherals_t *deck_peripherals_start(
     const deck_peripheral_monitor_config_t monitor_config = {
         {nullptr, nullptr, transmit_receive, nullptr, &peripherals->rtc},
         {transmit, receive, nullptr, delay_us, &peripherals->shtc3},
-        kDefaultTemperatureOffsetTenthsC,
+        temperature_offset_tenths_c,
         kPeripheralPollMs,
         peripherals->buttons_available,
     };
@@ -298,4 +298,24 @@ deck_peripherals_t *deck_peripherals_start(
     }
     xTaskNotifyGive(i2c_task_handle);
     return peripherals;
+}
+
+bool deck_peripherals_set_temperature_offset(
+    deck_peripherals_t *peripherals,
+    int16_t temperature_offset_tenths_c
+)
+{
+    if (peripherals == nullptr ||
+        xSemaphoreTake(peripherals->state_mutex, portMAX_DELAY) != pdTRUE) {
+        return false;
+    }
+    const bool updated = deck_peripheral_monitor_set_temperature_offset(
+        peripherals->monitor,
+        temperature_offset_tenths_c
+    );
+    if (updated) {
+        queue_snapshot_locked(peripherals);
+    }
+    xSemaphoreGive(peripherals->state_mutex);
+    return updated;
 }

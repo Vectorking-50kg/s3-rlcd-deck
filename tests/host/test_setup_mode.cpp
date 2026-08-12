@@ -174,7 +174,7 @@ void http_contract_is_read_only_and_labels_pairing_as_m1()
     size_t route_count = 0;
     const deck_setup_http_route_spec_t *routes = deck_setup_http_routes(&route_count);
     assert(routes != nullptr);
-    assert(route_count == 4);
+    assert(route_count == 7);
     assert(routes[0].route == DECK_SETUP_HTTP_PAGE);
     assert(routes[0].method == DECK_SETUP_HTTP_GET);
     assert(std::string(routes[0].path) == "/");
@@ -187,11 +187,23 @@ void http_contract_is_read_only_and_labels_pairing_as_m1()
     assert(routes[3].route == DECK_SETUP_HTTP_WIFI);
     assert(routes[3].method == DECK_SETUP_HTTP_POST);
     assert(std::string(routes[3].path) == "/api/wifi");
+    assert(routes[4].route == DECK_SETUP_HTTP_TEMPERATURE);
+    assert(std::string(routes[4].path) == "/api/temperature");
+    assert(routes[5].route == DECK_SETUP_HTTP_WIFI_CLEAR_REQUEST);
+    assert(std::string(routes[5].path) == "/api/wifi/clear/request");
+    assert(routes[6].route == DECK_SETUP_HTTP_WIFI_CLEAR_CONFIRM);
+    assert(std::string(routes[6].path) == "/api/wifi/clear/confirm");
 
     assert(deck_setup_http_route("GET", "/") == DECK_SETUP_HTTP_PAGE);
     assert(deck_setup_http_route("GET", "/api/status") == DECK_SETUP_HTTP_STATUS);
     assert(deck_setup_http_route("POST", "/api/scan") == DECK_SETUP_HTTP_SCAN);
     assert(deck_setup_http_route("POST", "/api/wifi") == DECK_SETUP_HTTP_WIFI);
+    assert(deck_setup_http_route("POST", "/api/temperature") ==
+           DECK_SETUP_HTTP_TEMPERATURE);
+    assert(deck_setup_http_route("POST", "/api/wifi/clear/request") ==
+           DECK_SETUP_HTTP_WIFI_CLEAR_REQUEST);
+    assert(deck_setup_http_route("POST", "/api/wifi/clear/confirm") ==
+           DECK_SETUP_HTTP_WIFI_CLEAR_CONFIRM);
     assert(deck_setup_http_route("GET", "/api/wifi") == DECK_SETUP_HTTP_METHOD_NOT_ALLOWED);
     assert(deck_setup_http_route("POST", "/api/pair") == DECK_SETUP_HTTP_NOT_FOUND);
     assert(deck_setup_http_route("GET", "/api/scan") == DECK_SETUP_HTTP_METHOD_NOT_ALLOWED);
@@ -203,13 +215,17 @@ void http_contract_is_read_only_and_labels_pairing_as_m1()
     deck_setup_snapshot_t snapshot{};
     assert(deck_setup_mode_snapshot(setup, &snapshot));
 
-    char page[2'048];
+    char page[4'096];
     assert(deck_setup_http_render_page(page, sizeof(page)));
     const std::string html(page);
     assert(html.find("Setup / Recovery") != std::string::npos);
     assert(html.find("Scan networks") != std::string::npos);
     assert(html.find("Companion pairing is planned for M1") != std::string::npos);
     assert(html.find("name=password") != std::string::npos);
+    assert(html.find("name=offset") != std::string::npos);
+    assert(html.find("Clear Wi-Fi") != std::string::npos);
+    assert(html.find("/api/wifi/clear/request") != std::string::npos);
+    assert(html.find("/api/wifi/clear/confirm") != std::string::npos);
     assert(html.find("Wi-Fi changes are enabled by the next M0 step") == std::string::npos);
     assert(html.find("captive") == std::string::npos);
 
@@ -227,10 +243,20 @@ void http_contract_is_read_only_and_labels_pairing_as_m1()
         "Office",
         "Candidate",
     };
+    const deck_device_settings_snapshot_t settings = {
+        DECK_DEVICE_SETTINGS_ACTIVE,
+        DECK_DEVICE_SETTINGS_RECORD_VALID,
+        DECK_DEVICE_SETTINGS_RECORD_EMPTY,
+        true,
+        false,
+        3,
+        -35,
+    };
     char status[1'024];
     assert(deck_setup_http_render_status(
         &snapshot,
         &wifi,
+        &settings,
         networks.data(),
         networks.size(),
         status,
@@ -246,10 +272,46 @@ void http_contract_is_read_only_and_labels_pairing_as_m1()
     assert(json.find("\"record\":\"valid\"") != std::string::npos);
     assert(json.find("\"active_ssid\":\"Office\"") != std::string::npos);
     assert(json.find("\"candidate_ssid\":\"Candidate\"") != std::string::npos);
+    assert(json.find("\"device_settings\":{") != std::string::npos);
+    assert(json.find("\"temperature_offset_tenths_c\":-35") != std::string::npos);
     assert(json.find(snapshot.password) == std::string::npos);
     assert(json.find("correct-horse") == std::string::npos);
 
     deck_setup_mode_destroy(setup);
+}
+
+void temperature_and_confirmation_parsers_are_strict()
+{
+    int16_t offset = 0;
+    assert(deck_setup_http_parse_temperature_request("offset=-4.0", 11, &offset) ==
+           DECK_SETUP_TEMPERATURE_REQUEST_OK);
+    assert(offset == -40);
+    assert(deck_setup_http_parse_temperature_request("offset=%2B15.000", 16, &offset) ==
+           DECK_SETUP_TEMPERATURE_REQUEST_OK);
+    assert(offset == 150);
+    assert(deck_setup_http_parse_temperature_request("offset=-15", 10, &offset) ==
+           DECK_SETUP_TEMPERATURE_REQUEST_OK);
+    assert(offset == -150);
+    assert(deck_setup_http_parse_temperature_request("offset=15.1", 11, &offset) ==
+           DECK_SETUP_TEMPERATURE_REQUEST_OUT_OF_RANGE);
+    assert(deck_setup_http_parse_temperature_request("offset=1.25", 11, &offset) ==
+           DECK_SETUP_TEMPERATURE_REQUEST_NOT_EXACT_TENTH);
+    assert(deck_setup_http_parse_temperature_request("offset=one", 10, &offset) ==
+           DECK_SETUP_TEMPERATURE_REQUEST_NOT_NUMERIC);
+    assert(deck_setup_http_parse_temperature_request("other=-4.0", 10, &offset) ==
+           DECK_SETUP_TEMPERATURE_REQUEST_MALFORMED);
+    assert(deck_setup_http_parse_temperature_request("offset=", 7, &offset) ==
+           DECK_SETUP_TEMPERATURE_REQUEST_NOT_NUMERIC);
+
+    char token[DECK_SETUP_CONFIRMATION_TOKEN_CAPACITY];
+    assert(deck_setup_http_parse_confirmation_request(
+        "token=0001020304050607", 22, token, sizeof(token)
+    ));
+    assert(std::string(token) == "0001020304050607");
+    assert(!deck_setup_http_parse_confirmation_request(
+        "token=00010203&other=x", 22, token, sizeof(token)
+    ));
+    assert(!deck_setup_http_parse_confirmation_request("token=", 6, token, sizeof(token)));
 }
 
 void wifi_submission_parser_rejects_malformed_or_invalid_credentials()
@@ -347,6 +409,7 @@ int main()
     explicit_stop_clears_ephemeral_credentials();
     http_contract_is_read_only_and_labels_pairing_as_m1();
     wifi_submission_parser_rejects_malformed_or_invalid_credentials();
+    temperature_and_confirmation_parsers_are_strict();
     production_scan_conversion_bounds_and_terminates_ssids();
     return 0;
 }

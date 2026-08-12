@@ -68,6 +68,10 @@ bool deck_peripheral_monitor_apply(
     deck_peripheral_monitor_t *monitor,
     const deck_peripheral_measurement_t *measurement
 );
+bool deck_peripheral_monitor_set_temperature_offset(
+    deck_peripheral_monitor_t *monitor,
+    int16_t temperature_offset_tenths_c
+);
 
 /* Sequential convenience API used by single-threaded clients and Host tests. */
 bool deck_peripheral_monitor_sample(

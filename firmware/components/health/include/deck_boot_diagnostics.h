@@ -62,6 +62,13 @@ typedef struct {
     bool wifi_has_active;
     bool wifi_has_candidate;
     uint32_t wifi_generation;
+    const char *device_settings_state;
+    const char *device_settings_record_status;
+    const char *device_settings_candidate_record_status;
+    bool device_settings_has_active;
+    bool device_settings_has_candidate;
+    uint32_t device_settings_generation;
+    int16_t temperature_offset_tenths_c;
 } deck_setup_diagnostic_info_t;
 
 typedef void (*deck_diagnostic_write_fn)(void *context, const char *data, size_t size);

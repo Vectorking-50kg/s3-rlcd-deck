@@ -140,6 +140,13 @@ int main()
         true,
         true,
         7,
+        "active",
+        "valid",
+        "empty",
+        true,
+        false,
+        3,
+        -35,
     };
     require(
         deck_setup_diagnostics_emit(&setup_info, sink),
@@ -154,7 +161,13 @@ int main()
             "\"wifi_record_status\":\"valid\","
             "\"wifi_candidate_record_status\":\"corrupt\","
             "\"wifi_has_active\":true,\"wifi_has_candidate\":true,"
-            "\"wifi_generation\":7}\n",
+            "\"wifi_generation\":7,\"device_settings_state\":\"active\","
+            "\"device_settings_record_status\":\"valid\","
+            "\"device_settings_candidate_record_status\":\"empty\","
+            "\"device_settings_has_active\":true,"
+            "\"device_settings_has_candidate\":false,"
+            "\"device_settings_generation\":3,"
+            "\"temperature_offset_tenths_c\":-35}\n",
         "expected setup diagnostics to omit the ephemeral password"
     );
 }

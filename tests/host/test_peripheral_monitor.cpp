@@ -184,6 +184,24 @@ void input_sampling_is_separate_from_blocking_peripheral_measurement()
     deck_peripheral_monitor_destroy(monitor);
 }
 
+void temperature_offset_updates_the_current_calibrated_snapshot()
+{
+    FakePeripheralBus bus{
+        {0x00, 0x00, 0x00, 0x00, 0x58, 0x59, 0x23},
+        {0x64, 0x8b, 0xc7, 0xa1, 0x33, 0x1c},
+    };
+    deck_peripheral_monitor_t *monitor = create_monitor(&bus, 1'000);
+    assert(monitor != nullptr);
+    assert(deck_peripheral_monitor_sample(monitor, true, true, 0));
+
+    assert(deck_peripheral_monitor_set_temperature_offset(monitor, -35));
+    deck_peripheral_snapshot_t snapshot{};
+    assert(deck_peripheral_monitor_snapshot(monitor, &snapshot));
+    assert(snapshot.raw_temperature_tenths_c == 237);
+    assert(snapshot.calibrated_temperature_tenths_c == 202);
+    deck_peripheral_monitor_destroy(monitor);
+}
+
 }  // namespace
 
 int main()
@@ -192,5 +210,6 @@ int main()
     failed_peripherals_recover_on_the_next_due_poll();
     key_and_boot_events_are_counted_independently();
     input_sampling_is_separate_from_blocking_peripheral_measurement();
+    temperature_offset_updates_the_current_calibrated_snapshot();
     return 0;
 }

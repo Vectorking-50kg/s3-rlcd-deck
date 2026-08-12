@@ -5,6 +5,7 @@
 #include "deck_application_ui.h"
 #include "deck_peripherals.h"
 #include "deck_boot_diagnostics.h"
+#include "deck_device_settings.h"
 #include "deck_display.h"
 #include "deck_m0_view_model.h"
 #include "deck_rlcd_panel.h"
@@ -29,6 +30,8 @@ deck_setup_service_t *application_setup = nullptr;
 deck_m0_view_model_t application_model{};
 SemaphoreHandle_t application_model_mutex = nullptr;
 uint32_t handled_boot_long_press_count = 0;
+int16_t application_temperature_offset_tenths_c =
+    DECK_DEVICE_SETTINGS_DEFAULT_TEMPERATURE_OFFSET_TENTHS_C;
 
 }  // namespace
 
@@ -470,8 +473,12 @@ void setup_event(void *, const deck_setup_service_event_t *event)
     if (event == nullptr) {
         return;
     }
+    deck_peripherals_t *peripherals_to_update = nullptr;
     if (application_model_mutex != nullptr &&
         xSemaphoreTake(application_model_mutex, portMAX_DELAY) == pdTRUE) {
+        application_temperature_offset_tenths_c =
+            event->settings.temperature_offset_tenths_c;
+        peripherals_to_update = application_peripherals;
         application_model.setup_state = event->setup.active
                                             ? DECK_SETUP_ACTIVE
                                             : event->state == DECK_SETUP_SERVICE_ERROR
@@ -508,6 +515,12 @@ void setup_event(void *, const deck_setup_service_event_t *event)
         );
         xSemaphoreGive(application_model_mutex);
     }
+    if (peripherals_to_update != nullptr) {
+        (void)deck_peripherals_set_temperature_offset(
+            peripherals_to_update,
+            event->settings.temperature_offset_tenths_c
+        );
+    }
     deck_m0_view_model_t published{};
     (void)publish_application_model(&published);
 #ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
@@ -524,6 +537,15 @@ void setup_event(void *, const deck_setup_service_event_t *event)
         event->wifi.has_active,
         event->wifi.has_candidate,
         event->wifi.generation,
+        deck_device_settings_state_name(event->settings.state),
+        deck_device_settings_record_status_name(event->settings.record_status),
+        deck_device_settings_record_status_name(
+            event->settings.candidate_record_status
+        ),
+        event->settings.has_active,
+        event->settings.has_candidate,
+        event->settings.generation,
+        event->settings.temperature_offset_tenths_c,
     };
     const deck_diagnostic_sink_t sink = {write_stdout, nullptr};
     (void)deck_setup_diagnostics_emit(&info, sink);
@@ -545,7 +567,13 @@ void start_setup_after_ui_ready()
             "\"wifi_record_status\":\"empty\","
             "\"wifi_candidate_record_status\":\"empty\","
             "\"wifi_has_active\":false,\"wifi_has_candidate\":false,"
-            "\"wifi_generation\":0}\n";
+            "\"wifi_generation\":0,\"device_settings_state\":\"default\","
+            "\"device_settings_record_status\":\"empty\","
+            "\"device_settings_candidate_record_status\":\"empty\","
+            "\"device_settings_has_active\":false,"
+            "\"device_settings_has_candidate\":false,"
+            "\"device_settings_generation\":0,"
+            "\"temperature_offset_tenths_c\":-40}\n";
         write_stdout(nullptr, error, sizeof(error) - 1);
     } else {
         if (xTaskCreatePinnedToCore(
@@ -674,7 +702,14 @@ extern "C" void app_main(void)
         application_model_mutex = nullptr;
         return;
     }
-    application_peripherals = deck_peripherals_start(peripheral_snapshot, nullptr);
+    if (xSemaphoreTake(application_model_mutex, portMAX_DELAY) == pdTRUE) {
+        application_peripherals = deck_peripherals_start(
+            application_temperature_offset_tenths_c,
+            peripheral_snapshot,
+            nullptr
+        );
+        xSemaphoreGive(application_model_mutex);
+    }
 #ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
     if (application_peripherals == nullptr) {
         static constexpr char error[] = "{\"type\":\"peripheral_error\",\"stage\":\"start\"}\n";

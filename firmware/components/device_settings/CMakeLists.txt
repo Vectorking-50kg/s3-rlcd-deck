@@ -1,7 +1,5 @@
 idf_component_register(
-    SRCS
-        "deck_wifi_config.cpp"
-        "deck_wifi_config_nvs.cpp"
+    SRCS "deck_device_settings.cpp" "deck_device_settings_nvs.cpp"
     INCLUDE_DIRS "include"
     REQUIRES transaction_store
 )
