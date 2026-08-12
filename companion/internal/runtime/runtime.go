@@ -2,23 +2,17 @@ package runtime
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"sync"
 	"time"
-
-	webapp "github.com/Vectorking-50kg/s3-rlcd-deck/companion/web"
 )
 
 const shutdownTimeout = 5 * time.Second
 
-var (
-	ErrAlreadyRun                   = errors.New("companion runtime can only be run once")
-	ErrManagementAddressNotLoopback = errors.New("management address must be loopback")
-)
+var ErrAlreadyRun = errors.New("companion runtime can only be run once")
 
 type State string
 
@@ -28,21 +22,22 @@ const (
 	StateStopped State = "stopped"
 )
 
-type Config struct {
-	ManagementAddress string
-	Version           string
-}
-
 type Status struct {
-	State             State  `json:"state"`
-	Version           string `json:"version"`
-	ManagementAddress string `json:"management_address"`
+	State                State  `json:"state"`
+	Version              string `json:"version"`
+	ManagementAddress    string `json:"management_address"`
+	DeviceHubAddress     string `json:"device_hub_address"`
+	LANManagementEnabled bool   `json:"lan_management_enabled"`
+	SecurityWarning      string `json:"security_warning,omitempty"`
 }
 
 type Runtime struct {
-	config          Config
-	handler         http.Handler
-	shutdownTimeout time.Duration
+	config Config
+
+	managementHandler http.Handler
+	deviceHubHandler  http.Handler
+	shutdownTimeout   time.Duration
+	sessions          *managementSessions
 
 	mu      sync.RWMutex
 	status  Status
@@ -50,28 +45,25 @@ type Runtime struct {
 }
 
 func New(config Config) (*Runtime, error) {
-	if config.ManagementAddress == "" {
-		config.ManagementAddress = "127.0.0.1:7777"
-	}
-	if config.Version == "" {
-		return nil, errors.New("companion version is required")
-	}
-	host, _, err := net.SplitHostPort(config.ManagementAddress)
+	normalized, err := normalizeConfig(config)
 	if err != nil {
-		return nil, fmt.Errorf("invalid management address: %w", err)
+		return nil, err
 	}
-	address := net.ParseIP(host)
-	if address == nil || !address.IsLoopback() {
-		return nil, ErrManagementAddressNotLoopback
+	status := Status{
+		State:                StateNew,
+		Version:              normalized.Version,
+		ManagementAddress:    normalized.Management.Address,
+		DeviceHubAddress:     normalized.DeviceHub.Address,
+		LANManagementEnabled: normalized.Management.AllowLAN,
+	}
+	if normalized.Management.AllowLAN {
+		status.SecurityWarning = "management Web is exposed beyond loopback"
 	}
 	return &Runtime{
-		config:          config,
+		config:          normalized,
 		shutdownTimeout: shutdownTimeout,
-		status: Status{
-			State:             StateNew,
-			Version:           config.Version,
-			ManagementAddress: config.ManagementAddress,
-		},
+		sessions:        newManagementSessions(),
+		status:          status,
 	}, nil
 }
 
@@ -90,73 +82,114 @@ func (application *Runtime) Run(ctx context.Context) error {
 	application.started = true
 	application.mu.Unlock()
 
-	listener, err := net.Listen("tcp", application.config.ManagementAddress)
+	managementListener, err := net.Listen("tcp", application.config.Management.Address)
 	if err != nil {
-		application.setState(StateStopped, application.config.ManagementAddress)
+		application.setState(StateStopped, application.config.Management.Address, application.config.DeviceHub.Address)
 		return fmt.Errorf("listen on management address: %w", err)
 	}
-	application.setState(StateReady, listener.Addr().String())
-
-	handler := application.handler
-	if handler == nil {
-		handler = application.routes()
+	deviceHubListener, err := net.Listen("tcp", application.config.DeviceHub.Address)
+	if err != nil {
+		_ = managementListener.Close()
+		application.setState(StateStopped, managementListener.Addr().String(), application.config.DeviceHub.Address)
+		return fmt.Errorf("listen on Device Hub address: %w", err)
 	}
-	server := &http.Server{
-		Handler:           handler,
-		ReadHeaderTimeout: 5 * time.Second,
-	}
-	serveResult := make(chan error, 1)
-	go func() { serveResult <- server.Serve(listener) }()
 
+	managementHandler := application.managementHandler
+	if managementHandler == nil {
+		managementHandler = application.managementRoutes()
+	}
+	deviceHubHandler := application.deviceHubHandler
+	if deviceHubHandler == nil {
+		deviceHubHandler = application.deviceHubRoutes()
+	}
+	managementLimits := application.config.Management.Limits
+	managementServer := &http.Server{
+		Handler:           managementHandler,
+		ReadHeaderTimeout: managementLimits.ReadHeaderTimeout,
+		ReadTimeout:       managementLimits.ReadTimeout,
+		WriteTimeout:      managementLimits.WriteTimeout,
+		IdleTimeout:       managementLimits.IdleTimeout,
+		MaxHeaderBytes:    managementLimits.MaxHeaderBytes,
+	}
+	limits := application.config.DeviceHub.Limits
+	deviceHubServer := &http.Server{
+		Handler:           deviceHubHandler,
+		ReadHeaderTimeout: limits.ReadHeaderTimeout,
+		ReadTimeout:       limits.ReadTimeout,
+		WriteTimeout:      limits.WriteTimeout,
+		IdleTimeout:       limits.IdleTimeout,
+		MaxHeaderBytes:    limits.MaxHeaderBytes,
+	}
+	application.setState(StateReady, managementListener.Addr().String(), deviceHubListener.Addr().String())
+	managementListener = newConnectionLimitedListener(
+		managementListener,
+		managementLimits.MaxConcurrent,
+		managementLimits.MaxConcurrentPerIP,
+	)
+	deviceHubListener = newConnectionLimitedListener(
+		deviceHubListener,
+		limits.MaxConcurrent,
+		limits.MaxConcurrentPerIP,
+	)
+
+	type serveResult struct {
+		name string
+		err  error
+	}
+	serveResults := make(chan serveResult, 2)
+	go func() {
+		serveResults <- serveResult{name: "management web", err: managementServer.Serve(managementListener)}
+	}()
+	go func() {
+		serveResults <- serveResult{name: "Device Hub", err: deviceHubServer.Serve(deviceHubListener)}
+	}()
+
+	var trigger serveResult
 	select {
-	case err = <-serveResult:
-		application.setState(StateStopped, listener.Addr().String())
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
-		}
-		return fmt.Errorf("serve management web: %w", err)
+	case trigger = <-serveResults:
 	case <-ctx.Done():
-		shutdownContext, cancel := context.WithTimeout(
-			context.Background(),
-			application.shutdownTimeout,
-		)
-		defer cancel()
-		shutdownErr := server.Shutdown(shutdownContext)
-		var closeErr error
-		if shutdownErr != nil {
-			closeErr = server.Close()
-		}
-		serveErr := <-serveResult
-		application.setState(StateStopped, listener.Addr().String())
-		if shutdownErr != nil {
-			return fmt.Errorf(
-				"shut down management web: %w",
-				errors.Join(shutdownErr, closeErr),
-			)
-		}
-		if !errors.Is(serveErr, http.ErrServerClosed) {
-			return fmt.Errorf("serve management web: %w", serveErr)
-		}
-		return nil
+		trigger = serveResult{name: "context", err: http.ErrServerClosed}
 	}
+
+	shutdownContext, cancel := context.WithTimeout(context.Background(), application.shutdownTimeout)
+	defer cancel()
+	shutdownErrors := shutdownServers(shutdownContext, managementServer, deviceHubServer)
+	application.setState(StateStopped, managementListener.Addr().String(), deviceHubListener.Addr().String())
+
+	if trigger.name != "context" && !errors.Is(trigger.err, http.ErrServerClosed) {
+		return fmt.Errorf("serve %s: %w", trigger.name, trigger.err)
+	}
+	if shutdownErrors != nil {
+		return fmt.Errorf("shut down Companion listeners: %w", shutdownErrors)
+	}
+	return nil
 }
 
-func (application *Runtime) routes() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/v1/status", func(response http.ResponseWriter, _ *http.Request) {
-		response.Header().Set("Content-Type", "application/json")
-		response.Header().Set("Cache-Control", "no-store")
-		if err := json.NewEncoder(response).Encode(application.Status()); err != nil {
-			return
+func shutdownServers(ctx context.Context, servers ...*http.Server) error {
+	type shutdownResult struct {
+		server *http.Server
+		err    error
+	}
+	results := make(chan shutdownResult, len(servers))
+	for _, server := range servers {
+		go func(server *http.Server) {
+			results <- shutdownResult{server: server, err: server.Shutdown(ctx)}
+		}(server)
+	}
+	var joined error
+	for range servers {
+		result := <-results
+		if result.err != nil {
+			joined = errors.Join(joined, result.err, result.server.Close())
 		}
-	})
-	mux.Handle("/", webapp.Handler())
-	return mux
+	}
+	return joined
 }
 
-func (application *Runtime) setState(state State, managementAddress string) {
+func (application *Runtime) setState(state State, managementAddress string, deviceHubAddress string) {
 	application.mu.Lock()
 	defer application.mu.Unlock()
 	application.status.State = state
 	application.status.ManagementAddress = managementAddress
+	application.status.DeviceHubAddress = deviceHubAddress
 }

@@ -17,3 +17,18 @@ func TestVersionFlagPrintsBuildIdentity(t *testing.T) {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
 }
+
+func TestRunFailsClosedWithoutListenerTokens(t *testing.T) {
+	t.Setenv(managementTokenEnvironment, "")
+	t.Setenv(deviceHubTokenEnvironment, "")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := run(nil, &stdout, &stderr)
+	if exitCode != 2 {
+		t.Fatalf("run() exit code = %d, want 2", exitCode)
+	}
+	if !bytes.Contains(stderr.Bytes(), []byte("management admin token")) {
+		t.Fatalf("stderr = %q, want fail-closed token error", stderr.String())
+	}
+}

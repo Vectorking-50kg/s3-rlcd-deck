@@ -9,33 +9,45 @@ import (
 
 func TestRunForceClosesAHandlerAfterGracefulShutdownDeadline(t *testing.T) {
 	application, err := New(Config{
-		ManagementAddress: "127.0.0.1:0",
-		Version:           "1.2.3-test",
+		Version: "1.2.3-test",
+		Management: ManagementConfig{
+			Address:    "127.0.0.1:0",
+			AdminToken: "management-test-token-000000000001",
+		},
+		DeviceHub: DeviceHubConfig{
+			Address:        "127.0.0.1:0",
+			BootstrapToken: "device-hub-test-token-000000000001",
+		},
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
 	releaseHandler := make(chan struct{})
-	handlerStarted := make(chan struct{})
-	application.handler = http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
-		close(handlerStarted)
+	handlerStarted := make(chan struct{}, 2)
+	blockingHandler := http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		handlerStarted <- struct{}{}
 		<-releaseHandler
 		response.WriteHeader(http.StatusNoContent)
 	})
+	application.managementHandler = blockingHandler
+	application.deviceHubHandler = blockingHandler
 	application.shutdownTimeout = 20 * time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- application.Run(ctx) }()
 	status := waitForRuntimeState(t, application, StateReady)
-	requestDone := make(chan struct{})
-	go func() {
-		defer close(requestDone)
-		response, requestErr := http.Get("http://" + status.ManagementAddress + "/")
-		if requestErr == nil {
-			response.Body.Close()
-		}
-	}()
+	requestDone := make(chan struct{}, 2)
+	for _, address := range []string{status.ManagementAddress, status.DeviceHubAddress} {
+		go func(address string) {
+			response, requestErr := http.Get("http://" + address + "/")
+			if requestErr == nil {
+				response.Body.Close()
+			}
+			requestDone <- struct{}{}
+		}(address)
+	}
+	<-handlerStarted
 	<-handlerStarted
 	cancel()
 
@@ -49,8 +61,21 @@ func TestRunForceClosesAHandlerAfterGracefulShutdownDeadline(t *testing.T) {
 		<-done
 		t.Fatal("Run() did not return after the graceful shutdown deadline")
 	}
+	for range 2 {
+		select {
+		case <-requestDone:
+		case <-time.After(100 * time.Millisecond):
+			close(releaseHandler)
+			for range 2 {
+				select {
+				case <-requestDone:
+				default:
+				}
+			}
+			t.Fatal("forced shutdown returned without closing both active connections")
+		}
+	}
 	close(releaseHandler)
-	<-requestDone
 }
 
 func waitForRuntimeState(t *testing.T, application *Runtime, want State) Status {
