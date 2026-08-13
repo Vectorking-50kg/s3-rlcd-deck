@@ -73,6 +73,26 @@ class SerialDisconnected(AcceptanceFailure):
     pass
 
 
+FATAL_RESET_REASONS = {
+    "panic",
+    "interrupt_watchdog",
+    "task_watchdog",
+    "watchdog",
+    "brownout",
+    "power_glitch",
+    "cpu_lockup",
+}
+
+
+def accept_boot_event(event: dict[str, Any], stage: str) -> bool:
+    if event.get("type") != "boot_ok":
+        return False
+    reason = str(event.get("reset_reason", "unknown"))
+    if reason in FATAL_RESET_REASONS:
+        raise AcceptanceFailure(f"{stage}: fatal reset reason {reason} observed")
+    return True
+
+
 class SensitiveValueTracker:
     _bare_secret = re.compile(
         r"(?i)(?:authorization\s*:\s*bearer|"
@@ -429,13 +449,13 @@ class SerialEvidence:
         except SerialDisconnected:
             self.reopen(serial_module, port, timeout)
             return self.event(
-                lambda event: event.get("type") == "boot_ok",
+                lambda event: accept_boot_event(event, "post-flash boot"),
                 "post-flash reenumerated boot",
                 30.0,
             )
         try:
             return self.event(
-                lambda event: event.get("type") == "boot_ok",
+                lambda event: accept_boot_event(event, "post-flash boot"),
                 "post-flash pending boot",
                 2.0,
             )
@@ -446,7 +466,7 @@ class SerialEvidence:
             # this boot; another reset would discard the evidence we need.
             self.reopen(serial_module, port, timeout)
             return self.event(
-                lambda event: event.get("type") == "boot_ok",
+                lambda event: accept_boot_event(event, "post-flash boot"),
                 "post-flash reenumerated boot",
                 30.0,
             )
@@ -454,7 +474,7 @@ class SerialEvidence:
             self.command(b"DECK_RESTART\n")
             self.reopen(serial_module, port, timeout)
             return self.event(
-                lambda event: event.get("type") == "boot_ok",
+                lambda event: accept_boot_event(event, "post-flash boot"),
                 "post-flash fresh boot",
                 30.0,
             )
@@ -775,7 +795,10 @@ def connect_wifi(ssid: str, password: str | None = None) -> None:
     # associate with a newly-created WPA2 Setup AP, especially immediately
     # after a previous failed association. Keep this bounded but allow the
     # platform to complete its own retry cycle.
-    result = subprocess.run(command, capture_output=True, text=True, timeout=60)
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired as error:
+        raise AcceptanceFailure("Mac Wi-Fi association timed out") from error
     if result.returncode != 0:
         raise AcceptanceFailure("cannot switch the Mac Wi-Fi network")
 
@@ -860,7 +883,7 @@ def close_setup_by_restart(
     serial_evidence.command(b"DECK_RESTART\n")
     serial_evidence.reopen(serial_module, port, timeout)
     serial_evidence.event(
-        lambda event: event.get("type") == "boot_ok",
+        lambda event: accept_boot_event(event, "Setup close restart"),
         "Setup close restart",
         30,
     )
@@ -1067,7 +1090,11 @@ def main() -> int:
 
         serial_evidence.command(b"DECK_RESTART\n")
         serial_evidence.reopen(serial, arguments.port, arguments.stage_timeout)
-        serial_evidence.event(lambda event: event.get("type") == "boot_ok", "Deck reboot", 30)
+        serial_evidence.event(
+            lambda event: accept_boot_event(event, "Deck reboot"),
+            "Deck reboot",
+            30,
+        )
         online = serial_evidence.event(lambda event: event.get("type") == "companion_link_state" and event.get("state") == "online", "reconnect after Deck reboot", 60)
         reconnect_count += 1
         checks["deck_reboot_reconnected"] = True

@@ -260,6 +260,28 @@ def test_post_flash_monitor_requests_a_fresh_boot_after_ready_handshake() -> Non
     assert reopens == []
 
 
+def test_boot_gate_rejects_fatal_reset_reasons() -> None:
+    fatal_reasons = {
+        "panic",
+        "interrupt_watchdog",
+        "task_watchdog",
+        "watchdog",
+        "brownout",
+        "power_glitch",
+        "cpu_lockup",
+    }
+    for reason in fatal_reasons:
+        try:
+            m1.accept_boot_event({"type": "boot_ok", "reset_reason": reason}, "boot")
+        except m1.AcceptanceFailure as error:
+            assert reason in str(error)
+        else:
+            raise AssertionError(f"fatal reset reason {reason} was accepted")
+    assert m1.accept_boot_event(
+        {"type": "boot_ok", "reset_reason": "software"}, "boot"
+    )
+
+
 def test_post_flash_usb_reenumeration_reopens_without_a_second_reset() -> None:
     evidence = m1.SerialEvidence.__new__(m1.SerialEvidence)
     commands: list[bytes] = []
@@ -385,6 +407,28 @@ def test_wifi_switch_allows_slow_macos_association() -> None:
     assert run.call_args.kwargs["timeout"] >= 45
 
 
+def test_wifi_switch_timeout_never_exposes_the_password() -> None:
+    secret = "TOP-SECRET-SETUP-PASSWORD"
+    timeout = m1.subprocess.TimeoutExpired(
+        ["networksetup", "-setairportnetwork", "en0", "Setup", secret], 60
+    )
+    with mock.patch.object(m1.subprocess, "run", side_effect=timeout):
+        try:
+            m1.connect_wifi("Setup", secret)
+        except m1.AcceptanceFailure as error:
+            assert secret not in str(error)
+            assert "timed out" in str(error)
+        else:
+            raise AssertionError("association timeout must fail")
+
+
+def test_dev_setup_window_outlives_slow_association() -> None:
+    defaults = (
+        m1.REPOSITORY_ROOT / "firmware/sdkconfig.defaults.dev"
+    ).read_text(encoding="utf-8")
+    assert "CONFIG_DECK_SETUP_INACTIVITY_TIMEOUT_SECONDS=90" in defaults
+
+
 def test_diagnostic_console_resets_usb_after_app_only_jtag_flash() -> None:
     source = (
         m1.REPOSITORY_ROOT / "firmware/main/app_main.cpp"
@@ -499,6 +543,7 @@ if __name__ == "__main__":
     test_companion_logs_are_drained_redacted_and_secret_observation_fails_gate()
     test_profile_cleanup_revokes_only_temporary_profile_and_reselects_original()
     test_post_flash_monitor_requests_a_fresh_boot_after_ready_handshake()
+    test_boot_gate_rejects_fatal_reset_reasons()
     test_post_flash_usb_reenumeration_reopens_without_a_second_reset()
     test_post_flash_usb_reenumeration_can_interrupt_the_ready_write()
     test_initial_serial_open_waits_for_usb_reenumeration()
@@ -507,6 +552,8 @@ if __name__ == "__main__":
     test_fatal_boot_evidence_is_not_retried()
     test_serial_command_never_calls_unbounded_flush()
     test_wifi_switch_allows_slow_macos_association()
+    test_wifi_switch_timeout_never_exposes_the_password()
+    test_dev_setup_window_outlives_slow_association()
     test_cleanup_transaction_records_intent_before_observation()
     test_setup_restart_requires_explicit_inactive_observation()
     test_exact_link_error_gate_rejects_unrelated_failures()
