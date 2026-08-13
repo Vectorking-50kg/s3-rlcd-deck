@@ -843,9 +843,16 @@ def host_is_reachable(host: str, timeout: float) -> bool:
     # on the target /24 and the scoped route to the target must resolve to en0.
     # A VPN, Ethernet route, or a stale previous Wi-Fi association cannot meet
     # both conditions.
-    local_address = wifi_command_output(["ipconfig", "getifaddr", "en0"], timeout)
+    deadline = time.monotonic() + timeout
+    local_address = wifi_command_output(
+        ["ipconfig", "getifaddr", "en0"],
+        remaining_timeout(deadline, timeout),
+    )
+    if not local_address:
+        return False
     route = wifi_command_output(
-        ["route", "-n", "get", "-ifscope", "en0", host], timeout
+        ["route", "-n", "get", "-ifscope", "en0", host],
+        remaining_timeout(deadline, timeout),
     )
     try:
         same_subnet = ipaddress.ip_address(local_address) in ipaddress.ip_network(
@@ -857,9 +864,9 @@ def host_is_reachable(host: str, timeout: float) -> bool:
         return False
     try:
         return subprocess.run(
-            ["ping", "-c", "1", "-W", "1000", host],
+            ["ping", "-S", local_address, "-c", "1", "-W", "1000", host],
             capture_output=True,
-            timeout=timeout,
+            timeout=remaining_timeout(deadline, timeout),
         ).returncode == 0
     except subprocess.TimeoutExpired:
         return False

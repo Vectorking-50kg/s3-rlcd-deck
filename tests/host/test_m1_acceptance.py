@@ -536,8 +536,29 @@ def test_wifi_reachability_requires_an_en0_address_on_the_target_subnet() -> Non
 
     with mock.patch.object(
         m1, "wifi_command_output", side_effect=setup_output
-    ), mock.patch.object(m1.subprocess, "run", return_value=mock.Mock(returncode=0)):
+    ), mock.patch.object(
+        m1.subprocess, "run", return_value=mock.Mock(returncode=0)
+    ) as run:
         assert m1.host_is_reachable("192.168.4.1", 2)
+    assert run.call_args.args[0][:3] == ["ping", "-S", "192.168.4.2"]
+
+
+def test_wifi_interface_probe_shares_one_deadline() -> None:
+    observed_timeouts: list[float] = []
+
+    def output(command: list[str], timeout: float) -> str:
+        observed_timeouts.append(timeout)
+        if command[0] == "ipconfig":
+            return "192.168.4.2"
+        return "route to: 192.168.4.1\ninterface: en0\n"
+
+    clock = iter([0.0, 0.5, 1.0, 1.5])
+    with mock.patch.object(m1, "wifi_command_output", side_effect=output), mock.patch.object(
+        m1.subprocess, "run", return_value=mock.Mock(returncode=0)
+    ) as run, mock.patch.object(m1.time, "monotonic", side_effect=lambda: next(clock)):
+        assert m1.host_is_reachable("192.168.4.1", 2)
+    assert observed_timeouts == [1.5, 1.0]
+    assert run.call_args.kwargs["timeout"] == 0.5
 
 
 def test_original_wifi_power_and_association_share_one_deadline() -> None:
@@ -698,6 +719,7 @@ if __name__ == "__main__":
     test_wifi_operations_share_one_deadline_budget()
     test_target_ssid_is_selected_before_reachability_can_pass()
     test_wifi_reachability_requires_an_en0_address_on_the_target_subnet()
+    test_wifi_interface_probe_shares_one_deadline()
     test_original_wifi_power_and_association_share_one_deadline()
     test_cleanup_transaction_records_intent_before_observation()
     test_setup_restart_requires_explicit_inactive_observation()
