@@ -159,12 +159,15 @@ def test_summary_toolchain_identity_uses_the_pinned_environment() -> None:
 
 def test_serial_module_falls_back_to_the_pinned_idf_environment() -> None:
     environment = {"IDF_PYTHON_ENV_PATH": "/pinned", "PATH": "/pinned/bin"}
-    serial_module = object()
+    serial_module = mock.Mock(
+        Serial=mock.Mock(),
+        SerialException=type("SerialException", (Exception,), {}),
+    )
     patched_path = list(m1.sys.path)
     with mock.patch.object(pathlib.Path, "is_file", return_value=True), mock.patch.object(
         m1.importlib,
         "import_module",
-        side_effect=[ModuleNotFoundError("serial"), serial_module],
+        side_effect=[object(), serial_module],
     ), mock.patch.object(
         m1, "command_output", return_value="/pinned/lib/python3.14/site-packages"
     ) as output, mock.patch.object(

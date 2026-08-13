@@ -239,27 +239,39 @@ def run_app_flash(port: str, output: pathlib.Path, environment: dict[str, str]) 
 
 
 def load_serial_module(environment: dict[str, str]) -> Any:
+    def valid(module: Any) -> bool:
+        serial_factory = getattr(module, "Serial", None)
+        serial_exception = getattr(module, "SerialException", None)
+        return callable(serial_factory) and isinstance(serial_exception, type) and issubclass(
+            serial_exception, Exception
+        )
+
     try:
-        return importlib.import_module("serial")
+        ambient = importlib.import_module("serial")
     except ModuleNotFoundError:
-        python = pathlib.Path(environment.get("IDF_PYTHON_ENV_PATH", "")) / "bin/python"
-        if not python.is_file():
-            raise AcceptanceFailure("pyserial is unavailable in the pinned toolchain")
-        try:
-            site_packages = command_output(
-                [
-                    str(python),
-                    "-c",
-                    "import site; print(site.getsitepackages()[0])",
-                ],
-                environment,
-            )
-            sys.path.insert(0, site_packages)
-            return importlib.import_module("serial")
-        except (ModuleNotFoundError, OSError, subprocess.SubprocessError) as error:
-            raise AcceptanceFailure(
-                "pyserial is unavailable in the pinned toolchain"
-            ) from error
+        ambient = None
+    if valid(ambient):
+        return ambient
+    python = pathlib.Path(environment.get("IDF_PYTHON_ENV_PATH", "")) / "bin/python"
+    if not python.is_file():
+        raise AcceptanceFailure("pyserial is unavailable in the pinned toolchain")
+    try:
+        site_packages = command_output(
+            [
+                str(python),
+                "-c",
+                "import site; print(site.getsitepackages()[0])",
+            ],
+            environment,
+        )
+        sys.path.insert(0, site_packages)
+        sys.modules.pop("serial", None)
+        pinned = importlib.import_module("serial")
+        if valid(pinned):
+            return pinned
+    except (ModuleNotFoundError, OSError, subprocess.SubprocessError):
+        pass
+    raise AcceptanceFailure("pyserial is unavailable in the pinned toolchain")
 
 
 def text_is_redacted(text: str, sensitive_values: tuple[str, ...] = ()) -> bool:
