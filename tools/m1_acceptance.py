@@ -74,6 +74,70 @@ def command_output(arguments: list[str]) -> str:
     return result.stdout.strip()
 
 
+def toolchain_identity() -> dict[str, str]:
+    identity: dict[str, str] = {}
+    for name, command in (("go", ["go", "version"]), ("esp_idf", ["idf.py", "--version"])):
+        try:
+            identity[name] = command_output(command)
+        except (OSError, subprocess.SubprocessError):
+            identity[name] = "unavailable"
+    return identity
+
+
+def run_preflight(output: pathlib.Path) -> None:
+    commands = (
+        ["./tools/test_host.sh"],
+        ["./tools/test_companion.sh"],
+        ["./tools/idf.sh", "dev", "build"],
+        ["./tools/idf.sh", "release", "build"],
+    )
+    with output.open("w", encoding="utf-8") as log:
+        environment = dict(os.environ)
+        idf_root = environment.get("IDF_PATH")
+        if not idf_root:
+            default_idf = pathlib.Path.home() / ".espressif/v6.0.2/esp-idf"
+            if default_idf.is_dir():
+                export = subprocess.run(
+                    ["bash", "-lc", f"source {default_idf}/export.sh >/dev/null 2>&1 && env -0"],
+                    check=True,
+                    capture_output=True,
+                ).stdout
+                environment.update(
+                    entry.decode().split("=", 1) for entry in export.split(b"\0") if b"=" in entry
+                )
+        for command in commands:
+            log.write("$ " + " ".join(command) + "\n")
+            log.flush()
+            result = subprocess.run(
+                command,
+                cwd=REPOSITORY_ROOT,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=environment,
+            )
+            if result.returncode != 0:
+                raise AcceptanceFailure(f"preflight command failed: {' '.join(command)}")
+    os.environ.update({name: value for name, value in environment.items() if name in {"IDF_PATH", "IDF_PYTHON_ENV_PATH", "OPENOCD_SCRIPTS", "PATH"}})
+
+
+def evidence_is_redacted(path: pathlib.Path) -> bool:
+    if not path.is_file():
+        return False
+    lowered = path.read_text(encoding="utf-8").lower()
+    return not any(
+        forbidden in lowered
+        for forbidden in (
+            '"password"',
+            '"token"',
+            '"certificate',
+            '"fingerprint"',
+            '"code"',
+            "authorization:",
+        )
+    )
+
+
 def source_tree_clean() -> bool:
     return command_output(
         ["git", "status", "--porcelain", "--untracked-files=all", "--", "firmware", "companion", "tools", "tests", "protocol", "cmake"]
@@ -365,7 +429,7 @@ def build_summary(
         "firmware_commit": firmware_commit,
         "companion_commit": companion_commit,
         "platform": platform.platform(),
-        "toolchains": {"go": command_output(["go", "version"]), "esp_idf": "ESP-IDF v6.0.2"},
+        "toolchains": toolchain_identity(),
         "started_at": started_at,
         "ended_at": ended_at,
         "checks": {name: checks.get(name, False) for name in REQUIRED_CHECKS},
@@ -411,14 +475,18 @@ def main() -> int:
     companion_error_count = 0
     dirty = not source_tree_clean()
     commit = command_output(["git", "rev-parse", "HEAD"])
-    if dirty and not arguments.allow_dirty:
-        print("source tree is dirty; commit before auditable acceptance", file=sys.stderr)
-        return 2
     token = hashlib.sha256(os.urandom(64)).hexdigest()
-    data_directory = arguments.result_dir / "companion-data"
+    data_root = tempfile.TemporaryDirectory(prefix="s3deck-m1-companion-")
+    data_directory = pathlib.Path(data_root.name)
     companion = CompanionProcess(arguments.companion.resolve(), data_directory, token)
     serial_evidence: SerialEvidence | None = None
     try:
+        if dirty and not arguments.allow_dirty:
+            raise AcceptanceFailure("source tree is dirty; commit before auditable acceptance")
+        run_preflight(arguments.result_dir / "preflight.log")
+        if command_output(["idf.py", "--version"]) != "ESP-IDF v6.0.2":
+            raise AcceptanceFailure("M1 acceptance requires ESP-IDF v6.0.2")
+        checks["builds_clean"] = True
         from serial import SerialException  # noqa: F401
         import serial
 
@@ -453,7 +521,7 @@ def main() -> int:
         wait_for_host("192.168.31.1", arguments.stage_timeout)
         online = serial_evidence.event(lambda event: event.get("type") == "companion_link_state" and event.get("state") == "online", "first Device Link", 60)
         checks["recovery_pairing"] = True
-        checks["credentials_absent_from_evidence"] = True
+        checks["credentials_absent_from_evidence"] = evidence_is_redacted(serial_path)
         reconnect_count += 1
         deck_error_count = max(deck_error_count, int(online["error_count"]))
 
@@ -562,7 +630,6 @@ def main() -> int:
         checks["windows_native_shell_observed"] = verified_windows_native_run(
             arguments.windows_native_run_url, commit
         )
-        checks["builds_clean"] = not dirty
         companion_status, runtime_status = management.request("GET", "/api/v1/status")
         if companion_status == 200:
             companion_error_count = int(runtime_status.get("device_link_auth_errors", 0)) + int(runtime_status.get("device_link_protocol_errors", 0))
@@ -575,6 +642,7 @@ def main() -> int:
             print(f"M1 cleanup failed: {error}", file=sys.stderr)
         if serial_evidence is not None:
             serial_evidence.close()
+        data_root.cleanup()
         try:
             connect_wifi(arguments.original_ssid)
         except AcceptanceFailure:

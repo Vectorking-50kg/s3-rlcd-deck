@@ -76,7 +76,18 @@ def test_summary_passes_only_with_every_real_gate_and_hashes_redacted_log() -> N
     assert failed["failures"] == ["wrong_certificate_rejected"]
 
 
+def test_evidence_redaction_gate_rejects_every_secret_field() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        evidence = pathlib.Path(directory) / "serial.jsonl"
+        evidence.write_text('{"line":"safe"}\n', encoding="utf-8")
+        assert m1.evidence_is_redacted(evidence)
+        for secret in ('"password":"x"', '"token":"x"', '"certificate_der":"x"', '"fingerprint":"x"', '"code":"123456"', 'Authorization: Bearer x'):
+            evidence.write_text(secret, encoding="utf-8")
+            assert not m1.evidence_is_redacted(evidence), secret
+
+
 if __name__ == "__main__":
     test_serial_evidence_keeps_redacted_link_state_and_drops_setup_secret()
     test_summary_passes_only_with_every_real_gate_and_hashes_redacted_log()
+    test_evidence_redaction_gate_rejects_every_secret_field()
     print("M1 acceptance contract passed")
