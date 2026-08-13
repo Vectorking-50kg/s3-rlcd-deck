@@ -46,6 +46,7 @@ int16_t application_temperature_offset_tenths_c =
 
 #include "driver/usb_serial_jtag.h"
 #include "driver/usb_serial_jtag_vfs.h"
+#include "esp_private/periph_ctrl.h"
 #include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -63,8 +64,9 @@ bool initialize_diagnostic_console_driver()
     const usb_serial_jtag_pull_override_vals_t detached{};
     usb_serial_jtag_ll_phy_enable_pull_override(&detached);
     esp_rom_delay_us(50'000);
-    int __DECLARE_RCC_ATOMIC_ENV [[maybe_unused]];
-    usb_serial_jtag_ll_reset_register();
+    PERIPH_RCC_ATOMIC() {
+        usb_serial_jtag_ll_reset_register();
+    }
     usb_serial_jtag_ll_phy_disable_pull_override();
 
     usb_serial_jtag_driver_config_t configuration =

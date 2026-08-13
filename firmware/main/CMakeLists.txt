@@ -10,6 +10,7 @@ idf_component_register(
         esp_app_format
         esp_driver_usb_serial_jtag
         esp_hal_usb
+        esp_hw_support
         esp_psram
         esp_rom
         esp_system

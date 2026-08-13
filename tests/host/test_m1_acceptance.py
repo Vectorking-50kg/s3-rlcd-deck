@@ -261,17 +261,14 @@ def test_post_flash_monitor_requests_a_fresh_boot_after_ready_handshake() -> Non
 
 
 def test_post_flash_usb_reenumeration_reopens_without_a_second_reset() -> None:
-    class Reenumerated(Exception):
-        pass
-
     evidence = m1.SerialEvidence.__new__(m1.SerialEvidence)
     commands: list[bytes] = []
     reopens: list[tuple[object, str, float]] = []
-    serial_module = mock.Mock(SerialException=Reenumerated)
+    serial_module = mock.Mock(SerialException=OSError)
     evidence.command = commands.append
     evidence.reopen = lambda module, port, timeout: reopens.append((module, port, timeout))
     evidence.event = mock.Mock(
-        side_effect=[Reenumerated("USB endpoint detached"), {"type": "boot_ok"}]
+        side_effect=[m1.SerialDisconnected("USB endpoint detached"), {"type": "boot_ok"}]
     )
 
     assert evidence.fresh_boot(serial_module, "/dev/cu.Deck", 12.0) == {
@@ -282,12 +279,11 @@ def test_post_flash_usb_reenumeration_reopens_without_a_second_reset() -> None:
 
 
 def test_post_flash_usb_reenumeration_can_interrupt_the_ready_write() -> None:
-    class Reenumerated(Exception):
-        pass
-
     evidence = m1.SerialEvidence.__new__(m1.SerialEvidence)
-    serial_module = mock.Mock(SerialException=Reenumerated)
-    evidence.command = mock.Mock(side_effect=Reenumerated("USB endpoint detached"))
+    serial_module = mock.Mock(SerialException=OSError)
+    evidence.command = mock.Mock(
+        side_effect=m1.SerialDisconnected("USB endpoint detached")
+    )
     evidence.reopen = mock.Mock()
     evidence.event = mock.Mock(return_value={"type": "boot_ok"})
 
@@ -296,6 +292,58 @@ def test_post_flash_usb_reenumeration_can_interrupt_the_ready_write() -> None:
     }
     evidence.reopen.assert_called_once_with(serial_module, "/dev/cu.Deck", 12.0)
     evidence.event.assert_called_once()
+
+
+def test_initial_serial_open_waits_for_usb_reenumeration() -> None:
+    class Reenumerated(Exception):
+        pass
+
+    connection = object()
+    serial_module = mock.Mock(SerialException=Reenumerated)
+    serial_module.Serial.side_effect = [
+        Reenumerated("not enumerated"),
+        OSError("not enumerated"),
+        connection,
+    ]
+    evidence = m1.SerialEvidence.__new__(m1.SerialEvidence)
+
+    with mock.patch.object(m1.time, "sleep"), mock.patch.object(
+        m1.time, "monotonic", side_effect=[0.0, 0.0, 0.1, 0.2]
+    ):
+        evidence._connection = m1.SerialEvidence.open_connection(
+            serial_module, "/dev/cu.Deck", 1.0
+        )
+    assert evidence._connection is connection
+    assert serial_module.Serial.call_count == 3
+
+
+def test_initial_serial_open_timeout_fails_closed() -> None:
+    serial_module = mock.Mock(SerialException=OSError)
+    serial_module.Serial.side_effect = OSError("not enumerated")
+    with mock.patch.object(m1.time, "sleep"), mock.patch.object(
+        m1.time, "monotonic", side_effect=[0.0, 0.0, 1.0]
+    ):
+        try:
+            m1.SerialEvidence.open_connection(serial_module, "/dev/cu.Deck", 0.5)
+        except m1.AcceptanceFailure as error:
+            assert "did not enumerate" in str(error)
+        else:
+            raise AssertionError("missing USB endpoint must fail closed")
+
+
+def test_evidence_write_failure_is_not_mistaken_for_usb_reenumeration() -> None:
+    evidence = m1.SerialEvidence.__new__(m1.SerialEvidence)
+    evidence.command = mock.Mock()
+    evidence.reopen = mock.Mock()
+    evidence.event = mock.Mock(side_effect=OSError("evidence disk full"))
+
+    try:
+        evidence.fresh_boot(mock.Mock(SerialException=OSError), "/dev/cu.Deck", 12.0)
+    except OSError as error:
+        assert "disk full" in str(error)
+    else:
+        raise AssertionError("evidence I/O failure must fail closed")
+    evidence.reopen.assert_not_called()
 
 
 def test_fatal_boot_evidence_is_not_retried() -> None:
@@ -330,15 +378,23 @@ def test_serial_command_never_calls_unbounded_flush() -> None:
     assert evidence._connection.writes == [b"DECK_SETUP\n"]
 
 
+def test_wifi_switch_allows_slow_macos_association() -> None:
+    result = mock.Mock(returncode=0)
+    with mock.patch.object(m1.subprocess, "run", return_value=result) as run:
+        m1.connect_wifi("Setup", "password")
+    assert run.call_args.kwargs["timeout"] >= 45
+
+
 def test_diagnostic_console_resets_usb_after_app_only_jtag_flash() -> None:
     source = (
         m1.REPOSITORY_ROOT / "firmware/main/app_main.cpp"
     ).read_text(encoding="utf-8")
     detach = source.index("usb_serial_jtag_ll_phy_enable_pull_override(&detached)")
+    atomic = source.index("PERIPH_RCC_ATOMIC()")
     reset = source.index("usb_serial_jtag_ll_reset_register()")
     attach = source.index("usb_serial_jtag_ll_phy_disable_pull_override()")
     driver_install = source.index("usb_serial_jtag_driver_install(&configuration)")
-    assert detach < reset < attach < driver_install
+    assert detach < atomic < reset < attach < driver_install
 
 
 def test_cleanup_transaction_records_intent_before_observation() -> None:
@@ -445,8 +501,12 @@ if __name__ == "__main__":
     test_post_flash_monitor_requests_a_fresh_boot_after_ready_handshake()
     test_post_flash_usb_reenumeration_reopens_without_a_second_reset()
     test_post_flash_usb_reenumeration_can_interrupt_the_ready_write()
+    test_initial_serial_open_waits_for_usb_reenumeration()
+    test_initial_serial_open_timeout_fails_closed()
+    test_evidence_write_failure_is_not_mistaken_for_usb_reenumeration()
     test_fatal_boot_evidence_is_not_retried()
     test_serial_command_never_calls_unbounded_flush()
+    test_wifi_switch_allows_slow_macos_association()
     test_cleanup_transaction_records_intent_before_observation()
     test_setup_restart_requires_explicit_inactive_observation()
     test_exact_link_error_gate_rejects_unrelated_failures()

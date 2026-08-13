@@ -69,6 +69,10 @@ class AcceptanceTimeout(AcceptanceFailure):
     pass
 
 
+class SerialDisconnected(AcceptanceFailure):
+    pass
+
+
 class SensitiveValueTracker:
     _bare_secret = re.compile(
         r"(?i)(?:authorization\s*:\s*bearer|"
@@ -382,12 +386,23 @@ class SerialEvidence:
         timeout: float,
         secrets: SensitiveValueTracker,
     ) -> None:
-        self._connection = serial_module.Serial(
-            port=port, baudrate=115200, timeout=0.25, write_timeout=0.25
-        )
+        self._serial_exception = serial_module.SerialException
+        self._connection = self.open_connection(serial_module, port, timeout)
         self._output = output.open("w", encoding="utf-8")
         self._stage_timeout = timeout
         self._secrets = secrets
+
+    @staticmethod
+    def open_connection(serial_module: Any, port: str, timeout: float) -> Any:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                return serial_module.Serial(
+                    port=port, baudrate=115200, timeout=0.25, write_timeout=0.25
+                )
+            except (OSError, serial_module.SerialException):
+                time.sleep(0.25)
+        raise AcceptanceFailure("Deck serial port did not enumerate after app flash")
 
     def close(self) -> None:
         self._connection.close()
@@ -396,29 +411,22 @@ class SerialEvidence:
     def reopen(self, serial_module: Any, port: str, timeout: float) -> None:
         self._connection.close()
         time.sleep(0.75)
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            try:
-                self._connection = serial_module.Serial(
-                    port=port, baudrate=115200, timeout=0.25, write_timeout=0.25
-                )
-                return
-            except (OSError, serial_module.SerialException):
-                time.sleep(0.25)
-        raise AcceptanceFailure("Deck serial port did not return after restart")
+        self._connection = self.open_connection(serial_module, port, timeout)
 
     def command(self, command: bytes) -> None:
-        self._connection.write(command)
+        try:
+            self._connection.write(command)
+        except (OSError, self._serial_exception) as error:
+            raise SerialDisconnected("Deck serial endpoint disconnected") from error
 
     def fresh_boot(self, serial_module: Any, port: str, timeout: float) -> dict[str, Any]:
         # The app-only flasher resets before this monitor can open. Establish the
         # diagnostic host handshake and first try to catch that pending one-shot
         # event. Only request a second reset when the original event was already
         # emitted before the monitor opened.
-        serial_exception = getattr(serial_module, "SerialException", OSError)
         try:
             self.command(HIL_READY)
-        except (OSError, serial_exception):
+        except SerialDisconnected:
             self.reopen(serial_module, port, timeout)
             return self.event(
                 lambda event: event.get("type") == "boot_ok",
@@ -431,7 +439,7 @@ class SerialEvidence:
                 "post-flash pending boot",
                 2.0,
             )
-        except (OSError, serial_exception):
+        except SerialDisconnected:
             # The diagnostic firmware deliberately performs a USB detach after
             # an app-only JTAG flash so the host cannot retain OpenOCD's stale
             # CDC endpoint. Reopen the newly enumerated endpoint and preserve
@@ -464,10 +472,13 @@ class SerialEvidence:
             if now >= next_ready:
                 try:
                     self._connection.write(HIL_READY)
-                except OSError:
-                    pass
+                except (OSError, self._serial_exception) as error:
+                    raise SerialDisconnected("Deck serial endpoint disconnected") from error
                 next_ready = now + 0.5
-            raw = self._connection.readline()
+            try:
+                raw = self._connection.readline()
+            except (OSError, self._serial_exception) as error:
+                raise SerialDisconnected("Deck serial endpoint disconnected") from error
             if not raw:
                 continue
             line = raw.decode("utf-8", errors="replace")
@@ -760,7 +771,11 @@ def connect_wifi(ssid: str, password: str | None = None) -> None:
     command = ["networksetup", "-setairportnetwork", "en0", ssid]
     if password is not None:
         command.append(password)
-    result = subprocess.run(command, capture_output=True, text=True, timeout=20)
+    # CoreWLAN can take longer than 20 seconds to leave the normal LAN and
+    # associate with a newly-created WPA2 Setup AP, especially immediately
+    # after a previous failed association. Keep this bounded but allow the
+    # platform to complete its own retry cycle.
+    result = subprocess.run(command, capture_output=True, text=True, timeout=60)
     if result.returncode != 0:
         raise AcceptanceFailure("cannot switch the Mac Wi-Fi network")
 
