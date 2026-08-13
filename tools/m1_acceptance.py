@@ -146,13 +146,17 @@ def utc_now() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def command_output(arguments: list[str]) -> str:
+def command_output(
+    arguments: list[str],
+    environment: dict[str, str] | None = None,
+) -> str:
     result = subprocess.run(
         arguments,
         cwd=REPOSITORY_ROOT,
         check=True,
         capture_output=True,
         text=True,
+        env=environment,
     )
     return result.stdout.strip()
 
@@ -201,7 +205,6 @@ def run_preflight(output: pathlib.Path) -> dict[str, str]:
             )
             if result.returncode != 0:
                 raise AcceptanceFailure(f"preflight command failed: {' '.join(command)}")
-    os.environ.update({name: value for name, value in environment.items() if name in {"IDF_PATH", "IDF_PYTHON_ENV_PATH", "OPENOCD_SCRIPTS", "PATH"}})
     return environment
 
 
@@ -934,7 +937,7 @@ def main() -> int:
         if dirty:
             raise AcceptanceFailure("source tree is dirty; commit before auditable acceptance")
         environment = run_preflight(arguments.result_dir / "preflight.log")
-        if command_output(["idf.py", "--version"]) != "ESP-IDF v6.0.2":
+        if command_output(["idf.py", "--version"], environment) != "ESP-IDF v6.0.2":
             raise AcceptanceFailure("M1 acceptance requires ESP-IDF v6.0.2")
         executable = companion_for_current_host(commit)
         observed_companion_commit = commit

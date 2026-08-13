@@ -127,6 +127,13 @@ def test_current_source_and_companion_identity_are_observed_not_assumed() -> Non
     assert executable.name == "s3deck-companion"
 
 
+def test_command_output_can_use_the_pinned_toolchain_environment() -> None:
+    environment = {"PATH": "/pinned/bin", "ESP_IDF_VERSION": "6.0.2"}
+    with mock.patch.object(m1.subprocess, "run", return_value=mock.Mock(stdout="ok\n")) as run:
+        assert m1.command_output(["idf.py", "--version"], environment) == "ok"
+    assert run.call_args.kwargs["env"] is environment
+
+
 def test_native_run_requires_same_commit_and_both_real_platform_jobs() -> None:
     full = "c" * 40
     document = {
@@ -335,6 +342,7 @@ if __name__ == "__main__":
     test_evidence_redaction_gate_rejects_every_secret_field()
     test_build_identity_is_only_retained_for_an_exact_full_commit()
     test_current_source_and_companion_identity_are_observed_not_assumed()
+    test_command_output_can_use_the_pinned_toolchain_environment()
     test_native_run_requires_same_commit_and_both_real_platform_jobs()
     test_companion_logs_are_drained_redacted_and_secret_observation_fails_gate()
     test_profile_cleanup_revokes_only_temporary_profile_and_reselects_original()
