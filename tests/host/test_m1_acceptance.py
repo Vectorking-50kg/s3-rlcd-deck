@@ -157,6 +157,25 @@ def test_summary_toolchain_identity_uses_the_pinned_environment() -> None:
     assert all(call.args[1] is environment for call in output.call_args_list)
 
 
+def test_serial_module_falls_back_to_the_pinned_idf_environment() -> None:
+    environment = {"IDF_PYTHON_ENV_PATH": "/pinned", "PATH": "/pinned/bin"}
+    serial_module = object()
+    patched_path = list(m1.sys.path)
+    with mock.patch.object(pathlib.Path, "is_file", return_value=True), mock.patch.object(
+        m1.importlib,
+        "import_module",
+        side_effect=[ModuleNotFoundError("serial"), serial_module],
+    ), mock.patch.object(
+        m1, "command_output", return_value="/pinned/lib/python3.14/site-packages"
+    ) as output, mock.patch.object(
+        m1.sys, "path", patched_path
+    ):
+        assert m1.load_serial_module(environment) is serial_module
+        assert patched_path[0] == "/pinned/lib/python3.14/site-packages"
+    output.assert_called_once()
+    assert output.call_args.args[1] is environment
+
+
 def test_native_run_requires_same_commit_and_both_real_platform_jobs() -> None:
     full = "c" * 40
     document = {
@@ -367,6 +386,7 @@ if __name__ == "__main__":
     test_current_source_and_companion_identity_are_observed_not_assumed()
     test_command_output_can_use_the_pinned_toolchain_environment()
     test_summary_toolchain_identity_uses_the_pinned_environment()
+    test_serial_module_falls_back_to_the_pinned_idf_environment()
     test_native_run_requires_same_commit_and_both_real_platform_jobs()
     test_companion_logs_are_drained_redacted_and_secret_observation_fails_gate()
     test_profile_cleanup_revokes_only_temporary_profile_and_reselects_original()

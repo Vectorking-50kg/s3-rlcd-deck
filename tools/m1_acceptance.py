@@ -7,6 +7,7 @@ import argparse
 import datetime
 import hashlib
 import http.cookiejar
+import importlib
 import json
 import os
 import pathlib
@@ -235,6 +236,30 @@ def run_app_flash(port: str, output: pathlib.Path, environment: dict[str, str]) 
         )
     if result.returncode != 0:
         raise AcceptanceFailure("safe app-only Deck flashing failed")
+
+
+def load_serial_module(environment: dict[str, str]) -> Any:
+    try:
+        return importlib.import_module("serial")
+    except ModuleNotFoundError:
+        python = pathlib.Path(environment.get("IDF_PYTHON_ENV_PATH", "")) / "bin/python"
+        if not python.is_file():
+            raise AcceptanceFailure("pyserial is unavailable in the pinned toolchain")
+        try:
+            site_packages = command_output(
+                [
+                    str(python),
+                    "-c",
+                    "import site; print(site.getsitepackages()[0])",
+                ],
+                environment,
+            )
+            sys.path.insert(0, site_packages)
+            return importlib.import_module("serial")
+        except (ModuleNotFoundError, OSError, subprocess.SubprocessError) as error:
+            raise AcceptanceFailure(
+                "pyserial is unavailable in the pinned toolchain"
+            ) from error
 
 
 def text_is_redacted(text: str, sensitive_values: tuple[str, ...] = ()) -> bool:
@@ -946,10 +971,9 @@ def main() -> int:
             raise AcceptanceFailure("M1 acceptance requires ESP-IDF v6.0.2")
         executable = companion_for_current_host(commit)
         observed_companion_commit = commit
+        serial = load_serial_module(environment)
         run_app_flash(arguments.port, arguments.result_dir / "app-flash.log", environment)
         checks["builds_clean"] = True
-        from serial import SerialException  # noqa: F401
-        import serial
 
         serial_evidence = SerialEvidence(
             serial,
