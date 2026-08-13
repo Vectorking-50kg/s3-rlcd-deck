@@ -74,7 +74,8 @@ class SensitiveValueTracker:
         r"\b(?:device[ _-]?)?token\b\s*[:=]|"
         r"\b(?:certificate[ _-]?)?fingerprint\b\s*[:=]|"
         r"\b(?:pairing[ _-]?)?code\b\s*[:=]\s*[0-9]{6}|"
-        r"sha256:[0-9a-f]{64})"
+        r"sha256:[0-9a-f]{64}|"
+        r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-]))"
     )
 
     def __init__(self, *values: str) -> None:
@@ -715,6 +716,17 @@ def forget_wifi(ssid: str) -> bool:
     return result.returncode == 0
 
 
+def forget_setup_networks(ssids: set[str]) -> tuple[bool, list[str]]:
+    failures: list[str] = []
+    for ssid in sorted(ssids):
+        try:
+            if not forget_wifi(ssid):
+                failures.append(ssid)
+        except Exception:
+            failures.append(ssid)
+    return not failures, failures
+
+
 def pair_deck(
     management: ManagementClient,
     serial_evidence: SerialEvidence,
@@ -774,6 +786,12 @@ def close_setup_by_restart(
         lambda event: event.get("type") == "boot_ok",
         "Setup close restart",
         30,
+    )
+    serial_evidence.event(
+        lambda event: event.get("type") == "setup_state"
+        and event.get("active") is False,
+        "Setup inactive after restart",
+        timeout,
     )
     cleanup.observe_setup_closed()
 
@@ -910,6 +928,8 @@ def main() -> int:
     managed_processes: list[CompanionProcess] = []
     serial_evidence: SerialEvidence | None = None
     cleanup = CleanupTransaction()
+    summary: dict[str, Any] = {"status": "failed"}
+    summary_written = False
     try:
         if dirty:
             raise AcceptanceFailure("source tree is dirty; commit before auditable acceptance")
@@ -1095,6 +1115,7 @@ def main() -> int:
         status, temporary_code = management.request("POST", "/api/v1/pairing/codes")
         if status != 200:
             raise AcceptanceFailure("temporary authority code unavailable")
+        secrets.add(str(temporary_code.get("code", "")))
         status, temporary_credential = device_hub_json(
             "POST",
             "/api/v1/pairing/redeem",
@@ -1162,14 +1183,20 @@ def main() -> int:
         )
         connect_wifi(arguments.original_ssid)
         wait_for_host("192.168.31.1", arguments.stage_timeout)
-    except (AcceptanceFailure, OSError, subprocess.SubprocessError, urllib.error.URLError) as error:
+    except (
+        AcceptanceFailure,
+        KeyboardInterrupt,
+        OSError,
+        subprocess.SubprocessError,
+        urllib.error.URLError,
+    ) as error:
         print(f"M1 acceptance failed: {error}", file=sys.stderr)
     finally:
         cleanup_ok = True
         for process in reversed(managed_processes[1:]):
             try:
                 process.stop()
-            except AcceptanceFailure as error:
+            except Exception as error:
                 cleanup_ok = False
                 print(f"M1 cleanup failed: {error}", file=sys.stderr)
         if serial_evidence is not None and companion is not None and cleanup.needs_compensation():
@@ -1210,57 +1237,84 @@ def main() -> int:
                         arguments.stage_timeout,
                         cleanup,
                     )
-            except (AcceptanceFailure, OSError, urllib.error.URLError) as error:
+            except Exception as error:
                 cleanup_ok = False
                 print(f"M1 compensation failed: {error}", file=sys.stderr)
                 try:
                     serial_evidence.command(b"DECK_RESTART\n")
-                except OSError:
+                except Exception:
                     pass
         if companion is not None:
             try:
                 companion.stop()
-            except AcceptanceFailure as error:
+            except Exception as error:
                 cleanup_ok = False
                 print(f"M1 cleanup failed: {error}", file=sys.stderr)
         try:
             connect_wifi(arguments.original_ssid)
-        except AcceptanceFailure as error:
+        except Exception as error:
             cleanup_ok = False
             print(f"M1 Wi-Fi restore failed: {error}", file=sys.stderr)
-        try:
-            for setup_ssid in cleanup.setup_ssids:
-                if not forget_wifi(setup_ssid):
-                    raise AcceptanceFailure(
-                        f"cannot remove temporary Setup network {setup_ssid!r}"
-                    )
-        except (OSError, subprocess.SubprocessError) as error:
+        setup_networks_removed, failed_ssids = forget_setup_networks(cleanup.setup_ssids)
+        if not setup_networks_removed:
             cleanup_ok = False
-            print(f"M1 Setup Wi-Fi cleanup failed: {error}", file=sys.stderr)
+            print(
+                f"M1 Setup Wi-Fi cleanup failed for {len(failed_ssids)} network(s)",
+                file=sys.stderr,
+            )
         if serial_evidence is not None:
-            serial_evidence.close()
+            try:
+                serial_evidence.close()
+            except Exception as error:
+                cleanup_ok = False
+                print(f"M1 serial cleanup failed: {error}", file=sys.stderr)
         checks["cleanup_restored"] = cleanup_ok and cleanup.restored()
-        checks["credentials_absent_from_evidence"] = (
-            all(process.logs_redacted() for process in managed_processes)
-            and secrets.clean()
-            and evidence_directory_is_redacted(arguments.result_dir, secrets.values())
-        )
-        data_root.cleanup()
-        summary = build_summary(
-            firmware_commit=observed_firmware_commit,
-            companion_commit=observed_companion_commit,
-            started_at=started_at,
-            ended_at=utc_now(),
-            checks=checks,
-            reconnect_count=reconnect_count,
-            deck_error_count=deck_error_count,
-            companion_error_count=companion_error_count,
-            serial_log=serial_path,
-            source_dirty=dirty,
-        )
-        summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        try:
+            checks["credentials_absent_from_evidence"] = (
+                all(process.logs_redacted() for process in managed_processes)
+                and secrets.clean()
+                and evidence_directory_is_redacted(arguments.result_dir, secrets.values())
+            )
+        except Exception as error:
+            checks["credentials_absent_from_evidence"] = False
+            print(f"M1 evidence scan failed: {error}", file=sys.stderr)
+        try:
+            data_root.cleanup()
+        except Exception as error:
+            checks["cleanup_restored"] = False
+            print(f"M1 temporary-data cleanup failed: {error}", file=sys.stderr)
+        try:
+            summary = build_summary(
+                firmware_commit=observed_firmware_commit,
+                companion_commit=observed_companion_commit,
+                started_at=started_at,
+                ended_at=utc_now(),
+                checks=checks,
+                reconnect_count=reconnect_count,
+                deck_error_count=deck_error_count,
+                companion_error_count=companion_error_count,
+                serial_log=serial_path,
+                source_dirty=dirty,
+            )
+        except Exception as error:
+            print(f"M1 summary assembly failed: {error}", file=sys.stderr)
+            summary = {
+                "schema_version": 1,
+                "status": "failed",
+                "failures": ["summary_assembly_failed"],
+                "started_at": started_at,
+                "ended_at": utc_now(),
+            }
+        try:
+            summary_path.write_text(
+                json.dumps(summary, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            summary_written = True
+        except OSError as error:
+            print(f"M1 summary write failed: {error}", file=sys.stderr)
     print(f"M1 acceptance {summary['status']}: {summary_path}")
-    return 0 if summary["status"] == "passed" else 1
+    return 0 if summary_written and summary["status"] == "passed" else 1
 
 
 if __name__ == "__main__":

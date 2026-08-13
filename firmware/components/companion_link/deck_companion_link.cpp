@@ -243,10 +243,7 @@ void websocket_event(
             const auto *data = static_cast<const esp_websocket_event_data_t *>(event_data);
             if (data->error_handle.esp_tls_cert_verify_flags != 0) {
                 event.error = DECK_COMPANION_LINK_ERROR_TLS_PIN_MISMATCH;
-            } else if (
-                data->error_handle.error_type == WEBSOCKET_ERROR_TYPE_HANDSHAKE &&
-                data->error_handle.esp_ws_handshake_status_code == 401
-            ) {
+            } else if (data->error_handle.esp_ws_handshake_status_code == 401) {
                 event.error = DECK_COMPANION_LINK_ERROR_AUTH_REJECTED;
             }
         }

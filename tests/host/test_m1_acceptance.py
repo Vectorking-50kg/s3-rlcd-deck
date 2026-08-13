@@ -91,6 +91,7 @@ def test_evidence_redaction_gate_rejects_every_secret_field() -> None:
             "device token=PAIRING_SECRET",
             "fingerprint=sha256:" + "a" * 64,
             "certificate-fingerprint: hidden",
+            "unlabelled " + "A" * 43 + " value",
         ):
             evidence.write_text(bare, encoding="utf-8")
             assert not m1.evidence_is_redacted(evidence), bare
@@ -250,6 +251,22 @@ def test_cleanup_transaction_records_intent_before_observation() -> None:
     assert cleanup.restored()
 
 
+def test_setup_restart_requires_explicit_inactive_observation() -> None:
+    cleanup = m1.CleanupTransaction()
+    cleanup.begin_setup()
+    evidence = mock.Mock()
+    evidence.event.side_effect = [
+        {"type": "boot_ok"},
+        {"type": "setup_state", "active": False},
+    ]
+    m1.close_setup_by_restart(evidence, object(), "/dev/cu.Deck", 12.0, cleanup)
+    assert cleanup.restored()
+    assert evidence.event.call_args_list[1].args[0]({"type": "boot_ok"}) is False
+    assert evidence.event.call_args_list[1].args[0](
+        {"type": "setup_state", "active": False}
+    ) is True
+
+
 def test_exact_link_error_gate_rejects_unrelated_failures() -> None:
     event = {
         "type": "companion_link_state",
@@ -278,6 +295,22 @@ def test_expected_setup_access_does_not_trip_secret_observation() -> None:
     assert m1.serial_line_may_contain_secret("pairing code 123456", m1.REDACTED_NON_DIAGNOSTIC)
 
 
+def test_cleanup_attempts_every_setup_network_when_one_removal_fails() -> None:
+    cleanup = m1.CleanupTransaction()
+    cleanup.setup_ssids.update({"Deck-A", "Deck-B"})
+    attempted: list[str] = []
+
+    def removal(ssid: str) -> bool:
+        attempted.append(ssid)
+        return ssid != "Deck-A"
+
+    with mock.patch.object(m1, "forget_wifi", side_effect=removal):
+        cleanup_ok, failures = m1.forget_setup_networks(cleanup.setup_ssids)
+    assert not cleanup_ok
+    assert failures == ["Deck-A"]
+    assert set(attempted) == {"Deck-A", "Deck-B"}
+
+
 if __name__ == "__main__":
     test_serial_evidence_keeps_redacted_link_state_and_drops_setup_secret()
     test_summary_passes_only_with_every_real_gate_and_hashes_redacted_log()
@@ -291,7 +324,9 @@ if __name__ == "__main__":
     test_fatal_boot_evidence_is_not_retried()
     test_serial_command_never_calls_unbounded_flush()
     test_cleanup_transaction_records_intent_before_observation()
+    test_setup_restart_requires_explicit_inactive_observation()
     test_exact_link_error_gate_rejects_unrelated_failures()
     test_secret_tracker_catches_value_leaked_before_it_was_known()
     test_expected_setup_access_does_not_trip_secret_observation()
+    test_cleanup_attempts_every_setup_network_when_one_removal_fails()
     print("M1 acceptance contract passed")
