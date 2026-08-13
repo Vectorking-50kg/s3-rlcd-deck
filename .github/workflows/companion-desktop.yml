@@ -1,0 +1,84 @@
+name: Companion desktop native smoke
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/companion-desktop.yml"
+      - "companion/**"
+      - "tools/test_companion.sh"
+      - "tools/smoke_companion_artifact.py"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/companion-desktop.yml"
+      - "companion/**"
+      - "tools/test_companion.sh"
+      - "tools/smoke_companion_artifact.py"
+
+permissions:
+  contents: read
+
+jobs:
+  macos-native:
+    name: macOS native (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: amd64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: "1.26.x"
+          cache-dependency-path: companion/go.sum
+      - name: Verify and build Companion
+        run: ./tools/test_companion.sh
+      - name: Run native menu-bar smoke
+        run: |
+          python3 tools/smoke_companion_artifact.py \
+            --executable "build/companion/darwin-${{ matrix.arch }}/s3deck-companion" \
+            --expected-version 0.1.0-dev \
+            --expected-commit "$(git rev-parse --short=12 HEAD)"
+
+  windows-native:
+    name: Windows native (amd64)
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: "1.26.x"
+          cache-dependency-path: companion/go.sum
+      - name: Verify Companion
+        shell: pwsh
+        working-directory: companion
+        run: |
+          gofmt -w .
+          if (git diff --exit-code -- .) { } else { throw "Go source requires gofmt" }
+          go vet ./...
+          go test ./...
+          go test -race ./...
+      - name: Build native tray executable
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force build/companion/windows-amd64 | Out-Null
+          $commit = git rev-parse --short=12 HEAD
+          Push-Location companion
+          go build -trimpath `
+            -ldflags "-X main.version=0.1.0-dev -X main.commit=$commit" `
+            -o ../build/companion/windows-amd64/s3deck-companion.exe `
+            ./cmd/s3deck-companion
+          Pop-Location
+      - name: Run native tray smoke
+        shell: pwsh
+        run: |
+          $commit = git rev-parse --short=12 HEAD
+          python tools/smoke_companion_artifact.py `
+            --executable build/companion/windows-amd64/s3deck-companion.exe `
+            --expected-version 0.1.0-dev `
+            --expected-commit $commit

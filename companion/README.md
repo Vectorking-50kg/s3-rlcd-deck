@@ -103,8 +103,13 @@ The command enforces formatting, runs `go vet`, regular and race-enabled tests,
 then cross-compiles menu-bar/tray executables for macOS arm64/amd64 and Windows
 amd64 under the ignored `build/companion/` directory. The SPA, build version,
 third-party notices, static assets, and native icon are embedded in each single
-executable. The macOS arm64 artifact executes `--version` locally; other target
-artifacts receive a Go executable metadata check.
+executable. The local macOS arm64 artifact executes `--version`; the other
+cross-compiled artifacts receive executable metadata and embedded build-identity checks.
+The `Companion desktop native smoke` GitHub Actions workflow then runs the matching
+artifact on macOS arm64, macOS amd64, and Windows amd64, verifies `--version`, starts
+the real menu-bar/tray path, reads its embedded management bootstrap, and exercises
+bounded shutdown. Windows development builds retain a console so their build identity
+and shutdown failures stay observable; M5 owns the signed GUI-only installer.
 
 The native tray adapter is pinned to `gogpu/systray` commit
 `a3901e26a16407483bcb765d35cba446e60c6932`, which includes the macOS

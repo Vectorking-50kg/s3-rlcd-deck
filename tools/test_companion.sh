@@ -50,7 +50,7 @@ CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build \
     ./cmd/s3deck-companion
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
     -trimpath \
-	-ldflags "$link_identity -H=windowsgui" \
+	-ldflags "$link_identity" \
     -o "$artifact_root/windows-amd64/s3deck-companion.exe" \
     ./cmd/s3deck-companion
 
