@@ -11,10 +11,20 @@ void reconnect_starts_with_a_fresh_server_heartbeat_window()
     deck_companion_link_timing_server_heartbeat(&timing, 1'000, 10'000);
     assert(deck_companion_link_timing_server_expired(&timing, 31'000, 30'000));
 
-    deck_companion_link_timing_begin_connection(&timing);
+    deck_companion_link_timing_begin_connection(&timing, 30'000, 30'000);
 
-    assert(!deck_companion_link_timing_server_expired(&timing, 61'000, 30'000));
-    assert(!deck_companion_link_timing_client_due(&timing, 61'000));
+    assert(!deck_companion_link_timing_server_expired(&timing, 59'999, 30'000));
+    assert(deck_companion_link_timing_server_expired(&timing, 60'000, 30'000));
+    assert(!deck_companion_link_timing_client_due(&timing, 60'000));
+}
+
+void first_server_heartbeat_has_the_same_liveness_deadline()
+{
+    deck_companion_link_timing_t timing{};
+    deck_companion_link_timing_begin_connection(&timing, 5'000, 30'000);
+
+    assert(!deck_companion_link_timing_server_expired(&timing, 34'999, 30'000));
+    assert(deck_companion_link_timing_server_expired(&timing, 35'000, 30'000));
 }
 
 void accepted_heartbeat_schedules_client_heartbeat_and_bounds_server_liveness()
@@ -41,6 +51,7 @@ void retry_delay_is_exponential_and_bounded()
 int main()
 {
     reconnect_starts_with_a_fresh_server_heartbeat_window();
+    first_server_heartbeat_has_the_same_liveness_deadline();
     accepted_heartbeat_schedules_client_heartbeat_and_bounds_server_liveness();
     retry_delay_is_exponential_and_bounded();
     return 0;

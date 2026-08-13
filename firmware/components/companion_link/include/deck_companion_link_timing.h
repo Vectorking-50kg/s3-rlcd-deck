@@ -8,13 +8,16 @@ extern "C" {
 #endif
 
 typedef struct {
+    uint64_t server_heartbeat_deadline_ms;
     uint64_t last_server_heartbeat_ms;
     uint64_t next_client_heartbeat_ms;
 } deck_companion_link_timing_t;
 
 /* Starts a transport attempt without inheriting liveness from an old session. */
 void deck_companion_link_timing_begin_connection(
-    deck_companion_link_timing_t *timing
+    deck_companion_link_timing_t *timing,
+    uint64_t now_ms,
+    uint64_t timeout_ms
 );
 
 void deck_companion_link_timing_server_heartbeat(

@@ -15,11 +15,14 @@ uint64_t deadline(uint64_t now_ms, uint64_t delay_ms)
 }  // namespace
 
 void deck_companion_link_timing_begin_connection(
-    deck_companion_link_timing_t *timing
+    deck_companion_link_timing_t *timing,
+    uint64_t now_ms,
+    uint64_t timeout_ms
 )
 {
     if (timing != nullptr) {
         *timing = {};
+        timing->server_heartbeat_deadline_ms = deadline(now_ms, timeout_ms);
     }
 }
 
@@ -33,6 +36,7 @@ void deck_companion_link_timing_server_heartbeat(
         return;
     }
     timing->last_server_heartbeat_ms = now_ms;
+    timing->server_heartbeat_deadline_ms = 0;
     timing->next_client_heartbeat_ms = deadline(now_ms, client_interval_ms);
 }
 
@@ -42,8 +46,14 @@ bool deck_companion_link_timing_server_expired(
     uint64_t timeout_ms
 )
 {
-    return timing != nullptr && timing->last_server_heartbeat_ms != 0 &&
-           timeout_ms != 0 && now_ms >= timing->last_server_heartbeat_ms &&
+    if (timing == nullptr || timeout_ms == 0) {
+        return false;
+    }
+    if (timing->last_server_heartbeat_ms == 0) {
+        return timing->server_heartbeat_deadline_ms != 0 &&
+               now_ms >= timing->server_heartbeat_deadline_ms;
+    }
+    return now_ms >= timing->last_server_heartbeat_ms &&
            now_ms - timing->last_server_heartbeat_ms >= timeout_ms;
 }
 

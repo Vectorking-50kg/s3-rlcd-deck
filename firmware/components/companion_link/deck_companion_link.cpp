@@ -187,7 +187,7 @@ void disconnect_transport(deck_companion_link_t *link)
     link->frame_payload_length = 0;
     link->frame_opcode = 0;
     link->has_server_monotonic = false;
-    deck_companion_link_timing_begin_connection(&link->timing);
+    link->timing = {};
 }
 
 void schedule_retry(deck_companion_link_t *link, uint64_t now, bool failure)
@@ -314,7 +314,11 @@ bool start_transport(deck_companion_link_t *link)
         secure_clear(headers, sizeof(headers));
         return false;
     }
-    deck_companion_link_timing_begin_connection(&link->timing);
+    deck_companion_link_timing_begin_connection(
+        &link->timing,
+        monotonic_ms(),
+        kHeartbeatTimeoutMs
+    );
     esp_websocket_client_config_t config{};
     config.uri = uri;
     config.disable_auto_reconnect = true;
@@ -575,7 +579,11 @@ void link_task(void *argument)
             continue;
         }
         if (event.type == TransportEventType::connected) {
-            deck_companion_link_timing_begin_connection(&link->timing);
+            deck_companion_link_timing_begin_connection(
+                &link->timing,
+                monotonic_ms(),
+                kHeartbeatTimeoutMs
+            );
             link->has_server_monotonic = false;
             if (!send_hello(link)) {
                 schedule_retry(link, monotonic_ms(), true);
