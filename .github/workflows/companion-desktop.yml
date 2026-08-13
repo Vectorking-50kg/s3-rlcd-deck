@@ -58,8 +58,8 @@ jobs:
         shell: pwsh
         working-directory: companion
         run: |
-          gofmt -w .
-          if (git diff --exit-code -- .) { } else { throw "Go source requires gofmt" }
+          $unformatted = gofmt -l .
+          if ($unformatted) { throw "Go source requires gofmt: $unformatted" }
           go vet ./...
           go test ./...
           go test -race ./...
