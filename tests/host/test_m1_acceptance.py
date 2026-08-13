@@ -260,6 +260,44 @@ def test_post_flash_monitor_requests_a_fresh_boot_after_ready_handshake() -> Non
     assert reopens == []
 
 
+def test_post_flash_usb_reenumeration_reopens_without_a_second_reset() -> None:
+    class Reenumerated(Exception):
+        pass
+
+    evidence = m1.SerialEvidence.__new__(m1.SerialEvidence)
+    commands: list[bytes] = []
+    reopens: list[tuple[object, str, float]] = []
+    serial_module = mock.Mock(SerialException=Reenumerated)
+    evidence.command = commands.append
+    evidence.reopen = lambda module, port, timeout: reopens.append((module, port, timeout))
+    evidence.event = mock.Mock(
+        side_effect=[Reenumerated("USB endpoint detached"), {"type": "boot_ok"}]
+    )
+
+    assert evidence.fresh_boot(serial_module, "/dev/cu.Deck", 12.0) == {
+        "type": "boot_ok"
+    }
+    assert commands == [m1.HIL_READY]
+    assert reopens == [(serial_module, "/dev/cu.Deck", 12.0)]
+
+
+def test_post_flash_usb_reenumeration_can_interrupt_the_ready_write() -> None:
+    class Reenumerated(Exception):
+        pass
+
+    evidence = m1.SerialEvidence.__new__(m1.SerialEvidence)
+    serial_module = mock.Mock(SerialException=Reenumerated)
+    evidence.command = mock.Mock(side_effect=Reenumerated("USB endpoint detached"))
+    evidence.reopen = mock.Mock()
+    evidence.event = mock.Mock(return_value={"type": "boot_ok"})
+
+    assert evidence.fresh_boot(serial_module, "/dev/cu.Deck", 12.0) == {
+        "type": "boot_ok"
+    }
+    evidence.reopen.assert_called_once_with(serial_module, "/dev/cu.Deck", 12.0)
+    evidence.event.assert_called_once()
+
+
 def test_fatal_boot_evidence_is_not_retried() -> None:
     evidence = m1.SerialEvidence.__new__(m1.SerialEvidence)
     evidence.command = mock.Mock()
@@ -290,6 +328,17 @@ def test_serial_command_never_calls_unbounded_flush() -> None:
     evidence._connection = Connection()
     evidence.command(b"DECK_SETUP\n")
     assert evidence._connection.writes == [b"DECK_SETUP\n"]
+
+
+def test_diagnostic_console_resets_usb_after_app_only_jtag_flash() -> None:
+    source = (
+        m1.REPOSITORY_ROOT / "firmware/main/app_main.cpp"
+    ).read_text(encoding="utf-8")
+    detach = source.index("usb_serial_jtag_ll_phy_enable_pull_override(&detached)")
+    reset = source.index("usb_serial_jtag_ll_reset_register()")
+    attach = source.index("usb_serial_jtag_ll_phy_disable_pull_override()")
+    driver_install = source.index("usb_serial_jtag_driver_install(&configuration)")
+    assert detach < reset < attach < driver_install
 
 
 def test_cleanup_transaction_records_intent_before_observation() -> None:
@@ -394,6 +443,8 @@ if __name__ == "__main__":
     test_companion_logs_are_drained_redacted_and_secret_observation_fails_gate()
     test_profile_cleanup_revokes_only_temporary_profile_and_reselects_original()
     test_post_flash_monitor_requests_a_fresh_boot_after_ready_handshake()
+    test_post_flash_usb_reenumeration_reopens_without_a_second_reset()
+    test_post_flash_usb_reenumeration_can_interrupt_the_ready_write()
     test_fatal_boot_evidence_is_not_retried()
     test_serial_command_never_calls_unbounded_flush()
     test_cleanup_transaction_records_intent_before_observation()

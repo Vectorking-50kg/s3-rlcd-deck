@@ -46,13 +46,27 @@ int16_t application_temperature_offset_tenths_c =
 
 #include "driver/usb_serial_jtag.h"
 #include "driver/usb_serial_jtag_vfs.h"
+#include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "hal/usb_serial_jtag_ll.h"
 
 namespace {
 
 bool initialize_diagnostic_console_driver()
 {
+    // OpenOCD's flash stub and the application share the USB Serial/JTAG
+    // peripheral. An ESP32-S3 software reset can leave the host holding a
+    // stale CDC endpoint because D+ never indicated a disconnect. Perform a
+    // USB-spec detach before resetting the controller so the host enumerates
+    // a clean diagnostic endpoint without requiring a power cycle.
+    const usb_serial_jtag_pull_override_vals_t detached{};
+    usb_serial_jtag_ll_phy_enable_pull_override(&detached);
+    esp_rom_delay_us(50'000);
+    int __DECLARE_RCC_ATOMIC_ENV [[maybe_unused]];
+    usb_serial_jtag_ll_reset_register();
+    usb_serial_jtag_ll_phy_disable_pull_override();
+
     usb_serial_jtag_driver_config_t configuration =
         USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
     if (usb_serial_jtag_driver_install(&configuration) != ESP_OK) {

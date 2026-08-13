@@ -9,7 +9,9 @@ idf_component_register(
         display
         esp_app_format
         esp_driver_usb_serial_jtag
+        esp_hal_usb
         esp_psram
+        esp_rom
         esp_system
         esp_timer
         freertos

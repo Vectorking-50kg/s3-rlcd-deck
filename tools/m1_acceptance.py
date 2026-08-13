@@ -415,12 +415,32 @@ class SerialEvidence:
         # diagnostic host handshake and first try to catch that pending one-shot
         # event. Only request a second reset when the original event was already
         # emitted before the monitor opened.
-        self.command(HIL_READY)
+        serial_exception = getattr(serial_module, "SerialException", OSError)
+        try:
+            self.command(HIL_READY)
+        except (OSError, serial_exception):
+            self.reopen(serial_module, port, timeout)
+            return self.event(
+                lambda event: event.get("type") == "boot_ok",
+                "post-flash reenumerated boot",
+                30.0,
+            )
         try:
             return self.event(
                 lambda event: event.get("type") == "boot_ok",
                 "post-flash pending boot",
                 2.0,
+            )
+        except (OSError, serial_exception):
+            # The diagnostic firmware deliberately performs a USB detach after
+            # an app-only JTAG flash so the host cannot retain OpenOCD's stale
+            # CDC endpoint. Reopen the newly enumerated endpoint and preserve
+            # this boot; another reset would discard the evidence we need.
+            self.reopen(serial_module, port, timeout)
+            return self.event(
+                lambda event: event.get("type") == "boot_ok",
+                "post-flash reenumerated boot",
+                30.0,
             )
         except AcceptanceTimeout:
             self.command(b"DECK_RESTART\n")
