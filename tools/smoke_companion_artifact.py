@@ -57,7 +57,9 @@ def stop_process(process: subprocess.Popen[bytes]) -> None:
 
 
 def credential_account(data_directory: str) -> str:
-    absolute = str(Path(data_directory).resolve())
+    # Match Go filepath.Abs(filepath.Clean(...)): make the path absolute without
+    # resolving symlinks such as macOS /var -> /private/var.
+    absolute = os.path.abspath(os.path.normpath(data_directory))
     return "management-" + hashlib.sha256(absolute.encode()).hexdigest()[:32]
 
 
@@ -69,13 +71,24 @@ def delete_smoke_credential(data_directory: str) -> None:
             "$source=@'\n"
             "using System; using System.Runtime.InteropServices; "
             "public static class Native { "
-            "[DllImport(\"advapi32.dll\", CharSet=CharSet.Unicode)] "
-            "public static extern bool CredDelete(string target, int type, int flags); }\n"
-            "'@; Add-Type $source; [Native]::CredDelete($target,1,0) | Out-Null"
+            "[DllImport(\"advapi32.dll\", CharSet=CharSet.Unicode, SetLastError=true)] "
+            "public static extern bool CredDelete(string target, int type, int flags); "
+            "[DllImport(\"advapi32.dll\", CharSet=CharSet.Unicode, SetLastError=true)] "
+            "public static extern bool CredRead(string target, int type, int flags, out IntPtr credential); "
+            "[DllImport(\"advapi32.dll\")] public static extern void CredFree(IntPtr credential); }\n"
+            "'@; Add-Type $source; "
+            "if (-not [Native]::CredDelete($target,1,0)) { "
+            "$code=[Runtime.InteropServices.Marshal]::GetLastWin32Error(); "
+            "throw \"CredDelete failed: $code\" }; "
+            "$credential=[IntPtr]::Zero; "
+            "if ([Native]::CredRead($target,1,0,[ref]$credential)) { "
+            "[Native]::CredFree($credential); throw 'credential still exists' }; "
+            "$code=[Runtime.InteropServices.Marshal]::GetLastWin32Error(); "
+            "if ($code -ne 1168) { throw \"CredRead verification failed: $code\" }"
         )
         subprocess.run(
             ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
-            check=False,
+            check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=10,
@@ -86,11 +99,23 @@ def delete_smoke_credential(data_directory: str) -> None:
                 "/usr/bin/security", "delete-generic-password",
                 "-s", "S3 RLCD Deck Companion", "-a", account,
             ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
+        probe = subprocess.run(
+            [
+                "/usr/bin/security", "find-generic-password",
+                "-s", "S3 RLCD Deck Companion", "-a", account,
+            ],
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=10,
         )
+        if probe.returncode == 0:
+            raise RuntimeError("native smoke credential still exists after cleanup")
 
 
 def run_desktop_generation(
