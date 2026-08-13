@@ -372,6 +372,18 @@ def connect_wifi(ssid: str, password: str | None = None) -> None:
         raise AcceptanceFailure("cannot switch the Mac Wi-Fi network")
 
 
+def forget_wifi(ssid: str) -> None:
+    if not ssid:
+        return
+    subprocess.run(
+        ["networksetup", "-removepreferredwirelessnetwork", "en0", ssid],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=10,
+    )
+
+
 def wait_for_host(host: str, timeout: float) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -480,6 +492,7 @@ def main() -> int:
     data_directory = pathlib.Path(data_root.name)
     companion = CompanionProcess(arguments.companion.resolve(), data_directory, token)
     serial_evidence: SerialEvidence | None = None
+    setup_ssid = ""
     try:
         if dirty and not arguments.allow_dirty:
             raise AcceptanceFailure("source tree is dirty; commit before auditable acceptance")
@@ -502,6 +515,7 @@ def main() -> int:
         serial_evidence.event(lambda event: event.get("type") == "setup_state" and event.get("active") is True, "enter Setup")
         serial_evidence.command(b"DECK_HIL_SETUP_ACCESS\n")
         access = serial_evidence.event(lambda event: event.get("type") == "hil_setup_access", "Setup access")
+        setup_ssid = access["ssid"]
         connect_wifi(access["ssid"], access["password"])
         wait_for_host(access["address"], arguments.stage_timeout)
         code = http_form(
@@ -574,6 +588,45 @@ def main() -> int:
         serial_evidence.event(lambda event: event.get("type") == "companion_link_state" and event.get("state") != "online" and int(event.get("error_count", 0)) > deck_error_count, "revoked Token rejection", 45)
         checks["revoked_device_trust_rejected"] = True
 
+        # Restore a valid device trust/Profile before leaving the user's Deck.
+        status, restored_code = management.request("POST", "/api/v1/pairing/codes")
+        if status != 200 or re.fullmatch(r"[0-9]{6}", str(restored_code.get("code", ""))) is None:
+            raise AcceptanceFailure("restoration Pairing code unavailable")
+        serial_evidence.command(b"DECK_SETUP\n")
+        serial_evidence.event(
+            lambda event: event.get("type") == "setup_state" and event.get("active") is True,
+            "enter Setup for trust restoration",
+        )
+        serial_evidence.command(b"DECK_HIL_SETUP_ACCESS\n")
+        restored_access = serial_evidence.event(
+            lambda event: event.get("type") == "hil_setup_access",
+            "restoration Setup access",
+        )
+        setup_ssid = restored_access["ssid"]
+        connect_wifi(restored_access["ssid"], restored_access["password"])
+        wait_for_host(restored_access["address"], arguments.stage_timeout)
+        restored_status = http_form(
+            f"http://{restored_access['address']}",
+            "/api/companions/pair",
+            {"hub_address": arguments.hub_address, "code": str(restored_code["code"])},
+        )
+        restored_code = {}
+        if restored_status != 202:
+            raise AcceptanceFailure(f"trust restoration Pairing returned {restored_status}")
+        serial_evidence.event(
+            lambda event: event.get("type") == "setup_state" and event.get("active") is False,
+            "restoration Pairing commit",
+            30,
+        )
+        connect_wifi(arguments.original_ssid)
+        wait_for_host("192.168.31.1", arguments.stage_timeout)
+        serial_evidence.event(
+            lambda event: event.get("type") == "companion_link_state" and event.get("state") == "online",
+            "online after trust restoration",
+            60,
+        )
+        reconnect_count += 1
+
         # Cross-port and cross-token rejection is performed against live listeners.
         status, _ = device_hub_json("GET", "/api/v1/status")
         if status != 404:
@@ -642,11 +695,13 @@ def main() -> int:
             print(f"M1 cleanup failed: {error}", file=sys.stderr)
         if serial_evidence is not None:
             serial_evidence.close()
+        checks["credentials_absent_from_evidence"] = evidence_is_redacted(serial_path)
         data_root.cleanup()
         try:
             connect_wifi(arguments.original_ssid)
         except AcceptanceFailure:
             pass
+        forget_wifi(setup_ssid)
         summary = build_summary(
             firmware_commit=commit,
             companion_commit=commit,
