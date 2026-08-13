@@ -7,6 +7,8 @@ on:
       - "companion/**"
       - "tools/test_companion.sh"
       - "tools/smoke_companion_artifact.py"
+      - "tools/m1_acceptance.py"
+      - "tests/host/test_m1_acceptance.py"
   push:
     branches: [main]
     paths:
@@ -14,6 +16,8 @@ on:
       - "companion/**"
       - "tools/test_companion.sh"
       - "tools/smoke_companion_artifact.py"
+      - "tools/m1_acceptance.py"
+      - "tests/host/test_m1_acceptance.py"
 
 permissions:
   contents: read
