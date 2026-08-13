@@ -487,7 +487,7 @@ def test_wifi_power_is_restored_when_reassociation_fails() -> None:
 def test_original_lan_recovery_uses_the_reachability_helper() -> None:
     source = (m1.REPOSITORY_ROOT / "tools/m1_acceptance.py").read_text(encoding="utf-8")
     assert source.count("restore_original_wifi(") == 4
-    assert 'connect_wifi_for_host(ssid, None, "192.168.31.1", timeout)' in source
+    assert '"192.168.31.1",\n        timeout,\n        deadline=deadline' in source
 
 
 def test_wifi_operations_share_one_deadline_budget() -> None:
@@ -501,6 +501,48 @@ def test_wifi_operations_share_one_deadline_budget() -> None:
             assert "timed out" in str(error)
         else:
             raise AssertionError("exhausted Wi-Fi deadline must fail")
+
+
+def test_target_ssid_is_selected_before_reachability_can_pass() -> None:
+    operations: list[str] = []
+    with mock.patch.object(
+        m1,
+        "connect_wifi",
+        side_effect=lambda *_args: operations.append("connect"),
+    ), mock.patch.object(
+        m1,
+        "host_is_reachable",
+        side_effect=lambda *_args: operations.append("ping") or True,
+    ), mock.patch.object(m1.time, "monotonic", side_effect=lambda: 1.0):
+        m1.connect_wifi_for_host("Setup", "password", "192.168.4.1", 30)
+    assert operations == ["connect", "ping"]
+
+
+def test_original_wifi_power_and_association_share_one_deadline() -> None:
+    observed: dict[str, object] = {}
+
+    def power(_enabled: bool, timeout: float) -> None:
+        observed["power_timeout"] = timeout
+
+    def connect(
+        _ssid: str,
+        _password: str | None,
+        _host: str,
+        timeout: float,
+        *,
+        deadline: float | None = None,
+    ) -> None:
+        observed["connect_timeout"] = timeout
+        observed["deadline"] = deadline
+
+    clock = iter([10.0, 11.0])
+    with mock.patch.object(m1, "set_wifi_power", side_effect=power), mock.patch.object(
+        m1, "connect_wifi_for_host", side_effect=connect
+    ), mock.patch.object(m1.time, "monotonic", side_effect=lambda: next(clock)):
+        m1.restore_original_wifi("LAN", 30)
+    assert observed["power_timeout"] == 10
+    assert observed["connect_timeout"] == 30
+    assert observed["deadline"] == 40.0
 
 
 def test_diagnostic_console_resets_usb_after_app_only_jtag_flash() -> None:
@@ -632,6 +674,8 @@ if __name__ == "__main__":
     test_wifi_power_is_restored_when_reassociation_fails()
     test_original_lan_recovery_uses_the_reachability_helper()
     test_wifi_operations_share_one_deadline_budget()
+    test_target_ssid_is_selected_before_reachability_can_pass()
+    test_original_wifi_power_and_association_share_one_deadline()
     test_cleanup_transaction_records_intent_before_observation()
     test_setup_restart_requires_explicit_inactive_observation()
     test_exact_link_error_gate_rejects_unrelated_failures()

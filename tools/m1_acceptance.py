@@ -839,10 +839,13 @@ def connect_wifi_for_host(
     password: str | None,
     host: str,
     timeout: float,
+    *,
+    deadline: float | None = None,
 ) -> None:
-    deadline = time.monotonic() + timeout
-    if host_is_reachable(host, remaining_timeout(deadline, 2)):
-        return
+    deadline = deadline if deadline is not None else time.monotonic() + timeout
+    # Select the requested SSID before using reachability as proof. A stale
+    # route or VPN may make the same private address reachable via another
+    # interface and must never satisfy this transaction.
     connect_wifi(ssid, password, remaining_timeout(deadline, 60))
     recovery_attempted = False
     while time.monotonic() < deadline:
@@ -873,8 +876,15 @@ def connect_wifi_for_host(
 def restore_original_wifi(ssid: str, timeout: float) -> None:
     # Always repair a half-finished power cycle before selecting and proving
     # the original LAN. This is used by normal, compensation, and final paths.
-    set_wifi_power(True, min(10, timeout))
-    connect_wifi_for_host(ssid, None, "192.168.31.1", timeout)
+    deadline = time.monotonic() + timeout
+    set_wifi_power(True, remaining_timeout(deadline, 10))
+    connect_wifi_for_host(
+        ssid,
+        None,
+        "192.168.31.1",
+        timeout,
+        deadline=deadline,
+    )
 
 
 def forget_wifi(ssid: str) -> bool:
