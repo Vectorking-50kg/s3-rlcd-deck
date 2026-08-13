@@ -181,7 +181,7 @@ def run_preflight(output: pathlib.Path) -> dict[str, str]:
             default_idf = pathlib.Path.home() / ".espressif/v6.0.2/esp-idf"
             if default_idf.is_dir():
                 export = subprocess.run(
-                    ["bash", "-lc", f"source {default_idf}/export.sh >/dev/null 2>&1 && env -0"],
+                    ["zsh", "-lc", f"source {default_idf}/export.sh >/dev/null 2>&1 && env -0"],
                     check=True,
                     capture_output=True,
                 ).stdout

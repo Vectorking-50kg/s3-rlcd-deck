@@ -311,6 +311,22 @@ def test_cleanup_attempts_every_setup_network_when_one_removal_fails() -> None:
     assert set(attempted) == {"Deck-A", "Deck-B"}
 
 
+def test_preflight_uses_the_users_zsh_for_idf_activation() -> None:
+    with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+        pathlib.Path, "home", return_value=pathlib.Path(directory)
+    ), mock.patch.object(m1.subprocess, "run") as run:
+        idf = pathlib.Path(directory) / ".espressif/v6.0.2/esp-idf"
+        idf.mkdir(parents=True)
+        environment_result = mock.Mock(stdout=b"IDF_PATH=/idf\0PATH=/idf/bin\0")
+        command_result = mock.Mock(returncode=1)
+        run.side_effect = [environment_result, command_result]
+        try:
+            m1.run_preflight(pathlib.Path(directory) / "preflight.log")
+        except m1.AcceptanceFailure:
+            pass
+        assert run.call_args_list[0].args[0][0] == "zsh"
+
+
 if __name__ == "__main__":
     test_serial_evidence_keeps_redacted_link_state_and_drops_setup_secret()
     test_summary_passes_only_with_every_real_gate_and_hashes_redacted_log()
@@ -329,4 +345,5 @@ if __name__ == "__main__":
     test_secret_tracker_catches_value_leaked_before_it_was_known()
     test_expected_setup_access_does_not_trip_secret_observation()
     test_cleanup_attempts_every_setup_network_when_one_removal_fails()
+    test_preflight_uses_the_users_zsh_for_idf_activation()
     print("M1 acceptance contract passed")
