@@ -46,6 +46,13 @@ func (lock *Lock) Close() error {
 	return errors.Join(unlockErr, closeErr)
 }
 
+// VerifyPrivate exposes the platform protection contract for tests and callers
+// that must audit persisted state. Unix checks owner-only mode; Windows checks
+// the protected single-user DACL.
+func VerifyPrivate(path string) error {
+	return verifyPrivate(path)
+}
+
 func Replace(path string, contents []byte) (bool, error) {
 	if path == "" {
 		return false, errors.New("protected file path is required")

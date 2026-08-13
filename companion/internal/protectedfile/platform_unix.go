@@ -35,6 +35,14 @@ func EnsurePrivateFile(path string) error {
 	return nil
 }
 
+func verifyPrivate(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o600 {
+		return fmt.Errorf("verify private file permissions: %w", err)
+	}
+	return nil
+}
+
 func lockFile(file *os.File) error {
 	return unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB)
 }

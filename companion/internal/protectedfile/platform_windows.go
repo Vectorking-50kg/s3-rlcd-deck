@@ -30,6 +30,14 @@ func EnsurePrivateFile(path string) error {
 	return applyAndVerifyCurrentUserACL(path)
 }
 
+func verifyPrivate(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("protected file must be a regular non-symlink file: %w", err)
+	}
+	return verifyCurrentUserACL(path)
+}
+
 func applyAndVerifyCurrentUserACL(path string) error {
 	token, err := windows.OpenCurrentProcessToken()
 	if err != nil {
@@ -57,6 +65,23 @@ func applyAndVerifyCurrentUserACL(path string) error {
 	if err = windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, information, nil, nil, dacl, nil); err != nil {
 		return fmt.Errorf("set current-user DACL: %w", err)
 	}
+	return verifyCurrentUserACLForSID(path, sid)
+}
+
+func verifyCurrentUserACL(path string) error {
+	token, err := windows.OpenCurrentProcessToken()
+	if err != nil {
+		return fmt.Errorf("open current user token: %w", err)
+	}
+	defer token.Close()
+	user, err := token.GetTokenUser()
+	if err != nil {
+		return fmt.Errorf("read current user SID: %w", err)
+	}
+	return verifyCurrentUserACLForSID(path, user.User.Sid)
+}
+
+func verifyCurrentUserACLForSID(path string, sid *windows.SID) error {
 	verified, err := windows.GetNamedSecurityInfo(
 		path,
 		windows.SE_FILE_OBJECT,

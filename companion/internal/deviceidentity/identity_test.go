@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/deviceidentity"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/protectedfile"
 )
 
 func TestLoadOrCreatePersistsAProtectedCertificateIdentity(t *testing.T) {
@@ -22,12 +23,8 @@ func TestLoadOrCreatePersistsAProtectedCertificateIdentity(t *testing.T) {
 	if err != nil || len(certificate.Certificate) != 1 {
 		t.Fatalf("TLSCertificate() = %#v, %v", certificate, err)
 	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("Stat() error = %v", err)
-	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("identity permissions = %o, want 600", info.Mode().Perm())
+	if err = protectedfile.VerifyPrivate(path); err != nil {
+		t.Fatalf("identity protection = %v", err)
 	}
 
 	reopened, err := deviceidentity.LoadOrCreate(path)
