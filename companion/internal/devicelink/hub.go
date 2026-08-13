@@ -152,6 +152,14 @@ func (hub *Hub) Close() {
 	})
 }
 
+// ConnectedDecks reports authenticated Device Link sessions. Connections that
+// have not completed device.hello are intentionally excluded.
+func (hub *Hub) ConnectedDecks() int {
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	return len(hub.sessions)
+}
+
 func (hub *Hub) isClosed() bool {
 	hub.mu.Lock()
 	defer hub.mu.Unlock()

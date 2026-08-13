@@ -9,9 +9,14 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	goruntime "runtime"
 	"syscall"
+	"time"
 
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/desktop"
+	desktopassets "github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/desktop/assets"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/deviceidentity"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/managementtoken"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
 	companionruntime "github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/runtime"
 )
@@ -26,6 +31,9 @@ const (
 )
 
 func main() {
+	// AppKit and the Windows message pump both require the desktop shell to
+	// remain on its process main thread. Headless mode is harmlessly pinned too.
+	goruntime.LockOSThread()
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
@@ -33,6 +41,7 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	flags := flag.NewFlagSet("s3deck-companion", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	showVersion := flags.Bool("version", false, "print build identity and exit")
+	headless := flags.Bool("headless", false, "run in the foreground without the menu-bar or tray shell")
 	managementAddress := flags.String(
 		"management-address",
 		"127.0.0.1:7777",
@@ -69,17 +78,29 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "s3deck-companion %s (commit %s)\n", version, commit)
 		return 0
 	}
-	managementToken := os.Getenv(managementTokenEnvironment)
-	if managementToken == "" {
-		fmt.Fprintf(stderr, "cannot configure Companion: %s is required\n", managementTokenEnvironment)
-		return 2
-	}
 	resolvedDataDirectory := *dataDirectory
 	if resolvedDataDirectory == "" {
 		var directoryErr error
 		resolvedDataDirectory, directoryErr = defaultDataDirectory()
 		if directoryErr != nil {
 			fmt.Fprintf(stderr, "cannot locate the Companion data directory: %v\n", directoryErr)
+			return 2
+		}
+	}
+	instance, err := desktop.AcquireSingleInstance(resolvedDataDirectory)
+	if err != nil {
+		fmt.Fprintf(stderr, "cannot start Companion: %v\n", err)
+		return 2
+	}
+	defer instance.Close()
+
+	managementTokenValue := os.Getenv(managementTokenEnvironment)
+	if managementTokenValue == "" {
+		managementTokenValue, err = managementtoken.LoadOrCreate(
+			resolvedDataDirectory,
+		)
+		if err != nil {
+			fmt.Fprintf(stderr, "cannot load the management token: %v\n", err)
 			return 2
 		}
 	}
@@ -109,28 +130,73 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "cannot configure pairing: %v\n", err)
 		return 2
 	}
-	application, err := companionruntime.New(companionruntime.Config{
+	config := companionruntime.Config{
 		Version: version,
 		Management: companionruntime.ManagementConfig{
 			Address:       *managementAddress,
 			AllowLAN:      *allowLANManagement,
 			AllowedOrigin: *managementOrigin,
-			AdminToken:    managementToken,
+			AdminToken:    managementTokenValue,
 		},
 		DeviceHub: companionruntime.DeviceHubConfig{
 			Address:        *deviceHubAddress,
 			TLSCertificate: &tlsCertificate,
 		},
 		Pairing: pairingService,
+	}
+	if *headless {
+		application, runtimeErr := companionruntime.New(config)
+		if runtimeErr != nil {
+			fmt.Fprintf(stderr, "cannot configure Companion: %v\n", runtimeErr)
+			return 2
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		if runtimeErr = application.Run(ctx); runtimeErr != nil {
+			fmt.Fprintf(stderr, "Companion stopped with an error: %v\n", runtimeErr)
+			return 1
+		}
+		return 0
+	}
+	controller, err := companionruntime.NewController(func() (*companionruntime.Runtime, error) {
+		return companionruntime.New(config)
 	})
 	if err != nil {
-		fmt.Fprintf(stderr, "cannot configure Companion: %v\n", err)
+		fmt.Fprintf(stderr, "cannot configure desktop lifecycle: %v\n", err)
 		return 2
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err = application.Run(ctx); err != nil {
-		fmt.Fprintf(stderr, "Companion stopped with an error: %v\n", err)
+	if err = controller.Start(); err != nil {
+		fmt.Fprintf(stderr, "cannot start Companion runtime: %v\n", err)
+		return 1
+	}
+	if controller.Status().State != companionruntime.StateReady {
+		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+		_ = controller.Stop(ctx)
+		cancel()
+		fmt.Fprintf(stderr, "Companion runtime did not become ready: %s\n", controller.Status().LastError)
+		return 1
+	}
+	shell, err := desktop.NewShell(
+		controller,
+		desktop.NewNativeTray(),
+		desktopassets.IconPNG(),
+		desktop.OpenURL,
+	)
+	if err == nil {
+		go func() {
+			<-ctx.Done()
+			shell.Close()
+		}()
+		err = shell.Run()
+		shell.Close()
+	}
+	if err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+		_ = controller.Stop(ctx)
+		cancel()
+		fmt.Fprintf(stderr, "desktop shell stopped with an error: %v\n", err)
 		return 1
 	}
 	return 0

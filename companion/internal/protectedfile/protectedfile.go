@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 )
 
+var ErrLockHeld = errors.New("protected lock is already held")
+
 type Lock struct {
 	file *os.File
 }
@@ -29,7 +31,7 @@ func AcquireDirectoryLock(directory string, name string) (*Lock, error) {
 	}
 	if err = lockFile(file); err != nil {
 		_ = file.Close()
-		return nil, fmt.Errorf("data directory is already owned by another Companion: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrLockHeld, err)
 	}
 	return &Lock{file: file}, nil
 }
@@ -42,6 +44,13 @@ func (lock *Lock) Close() error {
 	closeErr := lock.file.Close()
 	lock.file = nil
 	return errors.Join(unlockErr, closeErr)
+}
+
+// VerifyPrivate exposes the platform protection contract for tests and callers
+// that must audit persisted state. Unix checks owner-only mode; Windows checks
+// the protected single-user DACL.
+func VerifyPrivate(path string) error {
+	return verifyPrivate(path)
 }
 
 func Replace(path string, contents []byte) (bool, error) {

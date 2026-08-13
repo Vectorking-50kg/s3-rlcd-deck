@@ -18,16 +18,17 @@ func TestVersionFlagPrintsBuildIdentity(t *testing.T) {
 	}
 }
 
-func TestRunFailsClosedWithoutListenerTokens(t *testing.T) {
-	t.Setenv(managementTokenEnvironment, "")
+func TestRunFailsClosedWithMalformedPersistedManagementToken(t *testing.T) {
+	t.Setenv(managementTokenEnvironment, "not-a-valid-token")
+	directory := t.TempDir()
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
-	exitCode := run(nil, &stdout, &stderr)
+	exitCode := run([]string{"--headless", "--data-directory", directory}, &stdout, &stderr)
 	if exitCode != 2 {
 		t.Fatalf("run() exit code = %d, want 2", exitCode)
 	}
-	if !bytes.Contains(stderr.Bytes(), []byte(managementTokenEnvironment)) {
-		t.Fatalf("stderr = %q, want fail-closed token error", stderr.String())
+	if !bytes.Contains(stderr.Bytes(), []byte("management admin token")) {
+		t.Fatalf("stderr = %q, want fail-closed management token error", stderr.String())
 	}
 }

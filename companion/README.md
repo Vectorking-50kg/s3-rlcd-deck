@@ -5,6 +5,8 @@ The Companion is the computer-owned half of S3 RLCD Deck. It collects and normal
 The current M1 runtime provides:
 
 - a Go background executable with bounded shutdown;
+- a macOS 13+ menu-bar and Windows 11 notification-area shell with live Deck
+  connection count, Open Console, Start/Stop, and Quit actions;
 - a loopback-only management listener at `127.0.0.1:7777` by default;
 - an independently authenticated TLS Device Hub listener at `0.0.0.0:7780` by default;
 - management login sessions with strict Origin/CSRF checks on writes;
@@ -24,12 +26,27 @@ Provider credentials and raw private content must never be sent to a Deck.
 Go 1.26.x is the development baseline.
 
 ```bash
-cd companion
-export S3DECK_MANAGEMENT_TOKEN="$(openssl rand -hex 32)"
-go run ./cmd/s3deck-companion
+./tools/package_companion.sh
+./build/companion/darwin-arm64/s3deck-companion
 ```
 
-The management token must contain at least 24 bytes and is read from the environment so it does not appear in process arguments. Device Hub access is never authorized by this token: redeeming a six-digit one-time code produces an independent 256-bit token for exactly one Device ID.
+Use the matching Intel macOS or Windows x64 artifact on those platforms. The
+desktop shell starts the runtime, remains in the menu bar or notification area,
+and exchanges a 30-second single-use grant when **Open Console** launches the
+browser. **Stop Companion** stops both listeners without quitting the shell;
+**Start Companion** creates a fresh runtime generation. **Quit** performs the
+same bounded shutdown before removing the native tray item.
+
+The first desktop run generates a local management token in macOS Keychain or
+Windows Credential Manager. The data-directory path only derives a stable,
+non-secret credential reference. `S3DECK_MANAGEMENT_TOKEN` can still explicitly
+override the vault for development and HIL, but is no longer required for normal
+desktop launch.
+
+The management token must contain at least 24 bytes and never appears in process
+arguments or the browser URL. Device Hub access is never authorized by this
+token: redeeming a six-digit one-time code produces an independent 256-bit token
+for exactly one Device ID.
 
 The Device Hub always uses the persistent Companion TLS identity when exposed beyond
 loopback. During Pairing, the computer running Companion must also be connected to the
@@ -45,6 +62,18 @@ Open <http://127.0.0.1:7777>. To inspect the build identity without starting a l
 ```bash
 go run ./cmd/s3deck-companion --version
 ```
+
+For CI/HIL or foreground diagnostics, bypass all native desktop APIs while
+retaining the same runtime:
+
+```bash
+S3DECK_MANAGEMENT_TOKEN="$(openssl rand -hex 32)" \
+  go run ./cmd/s3deck-companion --headless
+```
+
+Only one Companion may own a data directory. A repeated launch fails with an
+explicit `already running` error instead of competing for listeners or trust
+files. Login-start installation is deliberately deferred to M5.
 
 The authenticated management API issues codes at `POST /api/v1/pairing/codes`, issues a device-bound rotation code at `POST /api/v1/devices/{device_id}/rotate`, and revokes trust at `DELETE /api/v1/devices/{device_id}`. A Deck redeems a code once at the rate-limited Device Hub route `POST /api/v1/pairing/redeem`. Management writes require the login session, exact Origin, and CSRF token described above; a successful redeem response is the only place a plaintext device Token is returned. Device requests authenticate the complete Device ID + Token + identity + protocol-version binding.
 
@@ -71,4 +100,20 @@ From the repository root:
 ./tools/test_companion.sh
 ```
 
-The command enforces formatting, runs `go vet`, regular and race-enabled tests, then cross-compiles macOS arm64/amd64 and Windows amd64 binaries under the ignored `build/companion/` directory.
+The command enforces formatting, runs `go vet`, regular and race-enabled tests,
+then cross-compiles menu-bar/tray executables for macOS arm64/amd64 and Windows
+amd64 under the ignored `build/companion/` directory. The SPA, build version,
+third-party notices, static assets, and native icon are embedded in each single
+executable. The local macOS artifact for the host architecture executes `--version`; the other
+cross-compiled artifacts receive executable metadata and embedded build-identity checks.
+The `Companion desktop native smoke` GitHub Actions workflow then runs the matching
+artifact on macOS arm64, macOS amd64, and Windows amd64, verifies `--version`, starts
+the real menu-bar/tray path, reads its embedded management bootstrap, and exercises
+bounded shutdown. Windows development builds retain a console so their build identity
+and shutdown failures stay observable; M5 owns the signed GUI-only installer.
+
+The native tray adapter is pinned to `gogpu/systray` commit
+`a3901e26a16407483bcb765d35cba446e60c6932`, which includes the macOS
+NSApplication-before-NSStatusItem initialization fix and snapshot-safe dynamic
+menu updates. Its MIT notice and the notices of all other shipped Go modules are
+available from the embedded `/third-party-licenses.txt` route.

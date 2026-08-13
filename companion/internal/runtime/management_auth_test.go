@@ -129,6 +129,37 @@ func TestManagementAllowsOnlyBootstrapAndLoginBeforeAuthentication(t *testing.T)
 	}
 }
 
+func TestManagementResponsesSetBrowserSecurityHeaders(t *testing.T) {
+	config := testConfig()
+	application, err := companionruntime.New(config)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- application.Run(ctx) }()
+	status := waitForState(t, application, companionruntime.StateReady)
+	response, err := http.Get("http://" + status.ManagementAddress + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	response.Body.Close()
+	for header, want := range map[string]string{
+		"Content-Security-Policy": "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+		"Referrer-Policy":         "no-referrer",
+		"X-Content-Type-Options":  "nosniff",
+		"X-Frame-Options":         "DENY",
+	} {
+		if got := response.Header.Get(header); got != want {
+			t.Errorf("%s = %q, want %q", header, got, want)
+		}
+	}
+	cancel()
+	if err = <-done; err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+}
+
 func TestManagementLoginRejectsDeviceTokenAndWrongOrigin(t *testing.T) {
 	config := testConfig()
 	application, err := companionruntime.New(config)

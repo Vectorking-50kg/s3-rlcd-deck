@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/protectedfile"
 )
 
 func TestFileStorePersistsOnlyVerifiersAcrossRestart(t *testing.T) {
@@ -52,12 +53,8 @@ func TestFileStorePersistsOnlyVerifiersAcrossRestart(t *testing.T) {
 	if !strings.Contains(string(contents), `"action":"pairing_redeem"`) {
 		t.Fatalf("persistent store is missing the redacted pairing audit event: %s", contents)
 	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("Stat() error = %v", err)
-	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("store permissions = %o, want 600", info.Mode().Perm())
+	if err = protectedfile.VerifyPrivate(path); err != nil {
+		t.Fatalf("store protection = %v", err)
 	}
 	if err = store.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
@@ -71,6 +68,9 @@ func TestFileStorePersistsOnlyVerifiersAcrossRestart(t *testing.T) {
 	valid, err := restarted.Verify(context.Background(), authentication(request, credential.Token))
 	if err != nil || !valid {
 		t.Fatalf("Verify() after restart = %t, %v; want true", valid, err)
+	}
+	if err = reopened.Close(); err != nil {
+		t.Fatalf("Close(reopened) error = %v", err)
 	}
 }
 

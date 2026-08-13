@@ -31,8 +31,10 @@ type Status struct {
 	Version              string `json:"version"`
 	ManagementAddress    string `json:"management_address"`
 	DeviceHubAddress     string `json:"device_hub_address"`
+	ConnectedDecks       int    `json:"connected_decks"`
 	LANManagementEnabled bool   `json:"lan_management_enabled"`
 	SecurityWarning      string `json:"security_warning,omitempty"`
+	LastError            string `json:"last_error,omitempty"`
 }
 
 type Runtime struct {
@@ -42,6 +44,7 @@ type Runtime struct {
 	deviceHubHandler  http.Handler
 	shutdownTimeout   time.Duration
 	sessions          *managementSessions
+	consoleAccess     *consoleAccessGrants
 	pairing           *pairing.Service
 	deviceLink        *devicelink.Hub
 
@@ -77,6 +80,7 @@ func New(config Config) (*Runtime, error) {
 		config:          normalized,
 		shutdownTimeout: shutdownTimeout,
 		sessions:        newManagementSessions(),
+		consoleAccess:   &consoleAccessGrants{},
 		pairing:         normalized.Pairing,
 		deviceLink:      deviceLink,
 		status:          status,
@@ -85,8 +89,10 @@ func New(config Config) (*Runtime, error) {
 
 func (application *Runtime) Status() Status {
 	application.mu.RLock()
-	defer application.mu.RUnlock()
-	return application.status
+	status := application.status
+	application.mu.RUnlock()
+	status.ConnectedDecks = application.deviceLink.ConnectedDecks()
+	return status
 }
 
 func (application *Runtime) Run(ctx context.Context) error {

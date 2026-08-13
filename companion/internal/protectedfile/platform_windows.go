@@ -6,13 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
 var replaceFileW = windows.NewLazySystemDLL("kernel32.dll").NewProc("ReplaceFileW")
+
+const fileFullControl = windows.STANDARD_RIGHTS_REQUIRED | windows.SYNCHRONIZE | 0x1ff
 
 func EnsurePrivateDirectory(path string) error {
 	if err := os.MkdirAll(path, 0o700); err != nil {
@@ -29,6 +30,14 @@ func EnsurePrivateFile(path string) error {
 	return applyAndVerifyCurrentUserACL(path)
 }
 
+func verifyPrivate(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("protected file must be a regular non-symlink file: %w", err)
+	}
+	return verifyCurrentUserACL(path)
+}
+
 func applyAndVerifyCurrentUserACL(path string) error {
 	token, err := windows.OpenCurrentProcessToken()
 	if err != nil {
@@ -39,8 +48,10 @@ func applyAndVerifyCurrentUserACL(path string) error {
 	if err != nil {
 		return fmt.Errorf("read current user SID: %w", err)
 	}
-	sid := user.User.Sid.String()
-	descriptor, err := windows.SecurityDescriptorFromString("D:P(A;;FA;;;" + sid + ")")
+	sid := user.User.Sid
+	descriptor, err := windows.SecurityDescriptorFromString(
+		"D:P(A;OICI;FA;;;" + sid.String() + ")",
+	)
 	if err != nil {
 		return fmt.Errorf("build current-user DACL: %w", err)
 	}
@@ -54,11 +65,70 @@ func applyAndVerifyCurrentUserACL(path string) error {
 	if err = windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, information, nil, nil, dacl, nil); err != nil {
 		return fmt.Errorf("set current-user DACL: %w", err)
 	}
-	verified, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, information)
-	if err != nil || verified == nil || !strings.Contains(verified.String(), sid) {
+	return verifyCurrentUserACLForSID(path, sid)
+}
+
+func verifyCurrentUserACL(path string) error {
+	token, err := windows.OpenCurrentProcessToken()
+	if err != nil {
+		return fmt.Errorf("open current user token: %w", err)
+	}
+	defer token.Close()
+	user, err := token.GetTokenUser()
+	if err != nil {
+		return fmt.Errorf("read current user SID: %w", err)
+	}
+	return verifyCurrentUserACLForSID(path, user.User.Sid)
+}
+
+func verifyCurrentUserACLForSID(path string, sid *windows.SID) error {
+	verified, err := windows.GetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil {
+		return fmt.Errorf("read committed current-user DACL: %w", err)
+	}
+	if verified == nil {
+		return errors.New("verify current-user DACL: security descriptor is missing")
+	}
+	verifiedDACL, _, err := verified.DACL()
+	if err != nil {
+		return fmt.Errorf("read committed current-user ACL entries: %w", err)
+	}
+	if err = verifySingleFullControlACE(verifiedDACL, sid); err != nil {
 		return fmt.Errorf("verify current-user DACL: %w", err)
 	}
 	return nil
+}
+
+func verifySingleFullControlACE(dacl *windows.ACL, expectedSID *windows.SID) error {
+	if dacl == nil || dacl.AceCount != 1 {
+		return fmt.Errorf("expected one access entry, found %d", aclEntryCount(dacl))
+	}
+	var ace *windows.ACCESS_ALLOWED_ACE
+	if err := windows.GetAce(dacl, 0, &ace); err != nil {
+		return fmt.Errorf("read access entry: %w", err)
+	}
+	if ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
+		return errors.New("current-user access entry is not allow")
+	}
+	aceSID := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+	if !aceSID.Equals(expectedSID) {
+		return errors.New("access entry belongs to a different SID")
+	}
+	if ace.Mask&fileFullControl != fileFullControl {
+		return fmt.Errorf("access entry lacks full control: %#x", ace.Mask)
+	}
+	return nil
+}
+
+func aclEntryCount(dacl *windows.ACL) uint16 {
+	if dacl == nil {
+		return 0
+	}
+	return dacl.AceCount
 }
 
 func lockFile(file *os.File) error {
