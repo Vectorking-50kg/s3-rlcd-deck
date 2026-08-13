@@ -182,10 +182,20 @@ def test_post_flash_monitor_requests_a_fresh_boot_after_ready_handshake() -> Non
     reopens: list[tuple[object, str, float]] = []
     evidence.command = commands.append
     evidence.reopen = lambda module, port, timeout: reopens.append((module, port, timeout))
+    evidence.event = mock.Mock(
+        side_effect=[m1.AcceptanceFailure("missed"), {"type": "boot_ok"}]
+    )
     marker = object()
-    evidence.fresh_boot(marker, "/dev/cu.Deck", 12.0)
+    assert evidence.fresh_boot(marker, "/dev/cu.Deck", 12.0) == {"type": "boot_ok"}
     assert commands == [m1.HIL_READY, b"DECK_RESTART\n"]
     assert reopens == [(marker, "/dev/cu.Deck", 12.0)]
+
+    commands.clear()
+    reopens.clear()
+    evidence.event = mock.Mock(return_value={"type": "boot_ok"})
+    assert evidence.fresh_boot(marker, "/dev/cu.Deck", 12.0) == {"type": "boot_ok"}
+    assert commands == [m1.HIL_READY]
+    assert reopens == []
 
 
 if __name__ == "__main__":

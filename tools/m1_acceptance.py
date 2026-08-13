@@ -268,13 +268,26 @@ class SerialEvidence:
         self._connection.write(command)
         self._connection.flush()
 
-    def fresh_boot(self, serial_module: Any, port: str, timeout: float) -> None:
+    def fresh_boot(self, serial_module: Any, port: str, timeout: float) -> dict[str, Any]:
         # The app-only flasher resets before this monitor can open. Establish the
-        # diagnostic host handshake, then request a second reset whose one-shot
-        # boot event this already-open monitor can observe.
+        # diagnostic host handshake and first try to catch that pending one-shot
+        # event. Only request a second reset when the original event was already
+        # emitted before the monitor opened.
         self.command(HIL_READY)
-        self.command(b"DECK_RESTART\n")
-        self.reopen(serial_module, port, timeout)
+        try:
+            return self.event(
+                lambda event: event.get("type") == "boot_ok",
+                "post-flash pending boot",
+                2.0,
+            )
+        except AcceptanceFailure:
+            self.command(b"DECK_RESTART\n")
+            self.reopen(serial_module, port, timeout)
+            return self.event(
+                lambda event: event.get("type") == "boot_ok",
+                "post-flash fresh boot",
+                30.0,
+            )
 
     def event(
         self,
@@ -779,10 +792,6 @@ def main() -> int:
 
         serial_evidence = SerialEvidence(serial, arguments.port, serial_path, arguments.stage_timeout)
         serial_evidence.fresh_boot(serial, arguments.port, arguments.stage_timeout)
-        serial_evidence.event(
-            lambda event: event.get("type") in {"boot_ok", "companion_link_state"},
-            "Deck diagnostics after current app flash",
-        )
         serial_evidence.command(b"DECK_BUILD_IDENTITY\n")
         build_identity = serial_evidence.event(
             lambda event: event.get("type") == "deck_build_identity",
