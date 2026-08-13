@@ -864,7 +864,18 @@ def host_is_reachable(host: str, timeout: float) -> bool:
         return False
     try:
         return subprocess.run(
-            ["ping", "-S", local_address, "-c", "1", "-W", "1000", host],
+            [
+                "ping",
+                "-b",
+                "en0",
+                "-S",
+                local_address,
+                "-c",
+                "1",
+                "-W",
+                "1000",
+                host,
+            ],
             capture_output=True,
             timeout=remaining_timeout(deadline, timeout),
         ).returncode == 0

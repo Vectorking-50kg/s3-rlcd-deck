@@ -540,7 +540,13 @@ def test_wifi_reachability_requires_an_en0_address_on_the_target_subnet() -> Non
         m1.subprocess, "run", return_value=mock.Mock(returncode=0)
     ) as run:
         assert m1.host_is_reachable("192.168.4.1", 2)
-    assert run.call_args.args[0][:3] == ["ping", "-S", "192.168.4.2"]
+    assert run.call_args.args[0][:5] == [
+        "ping",
+        "-b",
+        "en0",
+        "-S",
+        "192.168.4.2",
+    ]
 
 
 def test_wifi_interface_probe_shares_one_deadline() -> None:
