@@ -7,6 +7,7 @@
 struct deck_setup_response_barrier {
     struct Slot {
         uint32_t generation = 0;
+        bool response_sent = false;
         bool complete = false;
     };
 
@@ -51,11 +52,28 @@ uint32_t deck_setup_response_barrier_issue(deck_setup_response_barrier_t *barrie
             if (barrier->next_generation == 0) {
                 ++barrier->next_generation;
             }
-            barrier->slots[index] = {barrier->next_generation, false};
+            barrier->slots[index] = {barrier->next_generation, false, false};
             return barrier->next_generation;
         }
     }
     return 0;
+}
+
+void deck_setup_response_barrier_response_sent(
+    deck_setup_response_barrier_t *barrier,
+    uint32_t generation
+)
+{
+    if (barrier == nullptr || generation == 0) {
+        return;
+    }
+    const std::lock_guard<std::mutex> lock(barrier->mutex);
+    for (size_t index = 0; index < barrier->capacity; ++index) {
+        if (barrier->slots[index].generation == generation) {
+            barrier->slots[index].response_sent = true;
+            return;
+        }
+    }
 }
 
 void deck_setup_response_barrier_complete(
@@ -68,7 +86,8 @@ void deck_setup_response_barrier_complete(
     }
     const std::lock_guard<std::mutex> lock(barrier->mutex);
     for (size_t index = 0; index < barrier->capacity; ++index) {
-        if (barrier->slots[index].generation == generation) {
+        if (barrier->slots[index].generation == generation &&
+            barrier->slots[index].response_sent) {
             barrier->slots[index].complete = true;
             return;
         }

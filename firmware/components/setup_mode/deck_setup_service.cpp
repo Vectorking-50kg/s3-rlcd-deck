@@ -822,17 +822,23 @@ esp_err_t companion_pair_handler(httpd_req_t *request)
         "{\"accepted\":true,\"state\":\"queued\"}"
     );
     const uint32_t response_generation = command.response_generation;
-    auto *completion = new (std::nothrow) PairResponseCompletion{
-        service,
-        response_generation,
-    };
-    if (completion != nullptr &&
-        httpd_queue_work(
-            service->http_server,
-            pair_response_complete_work,
-            completion
-        ) != ESP_OK) {
-        delete completion;
+    if (send_result == ESP_OK) {
+        deck_setup_response_barrier_response_sent(
+            service->pair_response_barrier,
+            response_generation
+        );
+        auto *completion = new (std::nothrow) PairResponseCompletion{
+            service,
+            response_generation,
+        };
+        if (completion != nullptr &&
+            httpd_queue_work(
+                service->http_server,
+                pair_response_complete_work,
+                completion
+            ) != ESP_OK) {
+            delete completion;
+        }
     }
     return send_result;
 }
@@ -1929,6 +1935,10 @@ bool deck_setup_service_pair_companion(
     }
     const bool queued = enqueue_command(service, command);
     if (queued) {
+        deck_setup_response_barrier_response_sent(
+            service->pair_response_barrier,
+            command.response_generation
+        );
         deck_setup_response_barrier_complete(
             service->pair_response_barrier,
             command.response_generation

@@ -11,11 +11,16 @@ int main()
     assert(first != 0);
     assert(second > first);
     assert(!deck_setup_response_barrier_is_complete(barrier, first));
+    // A failed response must remain blocked even if a stale completion runs.
     deck_setup_response_barrier_complete(barrier, second);
     assert(!deck_setup_response_barrier_is_complete(barrier, first));
-    assert(deck_setup_response_barrier_is_complete(barrier, second));
+    assert(!deck_setup_response_barrier_is_complete(barrier, second));
+    deck_setup_response_barrier_response_sent(barrier, first);
     deck_setup_response_barrier_complete(barrier, first);
     assert(deck_setup_response_barrier_is_complete(barrier, first));
+    deck_setup_response_barrier_response_sent(barrier, second);
+    deck_setup_response_barrier_complete(barrier, second);
+    assert(deck_setup_response_barrier_is_complete(barrier, second));
     uint32_t generations[6]{};
     for (uint32_t &generation : generations) {
         generation = deck_setup_response_barrier_issue(barrier);
@@ -25,6 +30,7 @@ int main()
     deck_setup_response_barrier_release(barrier, first);
     const uint32_t reused = deck_setup_response_barrier_issue(barrier);
     assert(reused != 0);
+    deck_setup_response_barrier_response_sent(barrier, reused);
     deck_setup_response_barrier_complete(barrier, reused);
     assert(deck_setup_response_barrier_is_complete(barrier, reused));
     assert(deck_setup_response_barrier_is_complete(barrier, second));
