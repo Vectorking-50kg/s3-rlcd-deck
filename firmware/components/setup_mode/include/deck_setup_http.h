@@ -27,6 +27,7 @@ typedef enum {
     DECK_SETUP_HTTP_WIFI_CLEAR_REQUEST,
     DECK_SETUP_HTTP_WIFI_CLEAR_CONFIRM,
     DECK_SETUP_HTTP_COMPANION_PAIR,
+    DECK_SETUP_HTTP_COMPANION_PAIR_ACK,
     DECK_SETUP_HTTP_COMPANION_SELECT,
     DECK_SETUP_HTTP_COMPANION_REVOKE,
 } deck_setup_http_route_t;
@@ -107,6 +108,11 @@ deck_setup_companion_request_result_t deck_setup_http_parse_companion_pair_reque
     const char *body,
     size_t body_size,
     deck_companion_pair_request_t *request
+);
+bool deck_setup_http_parse_pair_ack_request(
+    const char *body,
+    size_t body_size,
+    uint32_t *response_generation
 );
 bool deck_setup_http_parse_companion_profile_request(
     const char *body,

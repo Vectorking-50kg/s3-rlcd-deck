@@ -238,6 +238,47 @@ def test_profile_cleanup_revokes_only_temporary_profile_and_reselects_original()
     ]
 
 
+def test_pairing_closes_setup_only_after_client_acknowledges_the_202_body() -> None:
+    generation = 17
+    operations: list[tuple[str, str, dict[str, str]]] = []
+
+    def pair_response(
+        _base: str, path: str, fields: dict[str, str]
+    ) -> tuple[int, dict[str, object]]:
+        operations.append(("json", path, fields))
+        return 202, {
+            "accepted": True,
+            "state": "queued",
+            "response_generation": generation,
+        }
+
+    def acknowledge(_base: str, path: str, fields: dict[str, str]) -> int:
+        operations.append(("form", path, fields))
+        return 202
+
+    with mock.patch.object(m1, "http_form_json", side_effect=pair_response), mock.patch.object(
+        m1, "http_form", side_effect=acknowledge
+    ):
+        m1.submit_pairing("http://192.168.4.1", "192.168.31.45:7780", "012345")
+    assert operations == [
+        (
+            "json",
+            "/api/companions/pair",
+            {"hub_address": "192.168.31.45:7780", "code": "012345"},
+        ),
+        (
+            "form",
+            "/api/companions/pair/ack",
+            {"response_generation": str(generation)},
+        ),
+    ]
+
+    with mock.patch.object(m1, "http_form_json", side_effect=pair_response), mock.patch.object(
+        m1, "http_form", side_effect=ConnectionResetError("AP closed after ACK")
+    ):
+        m1.submit_pairing("http://192.168.4.1", "192.168.31.45:7780", "012345")
+
+
 def test_post_flash_monitor_requests_a_fresh_boot_after_ready_handshake() -> None:
     evidence = m1.SerialEvidence.__new__(m1.SerialEvidence)
     commands: list[bytes] = []
@@ -769,6 +810,7 @@ if __name__ == "__main__":
     test_native_run_requires_same_commit_and_both_real_platform_jobs()
     test_companion_logs_are_drained_redacted_and_secret_observation_fails_gate()
     test_profile_cleanup_revokes_only_temporary_profile_and_reselects_original()
+    test_pairing_closes_setup_only_after_client_acknowledges_the_202_body()
     test_post_flash_monitor_requests_a_fresh_boot_after_ready_handshake()
     test_boot_gate_accepts_only_the_expected_software_reset()
     test_post_flash_usb_reenumeration_reopens_without_a_second_reset()

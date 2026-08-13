@@ -666,6 +666,54 @@ def http_form(base: str, path: str, fields: dict[str, str]) -> int:
         return error.code
 
 
+def http_form_json(
+    base: str, path: str, fields: dict[str, str]
+) -> tuple[int, dict[str, Any]]:
+    request = urllib.request.Request(
+        base.rstrip("/") + path,
+        data=urllib.parse.urlencode(fields).encode("ascii"),
+        method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=4) as response:
+            body = response.read()
+            return response.status, json.loads(body) if body else {}
+    except urllib.error.HTTPError as error:
+        error.read()
+        return error.code, {}
+
+
+def submit_pairing(setup_base: str, hub_address: str, code: str) -> None:
+    status, response = http_form_json(
+        setup_base,
+        "/api/companions/pair",
+        {"hub_address": hub_address, "code": code},
+    )
+    generation = response.get("response_generation")
+    if (
+        status != 202
+        or not isinstance(generation, int)
+        or isinstance(generation, bool)
+        or generation <= 0
+        or generation > 0xFFFFFFFF
+    ):
+        raise AcceptanceFailure(f"Deck Pairing request returned {status}")
+    try:
+        acknowledged = http_form(
+            setup_base,
+            "/api/companions/pair/ack",
+            {"response_generation": str(generation)},
+        )
+    except OSError:
+        # The ACK is the final network message. Once the Deck receives it, the
+        # Setup AP may close before the ACK response reaches the host. The
+        # caller proves delivery with Setup inactive and Device Link online.
+        return
+    if acknowledged != 202:
+        raise AcceptanceFailure("Deck Pairing response acknowledgement failed")
+
+
 def setup_json(base: str, path: str = "/api/status") -> tuple[int, dict[str, Any]]:
     request = urllib.request.Request(base.rstrip("/") + path, method="GET")
     try:
@@ -1015,14 +1063,8 @@ def pair_deck(
     setup_base = f"http://{access['address']}"
     if before_submit is not None:
         before_submit(setup_base)
-    code = http_form(
-        setup_base,
-        "/api/companions/pair",
-        {"hub_address": hub_address, "code": str(issued["code"])},
-    )
+    submit_pairing(setup_base, hub_address, str(issued["code"]))
     issued = {}
-    if code != 202:
-        raise AcceptanceFailure(f"{stage}: Deck Pairing request returned {code}")
     serial_evidence.event(
         lambda event: event.get("type") == "setup_state" and event.get("active") is False,
         f"{stage}: Pairing commit and Setup close",

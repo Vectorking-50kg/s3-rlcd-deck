@@ -43,8 +43,11 @@ constexpr char kPage[] =
     "show(await r.json());if(r.ok)setTimeout(load,500)};"
     "pair.onsubmit=async e=>{e.preventDefault();let r=await fetch('/api/companions/pair',"
     "{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:"
-    "new URLSearchParams(new FormData(pair))});state.textContent=JSON.stringify(await "
-    "r.json());pair.code.value='';if(r.ok)setTimeout(load,250)};"
+    "new URLSearchParams(new FormData(pair))});let j=await r.json();state.textContent="
+    "JSON.stringify(j);pair.code.value='';if(r.ok&&Number.isInteger(j.response_generation))"
+    "fetch('/api/companions/pair/ack',{method:'POST',headers:{'Content-Type':"
+    "'application/x-www-form-urlencoded'},body:new URLSearchParams({response_generation:"
+    "String(j.response_generation)})}).catch(()=>{})};"
     "temp.onsubmit=async e=>{e.preventDefault();let r=await fetch('/api/temperature',"
     "{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},"
     "body:new URLSearchParams(new FormData(temp))});show(await r.json());if(r.ok)"
@@ -66,6 +69,7 @@ constexpr deck_setup_http_route_spec_t kRoutes[] = {
     {DECK_SETUP_HTTP_WIFI_CLEAR_REQUEST, DECK_SETUP_HTTP_POST, "/api/wifi/clear/request"},
     {DECK_SETUP_HTTP_WIFI_CLEAR_CONFIRM, DECK_SETUP_HTTP_POST, "/api/wifi/clear/confirm"},
     {DECK_SETUP_HTTP_COMPANION_PAIR, DECK_SETUP_HTTP_POST, "/api/companions/pair"},
+    {DECK_SETUP_HTTP_COMPANION_PAIR_ACK, DECK_SETUP_HTTP_POST, "/api/companions/pair/ack"},
     {DECK_SETUP_HTTP_COMPANION_SELECT, DECK_SETUP_HTTP_POST, "/api/companions/select"},
     {DECK_SETUP_HTTP_COMPANION_REVOKE, DECK_SETUP_HTTP_POST, "/api/companions/revoke"},
 };
@@ -512,6 +516,37 @@ deck_setup_companion_request_result_t deck_setup_http_parse_companion_pair_reque
         return DECK_SETUP_COMPANION_REQUEST_INVALID_ADDRESS;
     }
     return DECK_SETUP_COMPANION_REQUEST_OK;
+}
+
+bool deck_setup_http_parse_pair_ack_request(
+    const char *body,
+    size_t body_size,
+    uint32_t *response_generation
+)
+{
+    constexpr char kPrefix[] = "response_generation=";
+    constexpr size_t kMaximumDigits = 10;
+    if (body == nullptr || response_generation == nullptr ||
+        body_size <= sizeof(kPrefix) - 1 ||
+        body_size > sizeof(kPrefix) - 1 + kMaximumDigits ||
+        std::memcmp(body, kPrefix, sizeof(kPrefix) - 1) != 0) {
+        return false;
+    }
+    uint64_t parsed = 0;
+    for (size_t index = sizeof(kPrefix) - 1; index < body_size; ++index) {
+        if (body[index] < '0' || body[index] > '9') {
+            return false;
+        }
+        parsed = parsed * 10U + static_cast<uint64_t>(body[index] - '0');
+        if (parsed > UINT32_MAX) {
+            return false;
+        }
+    }
+    if (parsed == 0) {
+        return false;
+    }
+    *response_generation = static_cast<uint32_t>(parsed);
+    return true;
 }
 
 bool deck_setup_http_parse_companion_profile_request(

@@ -86,11 +86,6 @@ struct ServiceNotification {
     char error_stage[kErrorStageCapacity];
 };
 
-struct PairResponseCompletion {
-    deck_setup_service_t *service;
-    uint32_t generation;
-};
-
 uint64_t monotonic_ms()
 {
     return static_cast<uint64_t>(esp_timer_get_time() / 1'000);
@@ -317,23 +312,6 @@ bool wait_for_pair_response(
         response_generation
     );
     return true;
-}
-
-void pair_response_complete_work(void *context)
-{
-    auto *completion = static_cast<PairResponseCompletion *>(context);
-    if (completion == nullptr || completion->service == nullptr) {
-        return;
-    }
-    const uint32_t response_generation = completion->generation;
-    deck_setup_response_barrier_complete(
-        completion->service->pair_response_barrier,
-        response_generation
-    );
-    if (completion->service->service_task != nullptr) {
-        xTaskNotifyGive(completion->service->service_task);
-    }
-    delete completion;
 }
 
 bool authentication_failure(uint8_t reason)
@@ -797,7 +775,8 @@ esp_err_t companion_pair_handler(httpd_req_t *request)
     command.type = CommandType::pair_companion;
     command.companion_pair = pair_request;
     command.response_generation = deck_setup_response_barrier_issue(
-        service->pair_response_barrier
+        service->pair_response_barrier,
+        reinterpret_cast<sockaddr_in *>(&peer_address)->sin_addr.s_addr
     );
     const bool queued = command.response_generation != 0 &&
                         enqueue_command(service, command);
@@ -817,30 +796,67 @@ esp_err_t companion_pair_handler(httpd_req_t *request)
         return send_json(request, "{\"accepted\":false,\"error\":\"busy\"}");
     }
     httpd_resp_set_status(request, "202 Accepted");
-    const esp_err_t send_result = send_json(
-        request,
-        "{\"accepted\":true,\"state\":\"queued\"}"
+    char response[96];
+    const int response_size = std::snprintf(
+        response,
+        sizeof(response),
+        "{\"accepted\":true,\"state\":\"queued\",\"response_generation\":%u}",
+        static_cast<unsigned>(command.response_generation)
     );
-    const uint32_t response_generation = command.response_generation;
-    if (send_result == ESP_OK) {
-        deck_setup_response_barrier_response_sent(
-            service->pair_response_barrier,
-            response_generation
-        );
-        auto *completion = new (std::nothrow) PairResponseCompletion{
-            service,
-            response_generation,
-        };
-        if (completion != nullptr &&
-            httpd_queue_work(
-                service->http_server,
-                pair_response_complete_work,
-                completion
-            ) != ESP_OK) {
-            delete completion;
-        }
+    if (response_size <= 0 ||
+        static_cast<size_t>(response_size) >= sizeof(response)) {
+        return ESP_FAIL;
     }
-    return send_result;
+    return send_json(request, response);
+}
+
+esp_err_t companion_pair_ack_handler(httpd_req_t *request)
+{
+    auto *service = static_cast<deck_setup_service_t *>(request->user_ctx);
+    if (!mark_activity(service)) {
+        httpd_resp_set_status(request, "503 Service Unavailable");
+        return send_json(request, "{\"accepted\":false,\"error\":\"setup_inactive\"}");
+    }
+    char body[40];
+    size_t received = 0;
+    uint32_t response_generation = 0;
+    if (!receive_body(request, body, sizeof(body), &received) ||
+        !deck_setup_http_parse_pair_ack_request(
+            body,
+            received,
+            &response_generation
+        )) {
+        secure_clear(body, sizeof(body));
+        httpd_resp_set_status(request, "400 Bad Request");
+        return send_json(request, "{\"accepted\":false,\"error\":\"malformed\"}");
+    }
+    secure_clear(body, sizeof(body));
+    sockaddr_storage peer_address{};
+    socklen_t peer_size = sizeof(peer_address);
+    const int socket_fd = httpd_req_to_sockfd(request);
+    if (socket_fd < 0 ||
+        getpeername(
+            socket_fd,
+            reinterpret_cast<sockaddr *>(&peer_address),
+            &peer_size
+        ) != 0 ||
+        peer_address.ss_family != AF_INET) {
+        httpd_resp_set_status(request, "400 Bad Request");
+        return send_json(request, "{\"accepted\":false,\"error\":\"invalid_peer\"}");
+    }
+    if (!deck_setup_response_barrier_acknowledge(
+            service->pair_response_barrier,
+            response_generation,
+            reinterpret_cast<sockaddr_in *>(&peer_address)->sin_addr.s_addr
+        )) {
+        httpd_resp_set_status(request, "409 Conflict");
+        return send_json(request, "{\"accepted\":false,\"error\":\"not_pending\"}");
+    }
+    if (service->service_task != nullptr) {
+        xTaskNotifyGive(service->service_task);
+    }
+    httpd_resp_set_status(request, "202 Accepted");
+    return send_json(request, "{\"accepted\":true,\"state\":\"acknowledged\"}");
 }
 
 esp_err_t companion_profile_handler(httpd_req_t *request, bool revoke)
@@ -924,6 +940,8 @@ HttpHandler handler_for_route(deck_setup_http_route_t route)
             return wifi_clear_confirm_handler;
         case DECK_SETUP_HTTP_COMPANION_PAIR:
             return companion_pair_handler;
+        case DECK_SETUP_HTTP_COMPANION_PAIR_ACK:
+            return companion_pair_ack_handler;
         case DECK_SETUP_HTTP_COMPANION_SELECT:
             return companion_select_handler;
         case DECK_SETUP_HTTP_COMPANION_REVOKE:
@@ -1924,7 +1942,8 @@ bool deck_setup_service_pair_companion(
     command.type = CommandType::pair_companion;
     command.companion_pair = *request;
     command.response_generation = deck_setup_response_barrier_issue(
-        service->pair_response_barrier
+        service->pair_response_barrier,
+        0
     );
     if (command.response_generation == 0) {
         secure_clear(
@@ -1935,13 +1954,10 @@ bool deck_setup_service_pair_companion(
     }
     const bool queued = enqueue_command(service, command);
     if (queued) {
-        deck_setup_response_barrier_response_sent(
+        (void)deck_setup_response_barrier_acknowledge(
             service->pair_response_barrier,
-            command.response_generation
-        );
-        deck_setup_response_barrier_complete(
-            service->pair_response_barrier,
-            command.response_generation
+            command.response_generation,
+            0
         );
     } else {
         deck_setup_response_barrier_release(

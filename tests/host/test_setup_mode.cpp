@@ -174,7 +174,7 @@ void http_contract_exposes_profile_pairing_without_secrets()
     size_t route_count = 0;
     const deck_setup_http_route_spec_t *routes = deck_setup_http_routes(&route_count);
     assert(routes != nullptr);
-    assert(route_count == 10);
+    assert(route_count == 11);
     assert(routes[0].route == DECK_SETUP_HTTP_PAGE);
     assert(routes[0].method == DECK_SETUP_HTTP_GET);
     assert(std::string(routes[0].path) == "/");
@@ -195,10 +195,12 @@ void http_contract_exposes_profile_pairing_without_secrets()
     assert(std::string(routes[6].path) == "/api/wifi/clear/confirm");
     assert(routes[7].route == DECK_SETUP_HTTP_COMPANION_PAIR);
     assert(std::string(routes[7].path) == "/api/companions/pair");
-    assert(routes[8].route == DECK_SETUP_HTTP_COMPANION_SELECT);
-    assert(std::string(routes[8].path) == "/api/companions/select");
-    assert(routes[9].route == DECK_SETUP_HTTP_COMPANION_REVOKE);
-    assert(std::string(routes[9].path) == "/api/companions/revoke");
+    assert(routes[8].route == DECK_SETUP_HTTP_COMPANION_PAIR_ACK);
+    assert(std::string(routes[8].path) == "/api/companions/pair/ack");
+    assert(routes[9].route == DECK_SETUP_HTTP_COMPANION_SELECT);
+    assert(std::string(routes[9].path) == "/api/companions/select");
+    assert(routes[10].route == DECK_SETUP_HTTP_COMPANION_REVOKE);
+    assert(std::string(routes[10].path) == "/api/companions/revoke");
 
     assert(deck_setup_http_route("GET", "/") == DECK_SETUP_HTTP_PAGE);
     assert(deck_setup_http_route("GET", "/api/status") == DECK_SETUP_HTTP_STATUS);
@@ -213,6 +215,8 @@ void http_contract_exposes_profile_pairing_without_secrets()
     assert(deck_setup_http_route("GET", "/api/wifi") == DECK_SETUP_HTTP_METHOD_NOT_ALLOWED);
     assert(deck_setup_http_route("POST", "/api/companions/pair") ==
            DECK_SETUP_HTTP_COMPANION_PAIR);
+    assert(deck_setup_http_route("POST", "/api/companions/pair/ack") ==
+           DECK_SETUP_HTTP_COMPANION_PAIR_ACK);
     assert(deck_setup_http_route("POST", "/api/companions/select") ==
            DECK_SETUP_HTTP_COMPANION_SELECT);
     assert(deck_setup_http_route("POST", "/api/companions/revoke") ==
@@ -235,6 +239,7 @@ void http_contract_exposes_profile_pairing_without_secrets()
     assert(html.find("name=hub_address") != std::string::npos);
     assert(html.find("name=code") != std::string::npos);
     assert(html.find("/api/companions/pair") != std::string::npos);
+    assert(html.find("/api/companions/pair/ack") != std::string::npos);
     assert(html.find("/api/companions/select") != std::string::npos);
     assert(html.find("/api/companions/revoke") != std::string::npos);
     assert(html.find("innerHTML") == std::string::npos);
@@ -349,6 +354,29 @@ void companion_requests_are_strict_and_do_not_accept_secret_shaped_extras()
     assert(std::string(profile_id).rfind("sha256:", 0) == 0);
     assert(!deck_setup_http_parse_companion_profile_request(
         "profile_id=x", 12, profile_id, sizeof(profile_id)
+    ));
+
+    uint32_t response_generation = 0;
+    assert(deck_setup_http_parse_pair_ack_request(
+        "response_generation=4294967295",
+        std::strlen("response_generation=4294967295"),
+        &response_generation
+    ));
+    assert(response_generation == UINT32_MAX);
+    assert(!deck_setup_http_parse_pair_ack_request(
+        "response_generation=0",
+        std::strlen("response_generation=0"),
+        &response_generation
+    ));
+    assert(!deck_setup_http_parse_pair_ack_request(
+        "response_generation=4294967296",
+        std::strlen("response_generation=4294967296"),
+        &response_generation
+    ));
+    assert(!deck_setup_http_parse_pair_ack_request(
+        "response_generation=1&extra=1",
+        std::strlen("response_generation=1&extra=1"),
+        &response_generation
     ));
 }
 

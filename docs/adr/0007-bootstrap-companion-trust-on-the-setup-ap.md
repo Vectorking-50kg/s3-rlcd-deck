@@ -8,7 +8,9 @@ redeem without an existing CA, then independently hashes the returned DER certif
 commits it only when it matches the returned SHA-256 fingerprint.
 
 This exception exists only because certificate pinning cannot precede first trust. After
-Pairing, the Deck closes Setup and every Device Link uses the exact committed certificate
+the browser reads the Pairing response, it acknowledges that response's opaque transaction
+generation over the Setup AP; only the matching acknowledgement closes Setup. Missing or
+stale acknowledgement retains the recovery surface. Every Device Link uses the exact committed certificate
 and its per-Deck Token. We reject trusting a certificate supplied over the ordinary LAN,
 asking users to bypass browser certificate warnings, globally discovering Companions, and
 silently accepting certificate replacement. Replacing the Companion certificate requires
