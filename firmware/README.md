@@ -38,7 +38,10 @@ With no committed Wi-Fi configuration, or after the committed network cannot be 
 the Deck starts a temporary Setup AP. A BOOT long press also starts a fresh session. Each
 session uses a new `S3-RLCD-XXXX` SSID and a readable WPA2 password shown only on the Deck
 screen. The ordinary HTTP page at `http://192.168.4.1/` exposes status, an explicit network
-scan, and a credential form; it does not pair a Companion.
+scan, Wi-Fi and calibration forms, and Companion Profile management. Pairing accepts only
+an explicit `host:port` and a six-digit one-time code. The Setup HTTP peer must be the
+computer running that Device Hub on the current `192.168.4.0/24` Setup network; a remote
+address supplied by form data cannot redirect the one-time trust bootstrap.
 
 Submitted credentials are first stored as a candidate and tested as a station. A successful
 connection writes the new record into the inactive slot and switches a CRC-protected active
@@ -181,6 +184,24 @@ to verify both persistent calibration and automatic Setup entry.
 
 This smoke intentionally deletes the active and candidate records in the Deck's `deck_wifi`
 namespace. It preserves `deck_settings`, other NVS namespaces, the rest of Flash, and eFuses.
+
+## Companion Pairing and Device Link
+
+The Deck transactionally stores at most five versioned Companion Profiles in the
+`deck_companions` NVS namespace. A Profile contains its redacted display fields plus an
+independent device Token and the exact Device Hub certificate DER/fingerprint. Status and
+Setup responses never expose the Token or certificate bytes. A failed redeem, malformed
+credential, capacity limit, NVS error, or interrupted write leaves the last committed
+Profile set and Wi-Fi configuration unchanged.
+
+The one-time certificate-discovery request is allowed only while the computer is connected
+to the Deck's fresh random WPA2 Setup AP. The Deck validates the returned certificate hash
+before committing it and closes Setup after successful Pairing. Normal operation never
+uses discovery trust: the `companion_link` module initiates WSS with the exact stored
+certificate, device identity, and per-Deck Token. It sends `device.hello` first, accepts
+only strict version-1 heartbeat frames up to 16 KiB, marks the Companion offline after 30
+seconds without a valid heartbeat, and reconnects with exponential delay capped at 30
+seconds. All credentials remain private to the Profile and Device Link modules.
 
 ## Long-duration HIL
 

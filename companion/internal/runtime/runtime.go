@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -9,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/devicelink"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
 )
 
@@ -41,6 +43,7 @@ type Runtime struct {
 	shutdownTimeout   time.Duration
 	sessions          *managementSessions
 	pairing           *pairing.Service
+	deviceLink        *devicelink.Hub
 
 	mu      sync.RWMutex
 	status  Status
@@ -62,11 +65,20 @@ func New(config Config) (*Runtime, error) {
 	if normalized.Management.AllowLAN {
 		status.SecurityWarning = "management Web is exposed beyond loopback"
 	}
+	deviceLink, err := devicelink.New(devicelink.Config{
+		Authenticator:     normalized.Pairing,
+		HeartbeatInterval: normalized.DeviceHub.HeartbeatInterval,
+		HeartbeatTimeout:  normalized.DeviceHub.HeartbeatTimeout,
+	})
+	if err != nil {
+		return nil, err
+	}
 	return &Runtime{
 		config:          normalized,
 		shutdownTimeout: shutdownTimeout,
 		sessions:        newManagementSessions(),
 		pairing:         normalized.Pairing,
+		deviceLink:      deviceLink,
 		status:          status,
 	}, nil
 }
@@ -135,6 +147,12 @@ func (application *Runtime) Run(ctx context.Context) error {
 		limits.MaxConcurrent,
 		limits.MaxConcurrentPerIP,
 	)
+	if certificate := application.config.DeviceHub.TLSCertificate; certificate != nil {
+		deviceHubListener = tls.NewListener(deviceHubListener, &tls.Config{
+			MinVersion:   tls.VersionTLS12,
+			Certificates: []tls.Certificate{*certificate},
+		})
+	}
 
 	type serveResult struct {
 		name string
@@ -157,6 +175,7 @@ func (application *Runtime) Run(ctx context.Context) error {
 
 	shutdownContext, cancel := context.WithTimeout(context.Background(), application.shutdownTimeout)
 	defer cancel()
+	application.deviceLink.Close()
 	shutdownErrors := shutdownServers(shutdownContext, managementServer, deviceHubServer)
 	application.setState(StateStopped, managementListener.Addr().String(), deviceHubListener.Addr().String())
 

@@ -17,6 +17,7 @@ extern "C" {
 #define DECK_COMPANION_HUB_ADDRESS_CAPACITY 96
 #define DECK_COMPANION_TOKEN_CAPACITY 44
 #define DECK_COMPANION_FINGERPRINT_CAPACITY 72
+#define DECK_COMPANION_CERTIFICATE_DER_CAPACITY 1024
 #define DECK_COMPANION_PAIRING_CODE_CAPACITY 7
 
 typedef struct deck_companion_profiles deck_companion_profiles_t;
@@ -40,12 +41,15 @@ typedef deck_transaction_storage_adapter_t deck_companion_storage_adapter_t;
 typedef struct {
     char token[DECK_COMPANION_TOKEN_CAPACITY];
     char certificate_fingerprint[DECK_COMPANION_FINGERPRINT_CAPACITY];
+    uint8_t certificate_der[DECK_COMPANION_CERTIFICATE_DER_CAPACITY];
+    size_t certificate_der_size;
     uint8_t protocol_version;
 } deck_companion_pairing_credential_t;
 
 typedef bool (*deck_companion_pairing_redeem_fn)(
     void *context,
     const char *hub_address,
+    const char *pairing_address,
     const char *pairing_code,
     deck_companion_pairing_credential_t *credential
 );
@@ -62,6 +66,8 @@ typedef struct {
 
 typedef struct {
     char hub_address[DECK_COMPANION_HUB_ADDRESS_CAPACITY];
+    /* Setup-AP peer address used only for the one-time trust bootstrap. */
+    char pairing_address[DECK_COMPANION_HUB_ADDRESS_CAPACITY];
     char code[DECK_COMPANION_PAIRING_CODE_CAPACITY];
 } deck_companion_pair_request_t;
 
@@ -80,6 +86,8 @@ typedef struct {
     char hub_address[DECK_COMPANION_HUB_ADDRESS_CAPACITY];
     char token[DECK_COMPANION_TOKEN_CAPACITY];
     char certificate_fingerprint[DECK_COMPANION_FINGERPRINT_CAPACITY];
+    uint8_t certificate_der[DECK_COMPANION_CERTIFICATE_DER_CAPACITY];
+    size_t certificate_der_size;
     uint8_t protocol_version;
 } deck_companion_profile_secret_t;
 
@@ -157,6 +165,10 @@ bool deck_companion_profiles_active_secret(
 );
 void deck_companion_profile_secret_clear(deck_companion_profile_secret_t *secret);
 bool deck_companion_hub_address_valid(const char *hub_address);
+bool deck_companion_hub_address_port(
+    const char *hub_address,
+    uint16_t *port
+);
 bool deck_companion_pairing_code_valid(const char *pairing_code);
 
 #ifdef __cplusplus

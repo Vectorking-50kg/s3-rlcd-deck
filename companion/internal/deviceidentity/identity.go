@@ -90,6 +90,14 @@ func LoadOrCreate(path string) (*Identity, error) {
 
 func (identity *Identity) Fingerprint() string { return identity.fingerprint }
 
+func (identity *Identity) CertificateDER() []byte {
+	pair, err := identity.TLSCertificate()
+	if err != nil || len(pair.Certificate) != 1 {
+		return nil
+	}
+	return append([]byte(nil), pair.Certificate[0]...)
+}
+
 func (identity *Identity) TLSCertificate() (tls.Certificate, error) {
 	return tls.X509KeyPair(identity.certificatePEM, identity.privateKeyPEM)
 }

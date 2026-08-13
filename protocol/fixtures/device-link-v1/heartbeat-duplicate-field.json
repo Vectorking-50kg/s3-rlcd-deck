@@ -1,0 +1,1 @@
+{"type":"device.heartbeat","protocol_version":1,"utc":"2026-08-13T12:34:56Z","monotonic_ms":42,"monotonic_ms":43,"tx_queue_depth":0,"tx_queue_capacity":4,"rx_queue_depth":0,"rx_queue_capacity":4}

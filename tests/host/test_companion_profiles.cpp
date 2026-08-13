@@ -62,6 +62,7 @@ struct FakePairing {
     bool succeed = true;
     unsigned calls = 0;
     std::string last_address;
+    std::string last_pairing_address;
     std::string last_code;
     deck_companion_pairing_credential_t next{};
 };
@@ -69,6 +70,7 @@ struct FakePairing {
 bool redeem(
     void *context,
     const char *address,
+    const char *pairing_address,
     const char *code,
     deck_companion_pairing_credential_t *credential
 )
@@ -76,6 +78,7 @@ bool redeem(
     auto *pairing = static_cast<FakePairing *>(context);
     ++pairing->calls;
     pairing->last_address = address;
+    pairing->last_pairing_address = pairing_address;
     pairing->last_code = code;
     if (!pairing->succeed) {
         return false;
@@ -104,6 +107,18 @@ void set_credential(FakePairing *pairing, unsigned index)
         sizeof(pairing->next.certificate_fingerprint),
         "sha256:" + std::string(64, hex)
     );
+    const uint8_t certificate_der[] = {
+        0x30,
+        0x03,
+        static_cast<uint8_t>(0x10U + index),
+        0x00,
+    };
+    std::memcpy(
+        pairing->next.certificate_der,
+        certificate_der,
+        sizeof(certificate_der)
+    );
+    pairing->next.certificate_der_size = sizeof(certificate_der);
     pairing->next.protocol_version = 1;
 }
 
@@ -132,6 +147,11 @@ deck_companion_pair_request_t request(unsigned index)
         "companion-" + std::to_string(index) + ".local:" +
             std::to_string(7780U + index)
     );
+    copy_string(
+        value.pairing_address,
+        sizeof(value.pairing_address),
+        "192.168.4.2:" + std::to_string(7780U + index)
+    );
     copy_string(value.code, sizeof(value.code), "123456");
     return value;
 }
@@ -159,13 +179,21 @@ void successful_pairing_commits_a_redacted_active_profile()
     assert(std::string(current.profiles[0].hub_address) == pairing_request.hub_address);
     assert(current.profiles[0].profile_version == 1);
     assert(pairing.calls == 1);
+    assert(pairing.last_pairing_address == "192.168.4.2:7781");
     assert(pairing.last_code == "123456");
 
     deck_companion_profile_secret_t active{};
     assert(deck_companion_profiles_active_secret(profiles, &active));
     assert(std::string(active.token) == pairing.next.token);
+    assert(active.certificate_der_size == pairing.next.certificate_der_size);
+    assert(std::memcmp(
+               active.certificate_der,
+               pairing.next.certificate_der,
+               active.certificate_der_size
+           ) == 0);
     deck_companion_profile_secret_clear(&active);
     assert(active.token[0] == '\0');
+    assert(active.certificate_der_size == 0);
     deck_companion_profiles_destroy(profiles);
 
     profiles = create_profiles(&storage, &pairing);
@@ -173,6 +201,12 @@ void successful_pairing_commits_a_redacted_active_profile()
     assert(snapshot(profiles).count == 1);
     assert(deck_companion_profiles_active_secret(profiles, &active));
     assert(std::string(active.token) == pairing.next.token);
+    assert(active.certificate_der_size == pairing.next.certificate_der_size);
+    assert(std::memcmp(
+               active.certificate_der,
+               pairing.next.certificate_der,
+               active.certificate_der_size
+           ) == 0);
     deck_companion_profile_secret_clear(&active);
     deck_companion_profiles_destroy(profiles);
 }
@@ -215,6 +249,22 @@ void failed_pairing_and_invalid_inputs_preserve_existing_state()
     copy_string(failed.code, sizeof(failed.code), "12x456");
     assert(deck_companion_profiles_pair(profiles, &failed) ==
            DECK_COMPANION_PAIR_INVALID_CODE);
+    failed = request(4);
+    copy_string(
+        failed.pairing_address,
+        sizeof(failed.pairing_address),
+        "10.0.0.2:7784"
+    );
+    assert(deck_companion_profiles_pair(profiles, &failed) ==
+           DECK_COMPANION_PAIR_INVALID_ADDRESS);
+    failed = request(4);
+    copy_string(
+        failed.pairing_address,
+        sizeof(failed.pairing_address),
+        "192.168.4.2:7785"
+    );
+    assert(deck_companion_profiles_pair(profiles, &failed) ==
+           DECK_COMPANION_PAIR_INVALID_ADDRESS);
     assert(pairing.calls == calls_before);
     deck_companion_profiles_destroy(profiles);
 }

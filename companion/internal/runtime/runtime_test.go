@@ -2,6 +2,8 @@ package runtime_test
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"io"
@@ -12,8 +14,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/deviceidentity"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/devicelink"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
 	companionruntime "github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/runtime"
+	"github.com/coder/websocket"
 )
 
 type runtimeTestClock struct {
@@ -48,6 +53,107 @@ func TestRuntimeRejectsNonLoopbackDeviceHubUntilPinnedTLSExists(t *testing.T) {
 	_, err := companionruntime.New(config)
 	if !errors.Is(err, companionruntime.ErrDeviceHubTLSRequired) {
 		t.Fatalf("New() error = %v, want ErrDeviceHubTLSRequired", err)
+	}
+}
+
+func TestRuntimeServesAuthenticatedDeviceLinkOnlyOverTLS(t *testing.T) {
+	identity, err := deviceidentity.LoadOrCreate(t.TempDir() + "/identity.json")
+	if err != nil {
+		t.Fatalf("LoadOrCreate() error = %v", err)
+	}
+	certificate, err := identity.TLSCertificate()
+	if err != nil {
+		t.Fatalf("TLSCertificate() error = %v", err)
+	}
+	clock := &runtimeTestClock{now: time.Date(2026, 8, 13, 8, 0, 0, 0, time.UTC)}
+	pairingService, err := pairing.New(pairing.Config{
+		Clock:                  clock,
+		Store:                  pairing.NewMemoryStore(),
+		CertificateFingerprint: identity.Fingerprint(),
+		CertificateDER:         identity.CertificateDER(),
+	})
+	if err != nil {
+		t.Fatalf("pairing.New() error = %v", err)
+	}
+	config := testConfig()
+	config.Pairing = pairingService
+	config.DeviceHub.TLSCertificate = &certificate
+	config.DeviceHub.HeartbeatInterval = 20 * time.Millisecond
+	config.DeviceHub.HeartbeatTimeout = 100 * time.Millisecond
+	application, err := companionruntime.New(config)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- application.Run(ctx) }()
+	status := waitForState(t, application, companionruntime.StateReady)
+
+	issued, err := pairingService.Issue(context.Background())
+	if err != nil {
+		t.Fatalf("Issue() error = %v", err)
+	}
+	const deviceIdentity = "ZGV2aWNlLXB1YmxpYy1rZXktbWF0ZXJpYWw"
+	credential, err := pairingService.Redeem(context.Background(), pairing.RedeemRequest{
+		Code:            issued.Code,
+		DeviceID:        "deck-runtime1",
+		DeviceIdentity:  deviceIdentity,
+		ProtocolVersion: pairing.ProtocolVersion,
+	})
+	if err != nil {
+		t.Fatalf("Redeem() error = %v", err)
+	}
+	roots := x509.NewCertPool()
+	parsedCertificate, err := x509.ParseCertificate(identity.CertificateDER())
+	if err != nil {
+		t.Fatalf("ParseCertificate() error = %v", err)
+	}
+	roots.AddCert(parsedCertificate)
+	header := http.Header{}
+	header.Set("Authorization", "Bearer "+credential.Token)
+	header.Set("X-Device-ID", credential.DeviceID)
+	header.Set("X-Device-Identity", deviceIdentity)
+	header.Set("X-Protocol-Version", strconv.Itoa(pairing.ProtocolVersion))
+	connection, response, err := websocket.Dial(
+		context.Background(),
+		"wss://"+status.DeviceHubAddress+"/api/v1/device/link",
+		&websocket.DialOptions{
+			HTTPClient: &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
+				MinVersion: tls.VersionTLS12,
+				RootCAs:    roots,
+				ServerName: "s3deck-companion.local",
+			}}},
+			HTTPHeader:   header,
+			Subprotocols: []string{devicelink.Subprotocol},
+		},
+	)
+	if err != nil {
+		t.Fatalf("Dial(Device Link) response = %#v, error = %v", response, err)
+	}
+	hello, _ := json.Marshal(devicelink.DeviceHello{
+		Type:            devicelink.MessageDeviceHello,
+		ProtocolVersion: devicelink.ProtocolVersion,
+		DeviceID:        credential.DeviceID,
+		FirmwareVersion: "0.2.0-dev",
+		Board:           devicelink.BoardESP32S3RLCD42,
+		Capabilities:    []string{"display", "serial", "ota"},
+		SerialState:     "disarmed",
+	})
+	if err = connection.Write(context.Background(), websocket.MessageText, hello); err != nil {
+		t.Fatalf("write device.hello: %v", err)
+	}
+	readContext, readCancel := context.WithTimeout(context.Background(), time.Second)
+	messageType, message, err := connection.Read(readContext)
+	readCancel()
+	connection.CloseNow()
+	if err != nil || messageType != websocket.MessageText ||
+		!strings.Contains(string(message), `"type":"device.heartbeat"`) {
+		t.Fatalf("first server message type = %v, message = %q, error = %v", messageType, message, err)
+	}
+
+	cancel()
+	if err = <-done; err != nil {
+		t.Fatalf("Run() error = %v", err)
 	}
 }
 
@@ -296,6 +402,7 @@ func testConfigWithPairing(clock pairing.Clock, store pairing.Store) companionru
 		Clock:                  clock,
 		Store:                  store,
 		CertificateFingerprint: testCertificateFingerprint,
+		CertificateDER:         []byte(testCertificateDER),
 	})
 	if err != nil {
 		panic(err)

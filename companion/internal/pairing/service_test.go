@@ -11,7 +11,10 @@ import (
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
 )
 
-const testCertificateFingerprint = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+const (
+	testCertificateDER         = "test-certificate-der"
+	testCertificateFingerprint = "sha256:69be57455b3b4f84c7c23140e875002791c5a5509ca9d0c644a63d5eaf836cce"
+)
 
 type fakeClock struct{ now time.Time }
 
@@ -295,6 +298,7 @@ func TestAuditEventsContainOnlyHashedDeviceReferences(t *testing.T) {
 		Auditor:                auditor,
 		CodeTTL:                5 * time.Minute,
 		CertificateFingerprint: testCertificateFingerprint,
+		CertificateDER:         []byte(testCertificateDER),
 		CodePepper:             makeTokenBytes(0xf0),
 	})
 	if err != nil {
@@ -340,6 +344,7 @@ func newService(
 		Random:                 random,
 		CodeTTL:                5 * time.Minute,
 		CertificateFingerprint: testCertificateFingerprint,
+		CertificateDER:         []byte(testCertificateDER),
 		CodePepper:             makeTokenBytes(0xf1),
 	})
 	if err != nil {

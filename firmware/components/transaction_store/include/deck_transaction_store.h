@@ -9,7 +9,7 @@ extern "C" {
 #endif
 
 #define DECK_TRANSACTION_PAYLOAD_CAPACITY 128
-#define DECK_TRANSACTION_MAX_PAYLOAD_CAPACITY 2048
+#define DECK_TRANSACTION_MAX_PAYLOAD_CAPACITY 8192
 
 typedef struct deck_transaction_store deck_transaction_store_t;
 typedef struct deck_transaction_nvs_storage deck_transaction_nvs_storage_t;

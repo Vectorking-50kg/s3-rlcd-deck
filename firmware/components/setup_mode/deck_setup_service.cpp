@@ -3,6 +3,7 @@
 #include "deck_setup_http.h"
 #include "deck_setup_confirmation.h"
 #include "deck_device_settings_nvs.h"
+#include "deck_companion_pairing_esp.h"
 #include "deck_companion_profiles_nvs.h"
 #include "deck_wifi_config_nvs.h"
 #include "sdkconfig.h"
@@ -97,19 +98,21 @@ bool fill_random(void *, uint8_t *output, size_t size)
     return true;
 }
 
-bool redeem_companion_unavailable(
+bool redeem_companion(
     void *,
-    const char *,
-    const char *,
+    const char *hub_address,
+    const char *pairing_address,
+    const char *pairing_code,
     deck_companion_pairing_credential_t *credential
 )
 {
-    if (credential != nullptr) {
-        *credential = {};
-    }
-    // #29 supplies the fingerprint-pinned TLS transport. Never fall back to
-    // plaintext HTTP for a Pairing code or returned device token.
-    return false;
+    return deck_companion_pairing_esp_redeem(
+        nullptr,
+        hub_address,
+        pairing_address,
+        pairing_code,
+        credential
+    );
 }
 
 void secure_clear(char *buffer, size_t size)
@@ -697,6 +700,44 @@ esp_err_t companion_pair_handler(httpd_req_t *request)
         }
         return send_json(request, "{\"accepted\":false,\"error\":\"malformed\"}");
     }
+    sockaddr_storage peer_address{};
+    socklen_t peer_size = sizeof(peer_address);
+    const int socket_fd = httpd_req_to_sockfd(request);
+    uint16_t hub_port = 0;
+    char peer_ip[INET_ADDRSTRLEN]{};
+    const bool peer_valid =
+        socket_fd >= 0 &&
+        getpeername(
+            socket_fd,
+            reinterpret_cast<sockaddr *>(&peer_address),
+            &peer_size
+        ) == 0 &&
+        peer_address.ss_family == AF_INET &&
+        inet_ntop(
+            AF_INET,
+            &reinterpret_cast<sockaddr_in *>(&peer_address)->sin_addr,
+            peer_ip,
+            sizeof(peer_ip)
+        ) != nullptr &&
+        deck_companion_hub_address_port(pair_request.hub_address, &hub_port);
+    const int pairing_size = peer_valid
+                                 ? std::snprintf(
+                                       pair_request.pairing_address,
+                                       sizeof(pair_request.pairing_address),
+                                       "%s:%u",
+                                       peer_ip,
+                                       static_cast<unsigned>(hub_port)
+                                   )
+                                 : -1;
+    if (pairing_size <= 0 || static_cast<size_t>(pairing_size) >=
+                                 sizeof(pair_request.pairing_address)) {
+        secure_clear(
+            reinterpret_cast<char *>(&pair_request),
+            sizeof(pair_request)
+        );
+        httpd_resp_set_status(request, "400 Bad Request");
+        return send_json(request, "{\"accepted\":false,\"error\":\"invalid_peer\"}");
+    }
     const bool queued = deck_setup_service_pair_companion(service, &pair_request);
     secure_clear(reinterpret_cast<char *>(&pair_request), sizeof(pair_request));
     if (!queued) {
@@ -1206,7 +1247,7 @@ const char *initialize_wifi(deck_setup_service_t *service)
     }
     const deck_companion_profiles_options_t companion_options = {
         companion_storage_adapter,
-        {redeem_companion_unavailable, service},
+        {redeem_companion, service},
     };
     service->companion_profiles = deck_companion_profiles_create(&companion_options);
     if (service->companion_profiles == nullptr) {
@@ -1434,18 +1475,32 @@ void service_task(void *task_context)
                     if (xSemaphoreTake(service->state_mutex, portMAX_DELAY) == pdTRUE) {
                         deck_setup_snapshot_t setup{};
                         setup_active = snapshot_locked(service, &setup) && setup.active;
-                        if (setup_active) {
-                            result = deck_companion_profiles_pair(
-                                service->companion_profiles,
-                                &command.companion_pair
-                            );
-                        }
                         xSemaphoreGive(service->state_mutex);
+                    }
+                    if (setup_active) {
+                        result = deck_companion_profiles_pair(
+                            service->companion_profiles,
+                            &command.companion_pair
+                        );
                     }
                     secure_clear(
                         reinterpret_cast<char *>(&command.companion_pair),
                         sizeof(command.companion_pair)
                     );
+                    if (result == DECK_COMPANION_PAIR_PAIRED) {
+                        if (xSemaphoreTake(service->state_mutex, portMAX_DELAY) == pdTRUE) {
+                            (void)deck_setup_mode_stop(service->mode);
+                            xSemaphoreGive(service->state_mutex);
+                        }
+                        const char *stop_error = stop_network(service);
+                        notify(
+                            service,
+                            stop_error == nullptr ? DECK_SETUP_SERVICE_INACTIVE
+                                                  : DECK_SETUP_SERVICE_ERROR,
+                            stop_error
+                        );
+                        break;
+                    }
                     const bool storage_failure =
                         result == DECK_COMPANION_PAIR_STORAGE_FAILURE;
                     notify(
@@ -1793,6 +1848,13 @@ bool deck_setup_service_revoke_companion(
         profile_id,
         CommandType::revoke_companion
     );
+}
+
+deck_companion_profiles_t *deck_setup_service_companion_profiles(
+    deck_setup_service_t *service
+)
+{
+    return service == nullptr ? nullptr : service->companion_profiles;
 }
 
 bool deck_setup_service_request_wifi_clear(

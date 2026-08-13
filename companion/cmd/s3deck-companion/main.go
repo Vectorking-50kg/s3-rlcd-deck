@@ -40,7 +40,7 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	)
 	deviceHubAddress := flags.String(
 		"device-hub-address",
-		"127.0.0.1:7780",
+		"0.0.0.0:7780",
 		"independent address for Deck device traffic",
 	)
 	allowLANManagement := flags.Bool(
@@ -95,9 +95,15 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "cannot load Device Hub identity: %v\n", err)
 		return 2
 	}
+	tlsCertificate, err := identity.TLSCertificate()
+	if err != nil {
+		fmt.Fprintf(stderr, "cannot load Device Hub TLS certificate: %v\n", err)
+		return 2
+	}
 	pairingService, err := pairing.New(pairing.Config{
 		Store:                  store,
 		CertificateFingerprint: identity.Fingerprint(),
+		CertificateDER:         identity.CertificateDER(),
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "cannot configure pairing: %v\n", err)
@@ -112,7 +118,8 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			AdminToken:    managementToken,
 		},
 		DeviceHub: companionruntime.DeviceHubConfig{
-			Address: *deviceHubAddress,
+			Address:        *deviceHubAddress,
+			TLSCertificate: &tlsCertificate,
 		},
 		Pairing: pairingService,
 	})

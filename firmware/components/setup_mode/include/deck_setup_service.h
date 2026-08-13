@@ -63,6 +63,11 @@ bool deck_setup_service_revoke_companion(
     const char *profile_id
 );
 
+/* Borrowed lifetime Profiles interface for the Device Link owner. */
+deck_companion_profiles_t *deck_setup_service_companion_profiles(
+    deck_setup_service_t *service
+);
+
 bool deck_setup_service_request_wifi_clear(
     deck_setup_service_t *service,
     char *token,

@@ -128,6 +128,24 @@ deck_add_host_test(
         ../../firmware/components/transaction_store/include
 )
 deck_add_host_test(
+    test_device_protocol
+    SOURCES
+        test_device_protocol.cpp
+        ../../firmware/components/companion_link/deck_device_protocol.cpp
+    INCLUDE_DIRS ../../firmware/components/companion_link/include
+)
+target_compile_definitions(
+    test_device_protocol
+    PRIVATE DECK_REPOSITORY_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../.."
+)
+deck_add_host_test(
+    test_companion_link_timing
+    SOURCES
+        test_companion_link_timing.cpp
+        ../../firmware/components/companion_link/deck_companion_link_timing.cpp
+    INCLUDE_DIRS ../../firmware/components/companion_link/include
+)
+deck_add_host_test(
     test_setup_confirmation
     SOURCES
         test_setup_confirmation.cpp
