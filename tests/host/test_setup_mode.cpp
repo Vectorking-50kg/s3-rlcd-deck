@@ -356,27 +356,29 @@ void companion_requests_are_strict_and_do_not_accept_secret_shaped_extras()
         "profile_id=x", 12, profile_id, sizeof(profile_id)
     ));
 
-    uint32_t response_generation = 0;
+    uint8_t response_ack[DECK_SETUP_PAIR_ACK_SIZE]{};
     assert(deck_setup_http_parse_pair_ack_request(
-        "response_generation=4294967295",
-        std::strlen("response_generation=4294967295"),
-        &response_generation
+        "response_ack=000102030405060708090a0b0c0d0e0f",
+        std::strlen("response_ack=000102030405060708090a0b0c0d0e0f"),
+        response_ack
     ));
-    assert(response_generation == UINT32_MAX);
+    for (size_t index = 0; index < sizeof(response_ack); ++index) {
+        assert(response_ack[index] == index);
+    }
     assert(!deck_setup_http_parse_pair_ack_request(
-        "response_generation=0",
-        std::strlen("response_generation=0"),
-        &response_generation
-    ));
-    assert(!deck_setup_http_parse_pair_ack_request(
-        "response_generation=4294967296",
-        std::strlen("response_generation=4294967296"),
-        &response_generation
+        "response_ack=00010203",
+        std::strlen("response_ack=00010203"),
+        response_ack
     ));
     assert(!deck_setup_http_parse_pair_ack_request(
-        "response_generation=1&extra=1",
-        std::strlen("response_generation=1&extra=1"),
-        &response_generation
+        "response_ack=000102030405060708090a0b0c0d0e0g",
+        std::strlen("response_ack=000102030405060708090a0b0c0d0e0g"),
+        response_ack
+    ));
+    assert(!deck_setup_http_parse_pair_ack_request(
+        "response_ack=000102030405060708090a0b0c0d0e0f&extra=1",
+        std::strlen("response_ack=000102030405060708090a0b0c0d0e0f&extra=1"),
+        response_ack
     ));
 }
 

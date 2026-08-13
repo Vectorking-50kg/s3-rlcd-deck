@@ -200,9 +200,9 @@ Profile set and Wi-Fi configuration unchanged.
 
 The one-time certificate-discovery request is allowed only while the computer is connected
 to the Deck's fresh random WPA2 Setup AP. The Deck validates the returned certificate hash
-before committing it. The Pairing response contains only an opaque transaction generation;
-Setup closes only after the browser has read that response and acknowledges the matching
-generation from the same Setup client over the temporary AP. A missing, stale, mismatched,
+before committing it. The Pairing response contains only a random 128-bit, single-use ACK
+capability; Setup closes only after the browser has read that response and returns the matching
+capability from the same Setup client over the temporary AP. A missing, stale, mismatched,
 or different-client acknowledgement keeps
 Setup active and reports an error. Normal operation never
 uses discovery trust: the `companion_link` module initiates WSS with the exact stored

@@ -44,10 +44,10 @@ constexpr char kPage[] =
     "pair.onsubmit=async e=>{e.preventDefault();let r=await fetch('/api/companions/pair',"
     "{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:"
     "new URLSearchParams(new FormData(pair))});let j=await r.json();state.textContent="
-    "JSON.stringify(j);pair.code.value='';if(r.ok&&Number.isInteger(j.response_generation))"
+    "JSON.stringify(j);pair.code.value='';if(r.ok&&/^[0-9a-f]{32}$/.test(j.response_ack))"
     "fetch('/api/companions/pair/ack',{method:'POST',headers:{'Content-Type':"
-    "'application/x-www-form-urlencoded'},body:new URLSearchParams({response_generation:"
-    "String(j.response_generation)})}).catch(()=>{})};"
+    "'application/x-www-form-urlencoded'},body:new URLSearchParams({response_ack:"
+    "j.response_ack})}).catch(()=>{})};"
     "temp.onsubmit=async e=>{e.preventDefault();let r=await fetch('/api/temperature',"
     "{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},"
     "body:new URLSearchParams(new FormData(temp))});show(await r.json());if(r.ok)"
@@ -521,31 +521,25 @@ deck_setup_companion_request_result_t deck_setup_http_parse_companion_pair_reque
 bool deck_setup_http_parse_pair_ack_request(
     const char *body,
     size_t body_size,
-    uint32_t *response_generation
+    uint8_t response_ack[DECK_SETUP_PAIR_ACK_SIZE]
 )
 {
-    constexpr char kPrefix[] = "response_generation=";
-    constexpr size_t kMaximumDigits = 10;
-    if (body == nullptr || response_generation == nullptr ||
-        body_size <= sizeof(kPrefix) - 1 ||
-        body_size > sizeof(kPrefix) - 1 + kMaximumDigits ||
+    constexpr char kPrefix[] = "response_ack=";
+    constexpr size_t kHexSize = 32;
+    if (body == nullptr || response_ack == nullptr ||
+        body_size != sizeof(kPrefix) - 1 + kHexSize ||
         std::memcmp(body, kPrefix, sizeof(kPrefix) - 1) != 0) {
         return false;
     }
-    uint64_t parsed = 0;
-    for (size_t index = sizeof(kPrefix) - 1; index < body_size; ++index) {
-        if (body[index] < '0' || body[index] > '9') {
+    for (size_t index = 0; index < DECK_SETUP_PAIR_ACK_SIZE; ++index) {
+        const int high = hex_value(body[sizeof(kPrefix) - 1 + index * 2]);
+        const int low = hex_value(body[sizeof(kPrefix) + index * 2]);
+        if (high < 0 || low < 0) {
+            std::memset(response_ack, 0, DECK_SETUP_PAIR_ACK_SIZE);
             return false;
         }
-        parsed = parsed * 10U + static_cast<uint64_t>(body[index] - '0');
-        if (parsed > UINT32_MAX) {
-            return false;
-        }
+        response_ack[index] = static_cast<uint8_t>((high << 4) | low);
     }
-    if (parsed == 0) {
-        return false;
-    }
-    *response_generation = static_cast<uint32_t>(parsed);
     return true;
 }
 

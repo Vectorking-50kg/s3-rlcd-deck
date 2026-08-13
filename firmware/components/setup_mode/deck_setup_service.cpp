@@ -36,6 +36,8 @@
 
 namespace {
 
+static_assert(DECK_SETUP_PAIR_ACK_SIZE == DECK_SETUP_RESPONSE_ACK_SIZE);
+
 constexpr EventBits_t kProfilesReadyBit = BIT4;
 constexpr EventBits_t kProfilesFailedBit = BIT5;
 
@@ -774,9 +776,12 @@ esp_err_t companion_pair_handler(httpd_req_t *request)
     Command command{};
     command.type = CommandType::pair_companion;
     command.companion_pair = pair_request;
+    uint8_t response_ack[DECK_SETUP_RESPONSE_ACK_SIZE];
+    fill_random(nullptr, response_ack, sizeof(response_ack));
     command.response_generation = deck_setup_response_barrier_issue(
         service->pair_response_barrier,
-        reinterpret_cast<sockaddr_in *>(&peer_address)->sin_addr.s_addr
+        reinterpret_cast<sockaddr_in *>(&peer_address)->sin_addr.s_addr,
+        response_ack
     );
     const bool queued = command.response_generation != 0 &&
                         enqueue_command(service, command);
@@ -792,22 +797,31 @@ esp_err_t companion_pair_handler(httpd_req_t *request)
         sizeof(command.companion_pair)
     );
     if (!queued) {
+        secure_clear(
+            reinterpret_cast<char *>(response_ack),
+            sizeof(response_ack)
+        );
         httpd_resp_set_status(request, "503 Service Unavailable");
         return send_json(request, "{\"accepted\":false,\"error\":\"busy\"}");
     }
     httpd_resp_set_status(request, "202 Accepted");
-    char response[96];
-    const int response_size = std::snprintf(
-        response,
-        sizeof(response),
-        "{\"accepted\":true,\"state\":\"queued\",\"response_generation\":%u}",
-        static_cast<unsigned>(command.response_generation)
-    );
-    if (response_size <= 0 ||
-        static_cast<size_t>(response_size) >= sizeof(response)) {
-        return ESP_FAIL;
+    char response[96] = "{\"accepted\":true,\"state\":\"queued\",\"response_ack\":\"";
+    constexpr char kHex[] = "0123456789abcdef";
+    size_t response_size = std::strlen(response);
+    for (size_t index = 0; index < sizeof(response_ack); ++index) {
+        response[response_size++] = kHex[response_ack[index] >> 4U];
+        response[response_size++] = kHex[response_ack[index] & 0x0fU];
     }
-    return send_json(request, response);
+    response[response_size++] = '"';
+    response[response_size++] = '}';
+    response[response_size] = '\0';
+    secure_clear(
+        reinterpret_cast<char *>(response_ack),
+        sizeof(response_ack)
+    );
+    const esp_err_t result = send_json(request, response);
+    secure_clear(response, sizeof(response));
+    return result;
 }
 
 esp_err_t companion_pair_ack_handler(httpd_req_t *request)
@@ -817,16 +831,20 @@ esp_err_t companion_pair_ack_handler(httpd_req_t *request)
         httpd_resp_set_status(request, "503 Service Unavailable");
         return send_json(request, "{\"accepted\":false,\"error\":\"setup_inactive\"}");
     }
-    char body[40];
+    char body[48];
     size_t received = 0;
-    uint32_t response_generation = 0;
+    uint8_t response_ack[DECK_SETUP_RESPONSE_ACK_SIZE]{};
     if (!receive_body(request, body, sizeof(body), &received) ||
         !deck_setup_http_parse_pair_ack_request(
             body,
             received,
-            &response_generation
+            response_ack
         )) {
         secure_clear(body, sizeof(body));
+        secure_clear(
+            reinterpret_cast<char *>(response_ack),
+            sizeof(response_ack)
+        );
         httpd_resp_set_status(request, "400 Bad Request");
         return send_json(request, "{\"accepted\":false,\"error\":\"malformed\"}");
     }
@@ -841,17 +859,29 @@ esp_err_t companion_pair_ack_handler(httpd_req_t *request)
             &peer_size
         ) != 0 ||
         peer_address.ss_family != AF_INET) {
+        secure_clear(
+            reinterpret_cast<char *>(response_ack),
+            sizeof(response_ack)
+        );
         httpd_resp_set_status(request, "400 Bad Request");
         return send_json(request, "{\"accepted\":false,\"error\":\"invalid_peer\"}");
     }
     if (!deck_setup_response_barrier_acknowledge(
             service->pair_response_barrier,
-            response_generation,
-            reinterpret_cast<sockaddr_in *>(&peer_address)->sin_addr.s_addr
+            reinterpret_cast<sockaddr_in *>(&peer_address)->sin_addr.s_addr,
+            response_ack
         )) {
+        secure_clear(
+            reinterpret_cast<char *>(response_ack),
+            sizeof(response_ack)
+        );
         httpd_resp_set_status(request, "409 Conflict");
         return send_json(request, "{\"accepted\":false,\"error\":\"not_pending\"}");
     }
+    secure_clear(
+        reinterpret_cast<char *>(response_ack),
+        sizeof(response_ack)
+    );
     if (service->service_task != nullptr) {
         xTaskNotifyGive(service->service_task);
     }
@@ -1941,14 +1971,21 @@ bool deck_setup_service_pair_companion(
     Command command{};
     command.type = CommandType::pair_companion;
     command.companion_pair = *request;
+    uint8_t response_ack[DECK_SETUP_RESPONSE_ACK_SIZE];
+    fill_random(nullptr, response_ack, sizeof(response_ack));
     command.response_generation = deck_setup_response_barrier_issue(
         service->pair_response_barrier,
-        0
+        0,
+        response_ack
     );
     if (command.response_generation == 0) {
         secure_clear(
             reinterpret_cast<char *>(&command.companion_pair),
             sizeof(command.companion_pair)
+        );
+        secure_clear(
+            reinterpret_cast<char *>(response_ack),
+            sizeof(response_ack)
         );
         return false;
     }
@@ -1956,8 +1993,8 @@ bool deck_setup_service_pair_companion(
     if (queued) {
         (void)deck_setup_response_barrier_acknowledge(
             service->pair_response_barrier,
-            command.response_generation,
-            0
+            0,
+            response_ack
         );
     } else {
         deck_setup_response_barrier_release(
@@ -1968,6 +2005,10 @@ bool deck_setup_service_pair_companion(
     secure_clear(
         reinterpret_cast<char *>(&command.companion_pair),
         sizeof(command.companion_pair)
+    );
+    secure_clear(
+        reinterpret_cast<char *>(response_ack),
+        sizeof(response_ack)
     );
     return queued;
 }

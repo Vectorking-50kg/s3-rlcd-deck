@@ -239,7 +239,7 @@ def test_profile_cleanup_revokes_only_temporary_profile_and_reselects_original()
 
 
 def test_pairing_closes_setup_only_after_client_acknowledges_the_202_body() -> None:
-    generation = 17
+    response_ack = "00112233445566778899aabbccddeeff"
     operations: list[tuple[str, str, dict[str, str]]] = []
 
     def pair_response(
@@ -249,7 +249,7 @@ def test_pairing_closes_setup_only_after_client_acknowledges_the_202_body() -> N
         return 202, {
             "accepted": True,
             "state": "queued",
-            "response_generation": generation,
+            "response_ack": response_ack,
         }
 
     def acknowledge(_base: str, path: str, fields: dict[str, str]) -> int:
@@ -269,7 +269,7 @@ def test_pairing_closes_setup_only_after_client_acknowledges_the_202_body() -> N
         (
             "form",
             "/api/companions/pair/ack",
-            {"response_generation": str(generation)},
+            {"response_ack": response_ack},
         ),
     ]
 

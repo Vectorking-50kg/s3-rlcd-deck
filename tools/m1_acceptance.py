@@ -685,25 +685,26 @@ def http_form_json(
 
 
 def submit_pairing(setup_base: str, hub_address: str, code: str) -> None:
-    status, response = http_form_json(
-        setup_base,
-        "/api/companions/pair",
-        {"hub_address": hub_address, "code": code},
-    )
-    generation = response.get("response_generation")
+    try:
+        status, response = http_form_json(
+            setup_base,
+            "/api/companions/pair",
+            {"hub_address": hub_address, "code": code},
+        )
+    except OSError as error:
+        raise AcceptanceFailure("Deck Pairing 202 response was not received") from error
+    response_ack = response.get("response_ack")
     if (
         status != 202
-        or not isinstance(generation, int)
-        or isinstance(generation, bool)
-        or generation <= 0
-        or generation > 0xFFFFFFFF
+        or not isinstance(response_ack, str)
+        or re.fullmatch(r"[0-9a-f]{32}", response_ack) is None
     ):
         raise AcceptanceFailure(f"Deck Pairing request returned {status}")
     try:
         acknowledged = http_form(
             setup_base,
             "/api/companions/pair/ack",
-            {"response_generation": str(generation)},
+            {"response_ack": response_ack},
         )
     except OSError:
         # The ACK is the final network message. Once the Deck receives it, the

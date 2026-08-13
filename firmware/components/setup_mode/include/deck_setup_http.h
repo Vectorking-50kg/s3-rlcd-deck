@@ -15,6 +15,7 @@ extern "C" {
 #endif
 
 #define DECK_SETUP_SCAN_SSID_CAPACITY 33
+#define DECK_SETUP_PAIR_ACK_SIZE 16
 
 typedef enum {
     DECK_SETUP_HTTP_NOT_FOUND = 0,
@@ -112,7 +113,7 @@ deck_setup_companion_request_result_t deck_setup_http_parse_companion_pair_reque
 bool deck_setup_http_parse_pair_ack_request(
     const char *body,
     size_t body_size,
-    uint32_t *response_generation
+    uint8_t response_ack[DECK_SETUP_PAIR_ACK_SIZE]
 );
 bool deck_setup_http_parse_companion_profile_request(
     const char *body,
