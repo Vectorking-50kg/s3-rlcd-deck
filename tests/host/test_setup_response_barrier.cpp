@@ -34,6 +34,8 @@ int main()
     assert(!deck_setup_response_barrier_is_complete(barrier, second));
     assert(deck_setup_response_barrier_acknowledge(barrier, first_client, first_ack));
     assert(deck_setup_response_barrier_is_complete(barrier, first));
+    // A capability is consumed atomically by its first successful acknowledgement.
+    assert(!deck_setup_response_barrier_acknowledge(barrier, first_client, first_ack));
     assert(deck_setup_response_barrier_acknowledge(barrier, second_client, second_ack));
     assert(deck_setup_response_barrier_is_complete(barrier, second));
     uint32_t generations[6]{};

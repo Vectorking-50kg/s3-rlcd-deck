@@ -119,6 +119,7 @@ bool deck_setup_response_barrier_acknowledge(
             );
         }
         if (barrier->slots[index].generation != 0 &&
+            !barrier->slots[index].complete &&
             barrier->slots[index].client_ipv4 == client_ipv4 &&
             difference == 0) {
             barrier->slots[index].complete = true;
