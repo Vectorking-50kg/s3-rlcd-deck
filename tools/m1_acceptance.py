@@ -795,6 +795,51 @@ def connect_wifi(ssid: str, password: str | None = None) -> None:
         raise AcceptanceFailure("cannot switch the Mac Wi-Fi network")
 
 
+def set_wifi_power(enabled: bool) -> None:
+    try:
+        result = subprocess.run(
+            ["networksetup", "-setairportpower", "en0", "on" if enabled else "off"],
+            capture_output=True,
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise AcceptanceFailure("Mac Wi-Fi interface reset timed out") from error
+    if result.returncode != 0:
+        raise AcceptanceFailure("cannot reset the Mac Wi-Fi interface")
+
+
+def host_is_reachable(host: str) -> bool:
+    return subprocess.run(
+        ["ping", "-c", "1", "-W", "1000", host], capture_output=True
+    ).returncode == 0
+
+
+def connect_wifi_for_host(
+    ssid: str,
+    password: str | None,
+    host: str,
+    timeout: float,
+) -> None:
+    deadline = time.monotonic() + timeout
+    connect_wifi(ssid, password)
+    recovery_attempted = False
+    while time.monotonic() < deadline:
+        if host_is_reachable(host):
+            return
+        if not recovery_attempted:
+            # CoreWLAN occasionally reports success while retaining the prior
+            # association. Reset the interface once, then retry the same target
+            # and prove success by reachability instead of command exit status.
+            set_wifi_power(False)
+            time.sleep(2)
+            set_wifi_power(True)
+            time.sleep(3)
+            connect_wifi(ssid, password)
+            recovery_attempted = True
+        time.sleep(0.5)
+    raise AcceptanceFailure(f"network host {host} did not become reachable")
+
+
 def forget_wifi(ssid: str) -> bool:
     if not ssid:
         return True
@@ -836,8 +881,9 @@ def pair_deck(
     secrets.add(str(issued["code"]))
     access = enter_setup_access(serial_evidence, cleanup, stage)
     secrets.add(access["password"])
-    connect_wifi(access["ssid"], access["password"])
-    wait_for_host(access["address"], stage_timeout)
+    connect_wifi_for_host(
+        access["ssid"], access["password"], access["address"], stage_timeout
+    )
     setup_base = f"http://{access['address']}"
     if before_submit is not None:
         before_submit(setup_base)
@@ -1264,8 +1310,12 @@ def main() -> int:
             "restore original Companion Profiles",
         )
         secrets.add(cleanup_access["password"])
-        connect_wifi(cleanup_access["ssid"], cleanup_access["password"])
-        wait_for_host(cleanup_access["address"], arguments.stage_timeout)
+        connect_wifi_for_host(
+            cleanup_access["ssid"],
+            cleanup_access["password"],
+            cleanup_access["address"],
+            arguments.stage_timeout,
+        )
         restore_companion_profiles(
             f"http://{cleanup_access['address']}",
             cleanup.original_profiles,
@@ -1319,8 +1369,12 @@ def main() -> int:
                         "cleanup Profile compensation",
                     )
                     secrets.add(access["password"])
-                    connect_wifi(access["ssid"], access["password"])
-                    wait_for_host(access["address"], arguments.stage_timeout)
+                    connect_wifi_for_host(
+                        access["ssid"],
+                        access["password"],
+                        access["address"],
+                        arguments.stage_timeout,
+                    )
                     restore_companion_profiles(
                         f"http://{access['address']}",
                         cleanup.original_profiles,

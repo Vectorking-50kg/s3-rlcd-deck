@@ -434,7 +434,34 @@ def test_dev_setup_window_outlives_slow_association() -> None:
     defaults = (
         m1.REPOSITORY_ROOT / "firmware/sdkconfig.defaults.dev"
     ).read_text(encoding="utf-8")
-    assert "CONFIG_DECK_SETUP_INACTIVITY_TIMEOUT_SECONDS=90" in defaults
+    assert "CONFIG_DECK_SETUP_INACTIVITY_TIMEOUT_SECONDS=120" in defaults
+
+
+def test_setup_wifi_recovery_requires_the_target_host_to_be_reachable() -> None:
+    operations: list[tuple[str, object]] = []
+    reachable = iter([False, False, True])
+
+    def connect(ssid: str, password: str | None) -> None:
+        operations.append(("connect", (ssid, password)))
+
+    def power(enabled: bool) -> None:
+        operations.append(("power", enabled))
+
+    with mock.patch.object(m1, "connect_wifi", side_effect=connect), mock.patch.object(
+        m1, "set_wifi_power", side_effect=power
+    ), mock.patch.object(
+        m1, "host_is_reachable", side_effect=lambda _host: next(reachable)
+    ), mock.patch.object(m1.time, "sleep"), mock.patch.object(
+        m1.time,
+        "monotonic",
+        side_effect=[0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+    ):
+        m1.connect_wifi_for_host("Setup", "password", "192.168.4.1", 90)
+
+    assert operations[0][0] == "connect"
+    assert ("power", False) in operations
+    assert ("power", True) in operations
+    assert sum(name == "connect" for name, _ in operations) == 2
 
 
 def test_diagnostic_console_resets_usb_after_app_only_jtag_flash() -> None:
@@ -562,6 +589,7 @@ if __name__ == "__main__":
     test_wifi_switch_allows_slow_macos_association()
     test_wifi_switch_timeout_never_exposes_the_password()
     test_dev_setup_window_outlives_slow_association()
+    test_setup_wifi_recovery_requires_the_target_host_to_be_reachable()
     test_cleanup_transaction_records_intent_before_observation()
     test_setup_restart_requires_explicit_inactive_observation()
     test_exact_link_error_gate_rejects_unrelated_failures()
