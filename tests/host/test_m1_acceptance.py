@@ -312,7 +312,9 @@ def test_cleanup_attempts_every_setup_network_when_one_removal_fails() -> None:
 
 
 def test_preflight_uses_the_users_zsh_for_idf_activation() -> None:
-    with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+    with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+        m1.os.environ, {}, clear=True
+    ), mock.patch.object(
         pathlib.Path, "home", return_value=pathlib.Path(directory)
     ), mock.patch.object(m1.subprocess, "run") as run:
         idf = pathlib.Path(directory) / ".espressif/v6.0.2/esp-idf"
