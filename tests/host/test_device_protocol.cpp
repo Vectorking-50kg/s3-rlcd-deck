@@ -63,11 +63,34 @@ void shared_heartbeat_fixtures_match_the_device_contract()
     ));
 }
 
+void exact_certificate_pin_rejects_a_wrong_digest()
+{
+    uint8_t digest[32]{};
+    assert(deck_device_protocol_fingerprint_matches_sha256(
+        digest,
+        "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    ));
+    digest[31] = 1;
+    assert(!deck_device_protocol_fingerprint_matches_sha256(
+        digest,
+        "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    ));
+    assert(deck_device_protocol_fingerprint_matches_sha256(
+        digest,
+        "sha256:0000000000000000000000000000000000000000000000000000000000000001"
+    ));
+    assert(!deck_device_protocol_fingerprint_matches_sha256(
+        digest,
+        "SHA256:0000000000000000000000000000000000000000000000000000000000000001"
+    ));
+}
+
 }  // namespace
 
 int main()
 {
     shared_hello_fixtures_match_the_device_contract();
     shared_heartbeat_fixtures_match_the_device_contract();
+    exact_certificate_pin_rejects_a_wrong_digest();
     return 0;
 }

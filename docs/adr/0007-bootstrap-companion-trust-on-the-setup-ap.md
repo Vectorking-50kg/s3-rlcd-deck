@@ -13,3 +13,13 @@ and its per-Deck Token. We reject trusting a certificate supplied over the ordin
 asking users to bypass browser certificate warnings, globally discovering Companions, and
 silently accepting certificate replacement. Replacing the Companion certificate requires
 an explicit new Pairing session.
+
+The five Profile set is stored transactionally in a dedicated 64 KiB `companion_nvs`
+partition. This keeps the existing Wi-Fi/settings partition independent and reserves enough
+space for the candidate, both committed 8 KiB records, and NVS replacement/garbage-collection
+overhead at maximum certificate size. The two OTA application slots retain their established
+offsets.
+
+The ESP-IDF WebSocket transport normally logs the complete upgrade request on a failed write.
+Because that request carries the per-Deck bearer Token, the firmware compiles `tcp_transport`
+with logging disabled and publishes only Deck-owned redacted connection states.

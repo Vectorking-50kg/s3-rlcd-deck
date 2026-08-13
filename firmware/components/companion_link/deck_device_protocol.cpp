@@ -4,6 +4,8 @@
 
 namespace {
 
+constexpr char kHex[] = "0123456789abcdef";
+
 class JsonCursor {
 public:
     JsonCursor(const char *message, size_t size)
@@ -341,6 +343,29 @@ bool parse_canonical_utc(const char *value, uint64_t *unix_ms)
 }
 
 }  // namespace
+
+bool deck_device_protocol_fingerprint_matches_sha256(
+    const uint8_t digest[32],
+    const char *fingerprint
+)
+{
+    constexpr char kPrefix[] = "sha256:";
+    if (digest == nullptr || fingerprint == nullptr ||
+        std::strlen(fingerprint) != 71 ||
+        std::memcmp(fingerprint, kPrefix, sizeof(kPrefix) - 1) != 0) {
+        return false;
+    }
+    uint8_t difference = 0;
+    for (size_t index = 0; index < 32; ++index) {
+        difference |= static_cast<uint8_t>(
+            fingerprint[7 + index * 2] ^ kHex[digest[index] >> 4U]
+        );
+        difference |= static_cast<uint8_t>(
+            fingerprint[8 + index * 2] ^ kHex[digest[index] & 0x0fU]
+        );
+    }
+    return difference == 0;
+}
 
 bool deck_device_protocol_validate_hello(
     const char *message,

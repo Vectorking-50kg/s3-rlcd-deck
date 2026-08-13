@@ -129,6 +129,10 @@ bool deck_transaction_store_snapshot(
 deck_transaction_nvs_storage_t *deck_transaction_nvs_storage_open(
     const char *namespace_name
 );
+deck_transaction_nvs_storage_t *deck_transaction_nvs_storage_open_from_partition(
+    const char *partition_name,
+    const char *namespace_name
+);
 void deck_transaction_nvs_storage_close(deck_transaction_nvs_storage_t *storage);
 bool deck_transaction_nvs_storage_adapter(
     deck_transaction_nvs_storage_t *storage,

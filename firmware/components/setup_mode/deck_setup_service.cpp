@@ -1,5 +1,7 @@
 #include "deck_setup_service.h"
 
+#include "deck_setup_command_queue.h"
+
 #include "deck_setup_http.h"
 #include "deck_setup_confirmation.h"
 #include "deck_device_settings_nvs.h"
@@ -53,26 +55,21 @@ constexpr uint64_t kValidationTimeoutMs =
     static_cast<uint64_t>(CONFIG_DECK_WIFI_VALIDATION_TIMEOUT_SECONDS) * 1'000U;
 constexpr uint64_t kClearConfirmationLifetimeMs = 60'000;
 
-enum class CommandType : uint8_t {
-    enter_from_boot,
-    submit_wifi,
-    validation_connected,
-    validation_auth_failed,
-    validation_connection_failed,
-    submit_temperature_offset,
-    clear_wifi,
-    pair_companion,
-    select_companion,
-    revoke_companion,
-};
-
-struct Command {
-    CommandType type = CommandType::enter_from_boot;
-    deck_wifi_credentials_t credentials{};
-    int16_t temperature_offset_tenths_c = 0;
-    deck_companion_pair_request_t companion_pair{};
-    char companion_profile_id[DECK_COMPANION_PROFILE_ID_CAPACITY]{};
-};
+using Command = deck_setup_command_t;
+namespace CommandType {
+constexpr auto enter_from_boot = DECK_SETUP_COMMAND_ENTER_FROM_BOOT;
+constexpr auto submit_wifi = DECK_SETUP_COMMAND_SUBMIT_WIFI;
+constexpr auto validation_connected = DECK_SETUP_COMMAND_VALIDATION_CONNECTED;
+constexpr auto validation_auth_failed = DECK_SETUP_COMMAND_VALIDATION_AUTH_FAILED;
+constexpr auto validation_connection_failed =
+    DECK_SETUP_COMMAND_VALIDATION_CONNECTION_FAILED;
+constexpr auto submit_temperature_offset =
+    DECK_SETUP_COMMAND_SUBMIT_TEMPERATURE_OFFSET;
+constexpr auto clear_wifi = DECK_SETUP_COMMAND_CLEAR_WIFI;
+constexpr auto pair_companion = DECK_SETUP_COMMAND_PAIR_COMPANION;
+constexpr auto select_companion = DECK_SETUP_COMMAND_SELECT_COMPANION;
+constexpr auto revoke_companion = DECK_SETUP_COMMAND_REVOKE_COMPANION;
+}  // namespace CommandType
 
 enum class EnterSessionResult : uint8_t {
     handled,
@@ -137,9 +134,10 @@ struct deck_setup_service {
     void *callback_context;
     SemaphoreHandle_t state_mutex;
     SemaphoreHandle_t network_mutex;
-    QueueHandle_t commands;
+    deck_setup_command_queue_t *commands;
     QueueHandle_t notifications;
     TaskHandle_t publisher_task;
+    TaskHandle_t service_task;
     EventGroupHandle_t wifi_events;
     esp_event_handler_instance_t wifi_event_handler;
     esp_event_handler_instance_t ip_event_handler;
@@ -274,11 +272,14 @@ void publisher_task(void *task_context)
 bool enqueue_command(deck_setup_service_t *service, const Command &command)
 {
     if (service == nullptr ||
-        xQueueSend(service->commands, &command, 0) != pdPASS) {
+        !deck_setup_command_queue_try_send(service->commands, &command)) {
         if (service != nullptr) {
             service->command_overflow.store(true, std::memory_order_release);
         }
         return false;
+    }
+    if (service->service_task != nullptr) {
+        xTaskNotifyGive(service->service_task);
     }
     return true;
 }
@@ -307,13 +308,10 @@ void wifi_event(void *context, esp_event_base_t, int32_t event_id, void *event_d
         }
         const auto *disconnected =
             static_cast<const wifi_event_sta_disconnected_t *>(event_data);
-        const Command command = {
-            authentication_failure(disconnected->reason)
-                ? CommandType::validation_auth_failed
-                : CommandType::validation_connection_failed,
-            {},
-            0,
-        };
+        Command command{};
+        command.type = authentication_failure(disconnected->reason)
+                           ? CommandType::validation_auth_failed
+                           : CommandType::validation_connection_failed;
         (void)enqueue_command(service, command);
     }
 }
@@ -326,7 +324,8 @@ void ip_event(void *context, esp_event_base_t, int32_t event_id, void *)
     }
     xEventGroupSetBits(service->wifi_events, kStaGotIpBit);
     if (service->accepting_commands.load(std::memory_order_acquire)) {
-        const Command command = {CommandType::validation_connected, {}, 0};
+        Command command{};
+        command.type = CommandType::validation_connected;
         (void)enqueue_command(service, command);
     }
 }
@@ -521,7 +520,8 @@ esp_err_t wifi_handler(httpd_req_t *request)
         return send_json(request, "{\"accepted\":false,\"error\":\"malformed\"}");
     }
 
-    Command command{CommandType::submit_wifi, {}, 0};
+    Command command{};
+    command.type = CommandType::submit_wifi;
     const deck_setup_wifi_request_result_t parsed = deck_setup_http_parse_wifi_request(
         body,
         received,
@@ -1173,6 +1173,9 @@ const char *initialize_wifi(deck_setup_service_t *service)
     if (nvs_result != ESP_OK) {
         return "nvs_init";
     }
+    if (nvs_flash_init_partition("companion_nvs") != ESP_OK) {
+        return "companion_nvs_init";
+    }
     const esp_err_t netif_result = esp_netif_init();
     if (netif_result != ESP_OK && netif_result != ESP_ERR_INVALID_STATE) {
         return "netif_init";
@@ -1328,7 +1331,18 @@ void service_task(void *task_context)
     bool boot_enter_pending = false;
     while (true) {
         Command command{};
-        if (xQueueReceive(service->commands, &command, kServicePollTicks) == pdTRUE) {
+        bool received = deck_setup_command_queue_try_receive(
+            service->commands,
+            &command
+        );
+        if (!received) {
+            (void)ulTaskNotifyTake(pdTRUE, kServicePollTicks);
+            received = deck_setup_command_queue_try_receive(
+                service->commands,
+                &command
+            );
+        }
+        if (received) {
             switch (command.type) {
                 case CommandType::enter_from_boot:
                     boot_enter_pending = true;
@@ -1554,6 +1568,7 @@ void service_task(void *task_context)
                     break;
                 }
             }
+            deck_setup_command_clear(&command);
         }
         if (service->command_overflow.exchange(false, std::memory_order_acq_rel)) {
             notify(service, DECK_SETUP_SERVICE_ERROR, "command_queue");
@@ -1612,7 +1627,7 @@ void release_unstarted(deck_setup_service_t *service)
         vTaskDelete(service->publisher_task);
     }
     if (service->commands != nullptr) {
-        vQueueDelete(service->commands);
+        deck_setup_command_queue_destroy(service->commands);
     }
     if (service->notifications != nullptr) {
         vQueueDelete(service->notifications);
@@ -1649,7 +1664,7 @@ deck_setup_service_t *deck_setup_service_start(
     service->network_mutex = xSemaphoreCreateMutex();
     // A BOOT request means "enter now" rather than "enter N times". Coalesce
     // repeated notifications while the service task is busy with a scan or restart.
-    service->commands = xQueueCreate(8, sizeof(Command));
+    service->commands = deck_setup_command_queue_create();
     // State publication is latest-only: a slow external callback must not leave
     // stale credentials or ACTIVE state queued ahead of the terminal state.
     service->notifications = xQueueCreate(1, sizeof(ServiceNotification));
@@ -1693,7 +1708,7 @@ deck_setup_service_t *deck_setup_service_start(
             kServiceTaskStackBytes,
             service,
             kServiceTaskPriority,
-            nullptr,
+            &service->service_task,
             0
         ) != pdPASS) {
         release_unstarted(service);
@@ -1708,7 +1723,8 @@ bool deck_setup_service_enter_from_boot(deck_setup_service_t *service)
         !service->accepting_commands.load(std::memory_order_acquire)) {
         return false;
     }
-    const Command command = {CommandType::enter_from_boot, {}, 0};
+    Command command{};
+    command.type = CommandType::enter_from_boot;
     return enqueue_command(service, command);
 }
 
@@ -1730,8 +1746,12 @@ bool deck_setup_service_submit_wifi(
     if (!setup_active) {
         return false;
     }
-    const Command command = {CommandType::submit_wifi, *credentials, 0};
-    return enqueue_command(service, command);
+    Command command{};
+    command.type = CommandType::submit_wifi;
+    command.credentials = *credentials;
+    const bool queued = enqueue_command(service, command);
+    deck_wifi_credentials_clear(&command.credentials);
+    return queued;
 }
 
 bool deck_setup_service_submit_temperature_offset(
@@ -1756,11 +1776,9 @@ bool deck_setup_service_submit_temperature_offset(
     if (!setup_active) {
         return false;
     }
-    const Command command = {
-        CommandType::submit_temperature_offset,
-        {},
-        temperature_offset_tenths_c,
-    };
+    Command command{};
+    command.type = CommandType::submit_temperature_offset;
+    command.temperature_offset_tenths_c = temperature_offset_tenths_c;
     return enqueue_command(service, command);
 }
 
@@ -1801,7 +1819,7 @@ namespace {
 bool queue_companion_profile_command(
     deck_setup_service_t *service,
     const char *profile_id,
-    CommandType type
+    deck_setup_command_type_t type
 )
 {
     if (service == nullptr || profile_id == nullptr ||
@@ -1931,7 +1949,8 @@ deck_setup_wifi_clear_confirm_result_t deck_setup_service_confirm_wifi_clear(
         default:
             break;
     }
-    const Command command = {CommandType::clear_wifi, {}, 0};
+    Command command{};
+    command.type = CommandType::clear_wifi;
     return enqueue_command(service, command) ? DECK_SETUP_WIFI_CLEAR_QUEUED
                                              : DECK_SETUP_WIFI_CLEAR_BUSY;
 }

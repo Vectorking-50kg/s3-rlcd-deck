@@ -152,6 +152,17 @@ deck_add_host_test(
         ../../firmware/components/setup_mode/deck_setup_confirmation.cpp
     INCLUDE_DIRS ../../firmware/components/setup_mode/include
 )
+deck_add_host_test(
+    test_setup_command_queue
+    SOURCES
+        test_setup_command_queue.cpp
+        ../../firmware/components/setup_mode/deck_setup_command_queue.cpp
+    INCLUDE_DIRS
+        ../../firmware/components/companion_profiles/include
+        ../../firmware/components/setup_mode/include
+        ../../firmware/components/transaction_store/include
+        ../../firmware/components/wifi_config/include
+)
 
 add_test(
     NAME hil_boot_smoke_replay

@@ -28,6 +28,7 @@ type Config struct {
 	HeartbeatInterval time.Duration
 	HeartbeatTimeout  time.Duration
 	Now               func() time.Time
+	Elapsed           func() time.Duration
 }
 
 type Hub struct {
@@ -35,7 +36,7 @@ type Hub struct {
 	heartbeatInterval time.Duration
 	heartbeatTimeout  time.Duration
 	now               func() time.Time
-	started           time.Time
+	elapsed           func() time.Duration
 	done              chan struct{}
 	closeOnce         sync.Once
 
@@ -74,13 +75,16 @@ func New(config Config) (*Hub, error) {
 	if config.Now == nil {
 		config.Now = time.Now
 	}
-	started := config.Now().UTC()
+	if config.Elapsed == nil {
+		started := time.Now()
+		config.Elapsed = func() time.Duration { return time.Since(started) }
+	}
 	return &Hub{
 		authenticator:     config.Authenticator,
 		heartbeatInterval: config.HeartbeatInterval,
 		heartbeatTimeout:  config.HeartbeatTimeout,
 		now:               config.Now,
-		started:           started,
+		elapsed:           config.Elapsed,
 		done:              make(chan struct{}),
 		connections:       make(map[*websocket.Conn]struct{}),
 		sessions:          make(map[string]*websocket.Conn),
@@ -281,15 +285,15 @@ func readFrames(connection *websocket.Conn, frames chan<- receivedFrame) {
 }
 
 func (hub *Hub) writeHeartbeat(connection *websocket.Conn) bool {
-	now := hub.now().UTC()
-	elapsed := now.Sub(hub.started)
+	now := hub.now()
+	elapsed := hub.elapsed()
 	if elapsed < 0 {
 		elapsed = 0
 	}
 	message, err := json.Marshal(Heartbeat{
 		Type:            MessageHeartbeat,
 		ProtocolVersion: ProtocolVersion,
-		UTC:             now.Format(time.RFC3339Nano),
+		UTC:             now.UTC().Format(time.RFC3339Nano),
 		MonotonicMS:     uint64(elapsed / time.Millisecond),
 		TXQueueDepth:    0,
 		TXQueueCapacity: 1,

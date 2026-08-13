@@ -151,6 +151,56 @@ func TestHubAuthenticatesThenRequiresDeviceHelloBeforeHeartbeat(t *testing.T) {
 	}
 }
 
+func TestServerHeartbeatUsesMonotonicElapsedAcrossWallClockCorrection(t *testing.T) {
+	authenticator := &testAuthenticator{}
+	base := time.Date(2026, 8, 13, 1, 2, 3, 0, time.UTC)
+	clockCalls := 0
+	elapsedCalls := 0
+	hub, err := New(Config{
+		Authenticator:     authenticator,
+		HeartbeatInterval: 20 * time.Millisecond,
+		HeartbeatTimeout:  100 * time.Millisecond,
+		Now: func() time.Time {
+			clockCalls++
+			return base.Add(-time.Duration(clockCalls-1) * time.Hour)
+		},
+		Elapsed: func() time.Duration {
+			elapsedCalls++
+			return time.Duration(elapsedCalls*10) * time.Millisecond
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewTLSServer(hub)
+	defer func() {
+		hub.Close()
+		server.Close()
+	}()
+	connection, _, err := dialTestDeck(t, server, testDeviceID, testDeviceToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.CloseNow()
+	if err = connection.Write(context.Background(), websocket.MessageText, validHello()); err != nil {
+		t.Fatal(err)
+	}
+	var first Heartbeat
+	if err = json.Unmarshal(readText(t, connection, time.Second), &first); err != nil {
+		t.Fatal(err)
+	}
+	var second Heartbeat
+	if err = json.Unmarshal(readText(t, connection, time.Second), &second); err != nil {
+		t.Fatal(err)
+	}
+	if first.MonotonicMS != 10 || second.MonotonicMS != 20 {
+		t.Fatalf("monotonic sequence = %d, %d", first.MonotonicMS, second.MonotonicMS)
+	}
+	if first.UTC <= second.UTC {
+		t.Fatalf("test clock did not move backward: %q then %q", first.UTC, second.UTC)
+	}
+}
+
 func TestHubRejectsWrongOrRevokedDeviceTokenBeforeUpgrade(t *testing.T) {
 	_, authenticator, server := newTestHub(t)
 	for name, token := range map[string]string{"wrong": "wrong-token", "revoked": testDeviceToken} {

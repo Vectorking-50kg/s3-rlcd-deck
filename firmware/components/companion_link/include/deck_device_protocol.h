@@ -16,6 +16,12 @@ typedef struct {
     uint64_t monotonic_ms;
 } deck_device_heartbeat_t;
 
+/* Constant-time comparison after validating the canonical lowercase wire form. */
+bool deck_device_protocol_fingerprint_matches_sha256(
+    const uint8_t digest[32],
+    const char *fingerprint
+);
+
 bool deck_device_protocol_validate_hello(
     const char *message,
     size_t message_size,

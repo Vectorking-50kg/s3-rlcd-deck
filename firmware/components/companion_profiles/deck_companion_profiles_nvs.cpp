@@ -3,12 +3,13 @@
 namespace {
 
 constexpr char kNamespace[] = "deck_companion";
+constexpr char kPartition[] = "companion_nvs";
 
 }  // namespace
 
 deck_companion_profiles_nvs_storage_t *deck_companion_profiles_nvs_storage_open(void)
 {
-    return deck_transaction_nvs_storage_open(kNamespace);
+    return deck_transaction_nvs_storage_open_from_partition(kPartition, kNamespace);
 }
 
 void deck_companion_profiles_nvs_storage_close(

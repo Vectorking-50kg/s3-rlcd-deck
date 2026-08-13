@@ -270,22 +270,12 @@ bool certificate_matches(const deck_companion_profile_secret_t &secret)
         digest_size != sizeof(digest)) {
         return false;
     }
-    constexpr char kHex[] = "0123456789abcdef";
-    char fingerprint[72] = "sha256:";
-    for (size_t index = 0; index < sizeof(digest); ++index) {
-        fingerprint[7 + index * 2] = kHex[digest[index] >> 4U];
-        fingerprint[8 + index * 2] = kHex[digest[index] & 0x0fU];
-    }
-    fingerprint[71] = '\0';
-    uint8_t difference = 0;
-    for (size_t index = 0; index < 71; ++index) {
-        difference |= static_cast<uint8_t>(
-            fingerprint[index] ^ secret.certificate_fingerprint[index]
-        );
-    }
+    const bool matches = deck_device_protocol_fingerprint_matches_sha256(
+        digest,
+        secret.certificate_fingerprint
+    );
     secure_clear(digest, sizeof(digest));
-    secure_clear(fingerprint, sizeof(fingerprint));
-    return difference == 0;
+    return matches;
 }
 
 bool start_transport(deck_companion_link_t *link)

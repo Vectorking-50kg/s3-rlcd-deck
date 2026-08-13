@@ -8,7 +8,7 @@ extern "C" {
 
 typedef deck_transaction_nvs_storage_t deck_companion_profiles_nvs_storage_t;
 
-/* nvs_flash_init() must succeed before opening this namespaced store. */
+/* nvs_flash_init_partition("companion_nvs") must succeed before opening. */
 deck_companion_profiles_nvs_storage_t *deck_companion_profiles_nvs_storage_open(void);
 void deck_companion_profiles_nvs_storage_close(
     deck_companion_profiles_nvs_storage_t *storage

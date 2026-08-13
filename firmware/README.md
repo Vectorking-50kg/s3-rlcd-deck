@@ -188,7 +188,10 @@ namespace. It preserves `deck_settings`, other NVS namespaces, the rest of Flash
 ## Companion Pairing and Device Link
 
 The Deck transactionally stores at most five versioned Companion Profiles in the
-`deck_companions` NVS namespace. A Profile contains its redacted display fields plus an
+`deck_companion` namespace of the dedicated 64 KiB `companion_nvs` partition. The
+partition is provisioned for the candidate and both committed maximum-size Profile-set
+records plus NVS replacement/GC overhead; Wi-Fi and device settings remain in the legacy
+NVS partition. A Profile contains its redacted display fields plus an
 independent device Token and the exact Device Hub certificate DER/fingerprint. Status and
 Setup responses never expose the Token or certificate bytes. A failed redeem, malformed
 credential, capacity limit, NVS error, or interrupted write leaves the last committed
@@ -201,7 +204,9 @@ uses discovery trust: the `companion_link` module initiates WSS with the exact s
 certificate, device identity, and per-Deck Token. It sends `device.hello` first, accepts
 only strict version-1 heartbeat frames up to 16 KiB, marks the Companion offline after 30
 seconds without a valid heartbeat, and reconnects with exponential delay capped at 30
-seconds. All credentials remain private to the Profile and Device Link modules.
+seconds. The ESP-IDF `tcp_transport` component is compiled without log calls because its
+stock handshake error path prints custom headers; Deck-owned diagnostics remain redacted.
+All credentials remain private to the Profile and Device Link modules.
 
 ## Long-duration HIL
 
