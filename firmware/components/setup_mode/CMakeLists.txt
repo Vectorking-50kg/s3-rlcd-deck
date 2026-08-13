@@ -3,6 +3,7 @@ idf_component_register(
         "deck_setup_mode.cpp"
         "deck_setup_confirmation.cpp"
         "deck_setup_command_queue.cpp"
+        "deck_setup_response_barrier.cpp"
         "deck_setup_http.cpp"
         "deck_setup_service.cpp"
     INCLUDE_DIRS "include"

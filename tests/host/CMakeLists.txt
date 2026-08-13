@@ -163,6 +163,13 @@ deck_add_host_test(
         ../../firmware/components/transaction_store/include
         ../../firmware/components/wifi_config/include
 )
+deck_add_host_test(
+    test_setup_response_barrier
+    SOURCES
+        test_setup_response_barrier.cpp
+        ../../firmware/components/setup_mode/deck_setup_response_barrier.cpp
+    INCLUDE_DIRS ../../firmware/components/setup_mode/include
+)
 
 add_test(
     NAME hil_boot_smoke_replay

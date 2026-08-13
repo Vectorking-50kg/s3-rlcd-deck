@@ -22,6 +22,7 @@ deck_setup_command_t companion_command(size_t index)
         std::memcpy(command.companion_pair.code, "123456", 7);
     }
     command.temperature_offset_tenths_c = static_cast<int16_t>(index);
+    command.response_generation = static_cast<uint32_t>(index + 1);
     return command;
 }
 
@@ -46,6 +47,7 @@ void concurrent_setup_producers_use_the_production_bounded_queue()
             if (command.type == DECK_SETUP_COMMAND_PAIR_COMPANION) {
                 assert(std::strcmp(command.companion_pair.code, "123456") == 0);
             }
+            assert(command.response_generation != 0);
             deck_setup_command_clear(&command);
             ++consumed;
         }
@@ -87,6 +89,7 @@ void full_queue_fails_closed_without_overwriting_secrets()
         deck_setup_command_t command{};
         assert(deck_setup_command_queue_try_receive(queue, &command));
         assert(command.temperature_offset_tenths_c == static_cast<int16_t>(index));
+        assert(command.response_generation == index + 1);
         deck_setup_command_clear(&command);
     }
     deck_setup_command_queue_destroy(queue);

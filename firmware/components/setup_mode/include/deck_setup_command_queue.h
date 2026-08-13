@@ -31,6 +31,7 @@ typedef struct {
     deck_wifi_credentials_t credentials;
     int16_t temperature_offset_tenths_c;
     deck_companion_pair_request_t companion_pair;
+    uint32_t response_generation;
     char companion_profile_id[DECK_COMPANION_PROFILE_ID_CAPACITY];
 } deck_setup_command_t;
 

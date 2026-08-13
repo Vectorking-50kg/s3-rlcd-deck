@@ -1,6 +1,7 @@
 #include "deck_setup_service.h"
 
 #include "deck_setup_command_queue.h"
+#include "deck_setup_response_barrier.h"
 
 #include "deck_setup_http.h"
 #include "deck_setup_confirmation.h"
@@ -47,6 +48,7 @@ constexpr uint32_t kPublisherTaskStackBytes = 4'096;
 constexpr UBaseType_t kPublisherTaskPriority = 1;
 constexpr TickType_t kServicePollTicks = pdMS_TO_TICKS(100);
 constexpr TickType_t kWifiEventTimeoutTicks = pdMS_TO_TICKS(2'000);
+constexpr uint64_t kPairResponseTimeoutMs = 2'000;
 constexpr size_t kErrorStageCapacity = 24;
 constexpr EventBits_t kApStartedBit = BIT0;
 constexpr EventBits_t kApStoppedBit = BIT1;
@@ -82,6 +84,11 @@ struct ServiceNotification {
     deck_wifi_config_snapshot_t wifi;
     deck_device_settings_snapshot_t settings;
     char error_stage[kErrorStageCapacity];
+};
+
+struct PairResponseCompletion {
+    deck_setup_service_t *service;
+    uint32_t generation;
 };
 
 uint64_t monotonic_ms()
@@ -160,6 +167,7 @@ struct deck_setup_service {
     std::atomic<bool> suppress_disconnect{false};
     std::atomic<bool> command_overflow{false};
     std::atomic<bool> accepting_commands{false};
+    deck_setup_response_barrier_t *pair_response_barrier;
 };
 
 namespace {
@@ -282,6 +290,50 @@ bool enqueue_command(deck_setup_service_t *service, const Command &command)
         xTaskNotifyGive(service->service_task);
     }
     return true;
+}
+
+bool wait_for_pair_response(
+    deck_setup_service_t *service,
+    uint32_t response_generation
+)
+{
+    const uint64_t deadline_ms = monotonic_ms() + kPairResponseTimeoutMs;
+    while (!deck_setup_response_barrier_is_complete(
+        service->pair_response_barrier,
+        response_generation
+    )) {
+        const uint64_t now_ms = monotonic_ms();
+        if (now_ms >= deadline_ms) {
+            return false;
+        }
+        const uint64_t remaining_ms = deadline_ms - now_ms;
+        (void)ulTaskNotifyTake(
+            pdTRUE,
+            pdMS_TO_TICKS(static_cast<uint32_t>(remaining_ms))
+        );
+    }
+    deck_setup_response_barrier_release(
+        service->pair_response_barrier,
+        response_generation
+    );
+    return true;
+}
+
+void pair_response_complete_work(void *context)
+{
+    auto *completion = static_cast<PairResponseCompletion *>(context);
+    if (completion == nullptr || completion->service == nullptr) {
+        return;
+    }
+    const uint32_t response_generation = completion->generation;
+    deck_setup_response_barrier_complete(
+        completion->service->pair_response_barrier,
+        response_generation
+    );
+    if (completion->service->service_task != nullptr) {
+        xTaskNotifyGive(completion->service->service_task);
+    }
+    delete completion;
 }
 
 bool authentication_failure(uint8_t reason)
@@ -741,14 +793,48 @@ esp_err_t companion_pair_handler(httpd_req_t *request)
         httpd_resp_set_status(request, "400 Bad Request");
         return send_json(request, "{\"accepted\":false,\"error\":\"invalid_peer\"}");
     }
-    const bool queued = deck_setup_service_pair_companion(service, &pair_request);
+    Command command{};
+    command.type = CommandType::pair_companion;
+    command.companion_pair = pair_request;
+    command.response_generation = deck_setup_response_barrier_issue(
+        service->pair_response_barrier
+    );
+    const bool queued = command.response_generation != 0 &&
+                        enqueue_command(service, command);
+    if (!queued && command.response_generation != 0) {
+        deck_setup_response_barrier_release(
+            service->pair_response_barrier,
+            command.response_generation
+        );
+    }
     secure_clear(reinterpret_cast<char *>(&pair_request), sizeof(pair_request));
+    secure_clear(
+        reinterpret_cast<char *>(&command.companion_pair),
+        sizeof(command.companion_pair)
+    );
     if (!queued) {
         httpd_resp_set_status(request, "503 Service Unavailable");
         return send_json(request, "{\"accepted\":false,\"error\":\"busy\"}");
     }
     httpd_resp_set_status(request, "202 Accepted");
-    return send_json(request, "{\"accepted\":true,\"state\":\"queued\"}");
+    const esp_err_t send_result = send_json(
+        request,
+        "{\"accepted\":true,\"state\":\"queued\"}"
+    );
+    const uint32_t response_generation = command.response_generation;
+    auto *completion = new (std::nothrow) PairResponseCompletion{
+        service,
+        response_generation,
+    };
+    if (completion != nullptr &&
+        httpd_queue_work(
+            service->http_server,
+            pair_response_complete_work,
+            completion
+        ) != ESP_OK) {
+        delete completion;
+    }
+    return send_result;
 }
 
 esp_err_t companion_profile_handler(httpd_req_t *request, bool revoke)
@@ -1507,6 +1593,22 @@ void service_task(void *task_context)
                         sizeof(command.companion_pair)
                     );
                     if (result == DECK_COMPANION_PAIR_PAIRED) {
+                        const bool response_complete = wait_for_pair_response(
+                            service,
+                            command.response_generation
+                        );
+                        if (!response_complete) {
+                            deck_setup_response_barrier_release(
+                                service->pair_response_barrier,
+                                command.response_generation
+                            );
+                            notify(
+                                service,
+                                DECK_SETUP_SERVICE_ERROR,
+                                "pair_response"
+                            );
+                            break;
+                        }
                         if (xSemaphoreTake(service->state_mutex, portMAX_DELAY) == pdTRUE) {
                             (void)deck_setup_mode_stop(service->mode);
                             xSemaphoreGive(service->state_mutex);
@@ -1520,6 +1622,10 @@ void service_task(void *task_context)
                         );
                         break;
                     }
+                    deck_setup_response_barrier_release(
+                        service->pair_response_barrier,
+                        command.response_generation
+                    );
                     const bool storage_failure =
                         result == DECK_COMPANION_PAIR_STORAGE_FAILURE;
                     notify(
@@ -1629,6 +1735,7 @@ void release_unstarted(deck_setup_service_t *service)
     if (service->commands != nullptr) {
         deck_setup_command_queue_destroy(service->commands);
     }
+    deck_setup_response_barrier_destroy(service->pair_response_barrier);
     if (service->notifications != nullptr) {
         vQueueDelete(service->notifications);
     }
@@ -1665,6 +1772,9 @@ deck_setup_service_t *deck_setup_service_start(
     // A BOOT request means "enter now" rather than "enter N times". Coalesce
     // repeated notifications while the service task is busy with a scan or restart.
     service->commands = deck_setup_command_queue_create();
+    service->pair_response_barrier = deck_setup_response_barrier_create(
+        DECK_SETUP_COMMAND_QUEUE_CAPACITY
+    );
     // State publication is latest-only: a slow external callback must not leave
     // stale credentials or ACTIVE state queued ahead of the terminal state.
     service->notifications = xQueueCreate(1, sizeof(ServiceNotification));
@@ -1684,7 +1794,8 @@ deck_setup_service_t *deck_setup_service_start(
         &confirmation_options
     );
     if (service->state_mutex == nullptr || service->network_mutex == nullptr ||
-        service->commands == nullptr || service->notifications == nullptr ||
+        service->commands == nullptr || service->pair_response_barrier == nullptr ||
+        service->notifications == nullptr ||
         service->wifi_events == nullptr || service->mode == nullptr ||
         service->clear_confirmation == nullptr) {
         release_unstarted(service);
@@ -1806,7 +1917,28 @@ bool deck_setup_service_pair_companion(
     Command command{};
     command.type = CommandType::pair_companion;
     command.companion_pair = *request;
+    command.response_generation = deck_setup_response_barrier_issue(
+        service->pair_response_barrier
+    );
+    if (command.response_generation == 0) {
+        secure_clear(
+            reinterpret_cast<char *>(&command.companion_pair),
+            sizeof(command.companion_pair)
+        );
+        return false;
+    }
     const bool queued = enqueue_command(service, command);
+    if (queued) {
+        deck_setup_response_barrier_complete(
+            service->pair_response_barrier,
+            command.response_generation
+        );
+    } else {
+        deck_setup_response_barrier_release(
+            service->pair_response_barrier,
+            command.response_generation
+        );
+    }
     secure_clear(
         reinterpret_cast<char *>(&command.companion_pair),
         sizeof(command.companion_pair)
