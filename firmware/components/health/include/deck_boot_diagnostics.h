@@ -79,6 +79,8 @@ typedef struct {
     uint32_t profile_generation;
     uint32_t reconnect_attempts;
     uint32_t error_count;
+    const char *last_error;
+    uint32_t error_generation;
     uint64_t last_heartbeat_monotonic_ms;
 } deck_companion_link_diagnostic_info_t;
 

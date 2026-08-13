@@ -42,7 +42,7 @@ void shared_heartbeat_fixtures_match_the_device_contract()
     const std::string valid = fixture("heartbeat-valid.json");
     assert(deck_device_protocol_parse_heartbeat(
         valid.data(), valid.size(), 41, true, &heartbeat
-    ));
+    ) == DECK_DEVICE_HEARTBEAT_VALID);
     assert(heartbeat.monotonic_ms == 42);
     assert(heartbeat.utc_unix_ms == 1'786'624'496'123ULL);
 
@@ -53,14 +53,22 @@ void shared_heartbeat_fixtures_match_the_device_contract()
     };
     for (const char *name : kRejected) {
         const std::string message = fixture(name);
-        assert(!deck_device_protocol_parse_heartbeat(
+        assert(deck_device_protocol_parse_heartbeat(
             message.data(), message.size(), 0, false, &heartbeat
-        ));
+        ) == DECK_DEVICE_HEARTBEAT_INVALID);
     }
     const std::string regression = fixture("heartbeat-monotonic-regression.json");
-    assert(!deck_device_protocol_parse_heartbeat(
+    assert(deck_device_protocol_parse_heartbeat(
         regression.data(), regression.size(), 43, true, &heartbeat
-    ));
+    ) == DECK_DEVICE_HEARTBEAT_INVALID);
+
+    std::string incompatible = valid;
+    const size_t version = incompatible.find("\"protocol_version\":1");
+    assert(version != std::string::npos);
+    incompatible[version + std::string("\"protocol_version\":").size()] = '2';
+    assert(deck_device_protocol_parse_heartbeat(
+        incompatible.data(), incompatible.size(), 0, false, &heartbeat
+    ) == DECK_DEVICE_HEARTBEAT_UNSUPPORTED_MAJOR);
 }
 
 void exact_certificate_pin_rejects_a_wrong_digest()

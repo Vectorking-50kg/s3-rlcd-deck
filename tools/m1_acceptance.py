@@ -38,6 +38,8 @@ LINK_SCHEMA = {
     "profile_generation": int,
     "reconnect_attempts": int,
     "error_count": int,
+    "last_error": str,
+    "error_generation": int,
     "last_heartbeat_monotonic_ms": int,
 }
 SETUP_ACCESS_SCHEMA = {"type": str, "ssid": str, "password": str, "address": str}
@@ -60,6 +62,83 @@ REQUIRED_CHECKS = (
 
 class AcceptanceFailure(RuntimeError):
     pass
+
+
+class AcceptanceTimeout(AcceptanceFailure):
+    pass
+
+
+class SensitiveValueTracker:
+    _bare_secret = re.compile(
+        r"(?i)(?:authorization\s*:\s*bearer|"
+        r"\b(?:device[ _-]?)?token\b\s*[:=]|"
+        r"\b(?:certificate[ _-]?)?fingerprint\b\s*[:=]|"
+        r"\b(?:pairing[ _-]?)?code\b\s*[:=]\s*[0-9]{6}|"
+        r"sha256:[0-9a-f]{64})"
+    )
+
+    def __init__(self, *values: str) -> None:
+        self._lock = threading.Lock()
+        self._values: set[str] = set()
+        self._recent_output: list[str] = []
+        self._observed = False
+        for value in values:
+            self.add(value)
+
+    def add(self, value: str) -> None:
+        if len(value) >= 4:
+            with self._lock:
+                self._values.add(value)
+                self._observed = self._observed or any(
+                    value in text for text in self._recent_output
+                )
+
+    def observe(self, text: str) -> bool:
+        with self._lock:
+            self._recent_output.append(text[-4096:])
+            if len(self._recent_output) > 256:
+                del self._recent_output[0]
+            leaked = self._bare_secret.search(text) is not None or any(
+                value in text for value in self._values
+            )
+            self._observed = self._observed or leaked
+            return leaked
+
+    def clean(self) -> bool:
+        with self._lock:
+            return not self._observed
+
+    def values(self) -> tuple[str, ...]:
+        with self._lock:
+            return tuple(self._values)
+
+
+class CleanupTransaction:
+    def __init__(self) -> None:
+        self.setup_pending = False
+        self.setup_ssids: set[str] = set()
+        self.trust_may_need_restore = False
+        self.original_profiles: dict[str, Any] | None = None
+        self.profiles_may_need_restore = False
+
+    def begin_setup(self) -> None:
+        self.setup_pending = True
+
+    def observe_setup_access(self, ssid: str) -> None:
+        self.setup_ssids.add(ssid)
+
+    def observe_setup_closed(self) -> None:
+        self.setup_pending = False
+
+    def needs_compensation(self) -> bool:
+        return (
+            self.trust_may_need_restore
+            or self.profiles_may_need_restore
+            or self.setup_pending
+        )
+
+    def restored(self) -> bool:
+        return not self.needs_compensation()
 
 
 def utc_now() -> str:
@@ -154,7 +233,8 @@ def run_app_flash(port: str, output: pathlib.Path, environment: dict[str, str]) 
 
 def text_is_redacted(text: str, sensitive_values: tuple[str, ...] = ()) -> bool:
     lowered = text.lower()
-    if any(value and value in text for value in sensitive_values):
+    if any(value and value in text for value in sensitive_values) or \
+       SensitiveValueTracker._bare_secret.search(text) is not None:
         return False
     return not any(
         forbidden in lowered
@@ -169,18 +249,26 @@ def text_is_redacted(text: str, sensitive_values: tuple[str, ...] = ()) -> bool:
     )
 
 
-def evidence_is_redacted(path: pathlib.Path) -> bool:
+def evidence_is_redacted(
+    path: pathlib.Path,
+    sensitive_values: tuple[str, ...] = (),
+) -> bool:
     if not path.is_file():
         return False
     try:
-        return text_is_redacted(path.read_text(encoding="utf-8"))
+        return text_is_redacted(path.read_text(encoding="utf-8"), sensitive_values)
     except (OSError, UnicodeError):
         return False
 
 
-def evidence_directory_is_redacted(directory: pathlib.Path) -> bool:
+def evidence_directory_is_redacted(
+    directory: pathlib.Path,
+    sensitive_values: tuple[str, ...] = (),
+) -> bool:
     evidence = [path for path in directory.rglob("*") if path.is_file() and path.name != "summary.json"]
-    return bool(evidence) and all(evidence_is_redacted(path) for path in evidence)
+    return bool(evidence) and all(
+        evidence_is_redacted(path, sensitive_values) for path in evidence
+    )
 
 
 def source_tree_clean() -> bool:
@@ -238,13 +326,25 @@ def sanitize_serial_line(line: str) -> tuple[str, dict[str, Any] | None]:
     return REDACTED_NON_DIAGNOSTIC, event
 
 
+def serial_line_may_contain_secret(line: str, sanitized: str) -> bool:
+    return sanitized != REDACTED_SETUP_ACCESS
+
+
 class SerialEvidence:
-    def __init__(self, serial_module: Any, port: str, output: pathlib.Path, timeout: float) -> None:
+    def __init__(
+        self,
+        serial_module: Any,
+        port: str,
+        output: pathlib.Path,
+        timeout: float,
+        secrets: SensitiveValueTracker,
+    ) -> None:
         self._connection = serial_module.Serial(
             port=port, baudrate=115200, timeout=0.25, write_timeout=0.25
         )
         self._output = output.open("w", encoding="utf-8")
         self._stage_timeout = timeout
+        self._secrets = secrets
 
     def close(self) -> None:
         self._connection.close()
@@ -266,7 +366,6 @@ class SerialEvidence:
 
     def command(self, command: bytes) -> None:
         self._connection.write(command)
-        self._connection.flush()
 
     def fresh_boot(self, serial_module: Any, port: str, timeout: float) -> dict[str, Any]:
         # The app-only flasher resets before this monitor can open. Establish the
@@ -280,7 +379,7 @@ class SerialEvidence:
                 "post-flash pending boot",
                 2.0,
             )
-        except AcceptanceFailure:
+        except AcceptanceTimeout:
             self.command(b"DECK_RESTART\n")
             self.reopen(serial_module, port, timeout)
             return self.event(
@@ -310,14 +409,18 @@ class SerialEvidence:
                 continue
             line = raw.decode("utf-8", errors="replace")
             sanitized, event = sanitize_serial_line(line)
+            if serial_line_may_contain_secret(line, sanitized) and self._secrets.observe(line):
+                sanitized = "[REDACTED SECRET TARGET LINE]"
             envelope = {"captured_at": utc_now(), "line": sanitized}
             self._output.write(json.dumps(envelope, separators=(",", ":")) + "\n")
             self._output.flush()
             if sanitized == "[REDACTED FATAL TARGET LINE]":
                 raise AcceptanceFailure(f"{stage}: fatal Deck log observed")
+            if sanitized == "[REDACTED SECRET TARGET LINE]":
+                raise AcceptanceFailure(f"{stage}: credential appeared in Deck output")
             if event is not None and predicate(event):
                 return event
-        raise AcceptanceFailure(f"{stage}: timed out waiting for Deck state")
+        raise AcceptanceTimeout(f"{stage}: timed out waiting for Deck state")
 
 
 class ManagementClient:
@@ -361,6 +464,7 @@ class CompanionProcess:
         data_directory: pathlib.Path,
         token: str,
         output: pathlib.Path,
+        secrets: SensitiveValueTracker | None = None,
     ) -> None:
         self.executable = executable
         self.data_directory = data_directory
@@ -369,21 +473,21 @@ class CompanionProcess:
         self.process: subprocess.Popen[bytes] | None = None
         self._reader: threading.Thread | None = None
         self._log: Any = None
-        self._observed_secret = False
+        self._secrets = secrets or SensitiveValueTracker(token)
+        self._secrets.add(token)
 
     def _drain_output(self, stream: Any) -> None:
         assert self._log is not None
         for raw in iter(stream.readline, b""):
             line = raw.decode("utf-8", errors="replace")
-            if not text_is_redacted(line, (self.token,)):
-                self._observed_secret = True
+            self._secrets.observe(line)
             envelope = {"captured_at": utc_now(), "line": REDACTED_NON_DIAGNOSTIC}
             self._log.write(json.dumps(envelope, separators=(",", ":")) + "\n")
             self._log.flush()
         stream.close()
 
     def logs_redacted(self) -> bool:
-        return not self._observed_secret
+        return self._secrets.clean()
 
     def start(self) -> ManagementClient:
         if self.process is not None:
@@ -533,21 +637,21 @@ def restore_companion_profiles(
 
 def enter_setup_access(
     serial_evidence: SerialEvidence,
-    cleanup_state: dict[str, Any],
+    cleanup: CleanupTransaction,
     stage: str,
 ) -> dict[str, Any]:
+    cleanup.begin_setup()
     serial_evidence.command(b"DECK_SETUP\n")
     serial_evidence.event(
         lambda event: event.get("type") == "setup_state" and event.get("active") is True,
         f"{stage}: enter Setup",
     )
-    cleanup_state["setup_may_be_active"] = True
     serial_evidence.command(b"DECK_HIL_SETUP_ACCESS\n")
     access = serial_evidence.event(
         lambda event: event.get("type") == "hil_setup_access",
         f"{stage}: Setup access",
     )
-    cleanup_state["setup_ssid"] = access["ssid"]
+    cleanup.observe_setup_access(access["ssid"])
     return access
 
 
@@ -617,14 +721,17 @@ def pair_deck(
     original_ssid: str,
     hub_address: str,
     stage_timeout: float,
-    cleanup_state: dict[str, Any],
+    cleanup: CleanupTransaction,
+    secrets: SensitiveValueTracker,
     stage: str,
     before_submit: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     status, issued = management.request("POST", "/api/v1/pairing/codes")
     if status != 200 or re.fullmatch(r"[0-9]{6}", str(issued.get("code", ""))) is None:
         raise AcceptanceFailure(f"{stage}: Companion did not issue a six-digit Pairing code")
-    access = enter_setup_access(serial_evidence, cleanup_state, stage)
+    secrets.add(str(issued["code"]))
+    access = enter_setup_access(serial_evidence, cleanup, stage)
+    secrets.add(access["password"])
     connect_wifi(access["ssid"], access["password"])
     wait_for_host(access["address"], stage_timeout)
     setup_base = f"http://{access['address']}"
@@ -643,7 +750,7 @@ def pair_deck(
         f"{stage}: Pairing commit and Setup close",
         30,
     )
-    cleanup_state["setup_may_be_active"] = False
+    cleanup.observe_setup_closed()
     connect_wifi(original_ssid)
     wait_for_host("192.168.31.1", stage_timeout)
     return serial_evidence.event(
@@ -651,6 +758,36 @@ def pair_deck(
         and event.get("state") == "online",
         f"{stage}: Device Link online",
         60,
+    )
+
+
+def close_setup_by_restart(
+    serial_evidence: SerialEvidence,
+    serial_module: Any,
+    port: str,
+    timeout: float,
+    cleanup: CleanupTransaction,
+) -> None:
+    serial_evidence.command(b"DECK_RESTART\n")
+    serial_evidence.reopen(serial_module, port, timeout)
+    serial_evidence.event(
+        lambda event: event.get("type") == "boot_ok",
+        "Setup close restart",
+        30,
+    )
+    cleanup.observe_setup_closed()
+
+
+def is_new_link_error(
+    event: dict[str, Any],
+    baseline_generation: int,
+    expected_error: str,
+) -> bool:
+    return (
+        event.get("type") == "companion_link_state"
+        and event.get("last_error") == expected_error
+        and int(event.get("error_generation", 0)) > baseline_generation
+        and event.get("state") != "online"
     )
 
 
@@ -758,25 +895,21 @@ def main() -> int:
     checks: dict[str, bool] = {}
     reconnect_count = 0
     deck_error_count = 0
+    link_error_generation = 0
     companion_error_count = 0
     dirty = not source_tree_clean()
     commit = command_output(["git", "rev-parse", "HEAD"])
     observed_firmware_commit = ""
     observed_companion_commit = ""
     token = hashlib.sha256(os.urandom(64)).hexdigest()
+    secrets = SensitiveValueTracker(token)
     data_root = tempfile.TemporaryDirectory(prefix="s3deck-m1-companion-")
     data_directory = pathlib.Path(data_root.name)
     companion_log = arguments.result_dir / "companion.jsonl"
     companion: CompanionProcess | None = None
     managed_processes: list[CompanionProcess] = []
     serial_evidence: SerialEvidence | None = None
-    cleanup_state: dict[str, Any] = {
-        "setup_may_be_active": False,
-        "setup_ssid": "",
-        "trust_may_need_restore": False,
-        "original_profiles": None,
-        "profiles_may_need_restore": False,
-    }
+    cleanup = CleanupTransaction()
     try:
         if dirty:
             raise AcceptanceFailure("source tree is dirty; commit before auditable acceptance")
@@ -790,7 +923,13 @@ def main() -> int:
         from serial import SerialException  # noqa: F401
         import serial
 
-        serial_evidence = SerialEvidence(serial, arguments.port, serial_path, arguments.stage_timeout)
+        serial_evidence = SerialEvidence(
+            serial,
+            arguments.port,
+            serial_path,
+            arguments.stage_timeout,
+            secrets,
+        )
         serial_evidence.fresh_boot(serial, arguments.port, arguments.stage_timeout)
         serial_evidence.command(b"DECK_BUILD_IDENTITY\n")
         build_identity = serial_evidence.event(
@@ -801,13 +940,15 @@ def main() -> int:
         if observed_firmware_commit != commit:
             raise AcceptanceFailure("Deck firmware does not match the clean source commit")
 
-        companion = CompanionProcess(executable, data_directory, token, companion_log)
+        companion = CompanionProcess(
+            executable, data_directory, token, companion_log, secrets
+        )
         managed_processes.append(companion)
         management = companion.start()
 
         def remember_original_profiles(setup_base: str) -> None:
-            cleanup_state["original_profiles"] = snapshot_companion_profiles(setup_base)
-            cleanup_state["profiles_may_need_restore"] = True
+            cleanup.original_profiles = snapshot_companion_profiles(setup_base)
+            cleanup.profiles_may_need_restore = True
 
         online = pair_deck(
             management,
@@ -815,13 +956,15 @@ def main() -> int:
             arguments.original_ssid,
             arguments.hub_address,
             arguments.stage_timeout,
-            cleanup_state,
+            cleanup,
+            secrets,
             "first Pairing",
             remember_original_profiles,
         )
         checks["recovery_pairing"] = True
         reconnect_count += 1
         deck_error_count = max(deck_error_count, int(online["error_count"]))
+        link_error_generation = int(online["error_generation"])
 
         serial_evidence.command(b"DECK_RESTART\n")
         serial_evidence.reopen(serial, arguments.port, arguments.stage_timeout)
@@ -833,7 +976,8 @@ def main() -> int:
         companion.stop()
         serial_evidence.event(lambda event: event.get("type") == "companion_link_state" and event.get("state") in {"offline", "connecting"}, "Companion offline", 45)
         management = companion.start()
-        serial_evidence.event(lambda event: event.get("type") == "companion_link_state" and event.get("state") == "online", "Companion recovery", 60)
+        online = serial_evidence.event(lambda event: event.get("type") == "companion_link_state" and event.get("state") == "online", "Companion recovery", 60)
+        link_error_generation = int(online["error_generation"])
         reconnect_count += 1
         checks["companion_offline_recovered"] = True
 
@@ -845,13 +989,21 @@ def main() -> int:
                 pathlib.Path(wrong_directory),
                 token,
                 companion_log,
+                secrets,
             )
             managed_processes.append(wrong)
             try:
                 wrong.start()
-                observed = serial_evidence.event(lambda event: event.get("type") == "companion_link_state" and int(event.get("error_count", 0)) > deck_error_count, "wrong certificate rejection", 45)
+                observed = serial_evidence.event(
+                    lambda event: is_new_link_error(
+                        event, link_error_generation, "tls_pin_mismatch"
+                    ),
+                    "wrong certificate rejection",
+                    45,
+                )
                 deck_error_count = int(observed["error_count"])
-                checks["wrong_certificate_rejected"] = observed["state"] != "online"
+                link_error_generation = int(observed["error_generation"])
+                checks["wrong_certificate_rejected"] = True
             finally:
                 wrong.stop()
 
@@ -866,18 +1018,27 @@ def main() -> int:
             data_directory,
             token,
             companion_log,
+            secrets,
         )
         managed_processes.append(incompatible_process)
         try:
             management = incompatible_process.start()
-            observed = serial_evidence.event(lambda event: event.get("type") == "companion_link_state" and int(event.get("error_count", 0)) > deck_error_count, "protocol major rejection", 45)
+            observed = serial_evidence.event(
+                lambda event: is_new_link_error(
+                    event, link_error_generation, "protocol_major_rejected"
+                ),
+                "protocol major rejection",
+                45,
+            )
             deck_error_count = int(observed["error_count"])
-            checks["protocol_major_rejected"] = observed["state"] != "online"
+            link_error_generation = int(observed["error_generation"])
+            checks["protocol_major_rejected"] = True
         finally:
             incompatible_process.stop()
 
         management = companion.start()
-        serial_evidence.event(lambda event: event.get("type") == "companion_link_state" and event.get("state") == "online", "recovery before revoke", 60)
+        online = serial_evidence.event(lambda event: event.get("type") == "companion_link_state" and event.get("state") == "online", "recovery before revoke", 60)
+        link_error_generation = int(online["error_generation"])
         status, devices = management.request("GET", "/api/v1/devices")
         device_list = devices.get("devices", [])
         if status != 200 or len(device_list) != 1 or type(device_list[0].get("device_id")) is not str:
@@ -885,8 +1046,16 @@ def main() -> int:
         status, _ = management.request("DELETE", "/api/v1/devices/" + device_list[0]["device_id"])
         if status != 204:
             raise AcceptanceFailure("management device revocation failed")
-        cleanup_state["trust_may_need_restore"] = True
-        serial_evidence.event(lambda event: event.get("type") == "companion_link_state" and event.get("state") != "online" and int(event.get("error_count", 0)) > deck_error_count, "revoked Token rejection", 45)
+        cleanup.trust_may_need_restore = True
+        observed = serial_evidence.event(
+            lambda event: is_new_link_error(
+                event, link_error_generation, "auth_rejected"
+            ),
+            "revoked Token rejection",
+            45,
+        )
+        deck_error_count = int(observed["error_count"])
+        link_error_generation = int(observed["error_generation"])
         checks["revoked_device_trust_rejected"] = True
 
         # Restore a valid device trust/Profile before leaving the user's Deck.
@@ -896,10 +1065,11 @@ def main() -> int:
             arguments.original_ssid,
             arguments.hub_address,
             arguments.stage_timeout,
-            cleanup_state,
+            cleanup,
+            secrets,
             "trust restoration",
         )
-        cleanup_state["trust_may_need_restore"] = False
+        cleanup.trust_may_need_restore = False
         reconnect_count += 1
 
         # Cross-port and cross-token rejection is performed against live listeners.
@@ -938,6 +1108,7 @@ def main() -> int:
         if status != 200 or type(temporary_credential.get("token")) is not str:
             raise AcceptanceFailure("temporary device credential unavailable")
         temporary_token = temporary_credential["token"]
+        secrets.add(temporary_token)
         unauthorized_management = ManagementClient.__new__(ManagementClient)
         unauthorized_management.address = "127.0.0.1:7777"
         unauthorized_management.origin = "http://127.0.0.1:7777"
@@ -970,19 +1141,25 @@ def main() -> int:
         # Leave the Deck with exactly the Profile set and active selection it had before M1.
         cleanup_access = enter_setup_access(
             serial_evidence,
-            cleanup_state,
+            cleanup,
             "restore original Companion Profiles",
         )
+        secrets.add(cleanup_access["password"])
         connect_wifi(cleanup_access["ssid"], cleanup_access["password"])
         wait_for_host(cleanup_access["address"], arguments.stage_timeout)
         restore_companion_profiles(
             f"http://{cleanup_access['address']}",
-            cleanup_state["original_profiles"],
+            cleanup.original_profiles,
             arguments.stage_timeout,
         )
-        cleanup_state["profiles_may_need_restore"] = False
-        serial_evidence.command(b"DECK_RESTART\n")
-        cleanup_state["setup_may_be_active"] = False
+        cleanup.profiles_may_need_restore = False
+        close_setup_by_restart(
+            serial_evidence,
+            serial,
+            arguments.port,
+            arguments.stage_timeout,
+            cleanup,
+        )
         connect_wifi(arguments.original_ssid)
         wait_for_host("192.168.31.1", arguments.stage_timeout)
     except (AcceptanceFailure, OSError, subprocess.SubprocessError, urllib.error.URLError) as error:
@@ -995,41 +1172,44 @@ def main() -> int:
             except AcceptanceFailure as error:
                 cleanup_ok = False
                 print(f"M1 cleanup failed: {error}", file=sys.stderr)
-        if serial_evidence is not None and companion is not None and (
-            cleanup_state["trust_may_need_restore"]
-            or cleanup_state["setup_may_be_active"]
-            or cleanup_state["profiles_may_need_restore"]
-        ):
+        if serial_evidence is not None and companion is not None and cleanup.needs_compensation():
             try:
                 management = companion.ensure_started()
-                if cleanup_state["trust_may_need_restore"]:
+                if cleanup.trust_may_need_restore:
                     pair_deck(
                         management,
                         serial_evidence,
                         arguments.original_ssid,
                         arguments.hub_address,
                         arguments.stage_timeout,
-                        cleanup_state,
+                        cleanup,
+                        secrets,
                         "cleanup trust compensation",
                     )
-                    cleanup_state["trust_may_need_restore"] = False
-                if cleanup_state["profiles_may_need_restore"]:
+                    cleanup.trust_may_need_restore = False
+                if cleanup.profiles_may_need_restore:
                     access = enter_setup_access(
                         serial_evidence,
-                        cleanup_state,
+                        cleanup,
                         "cleanup Profile compensation",
                     )
+                    secrets.add(access["password"])
                     connect_wifi(access["ssid"], access["password"])
                     wait_for_host(access["address"], arguments.stage_timeout)
                     restore_companion_profiles(
                         f"http://{access['address']}",
-                        cleanup_state["original_profiles"],
+                        cleanup.original_profiles,
                         arguments.stage_timeout,
                     )
-                    cleanup_state["profiles_may_need_restore"] = False
-                if cleanup_state["setup_may_be_active"]:
-                    serial_evidence.command(b"DECK_RESTART\n")
-                    cleanup_state["setup_may_be_active"] = False
+                    cleanup.profiles_may_need_restore = False
+                if cleanup.setup_pending:
+                    close_setup_by_restart(
+                        serial_evidence,
+                        serial,
+                        arguments.port,
+                        arguments.stage_timeout,
+                        cleanup,
+                    )
             except (AcceptanceFailure, OSError, urllib.error.URLError) as error:
                 cleanup_ok = False
                 print(f"M1 compensation failed: {error}", file=sys.stderr)
@@ -1049,24 +1229,21 @@ def main() -> int:
             cleanup_ok = False
             print(f"M1 Wi-Fi restore failed: {error}", file=sys.stderr)
         try:
-            if not forget_wifi(str(cleanup_state["setup_ssid"])):
-                raise AcceptanceFailure("cannot remove temporary Setup network")
+            for setup_ssid in cleanup.setup_ssids:
+                if not forget_wifi(setup_ssid):
+                    raise AcceptanceFailure(
+                        f"cannot remove temporary Setup network {setup_ssid!r}"
+                    )
         except (OSError, subprocess.SubprocessError) as error:
             cleanup_ok = False
             print(f"M1 Setup Wi-Fi cleanup failed: {error}", file=sys.stderr)
         if serial_evidence is not None:
             serial_evidence.close()
-        checks["cleanup_restored"] = cleanup_ok and not any(
-            cleanup_state[name]
-            for name in (
-                "trust_may_need_restore",
-                "profiles_may_need_restore",
-                "setup_may_be_active",
-            )
-        )
+        checks["cleanup_restored"] = cleanup_ok and cleanup.restored()
         checks["credentials_absent_from_evidence"] = (
             all(process.logs_redacted() for process in managed_processes)
-            and evidence_directory_is_redacted(arguments.result_dir)
+            and secrets.clean()
+            and evidence_directory_is_redacted(arguments.result_dir, secrets.values())
         )
         data_root.cleanup()
         summary = build_summary(

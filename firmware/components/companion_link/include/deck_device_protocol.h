@@ -16,6 +16,12 @@ typedef struct {
     uint64_t monotonic_ms;
 } deck_device_heartbeat_t;
 
+typedef enum {
+    DECK_DEVICE_HEARTBEAT_INVALID = 0,
+    DECK_DEVICE_HEARTBEAT_VALID,
+    DECK_DEVICE_HEARTBEAT_UNSUPPORTED_MAJOR,
+} deck_device_heartbeat_result_t;
+
 /* Constant-time comparison after validating the canonical lowercase wire form. */
 bool deck_device_protocol_fingerprint_matches_sha256(
     const uint8_t digest[32],
@@ -28,7 +34,7 @@ bool deck_device_protocol_validate_hello(
     const char *authenticated_device_id
 );
 
-bool deck_device_protocol_parse_heartbeat(
+deck_device_heartbeat_result_t deck_device_protocol_parse_heartbeat(
     const char *message,
     size_t message_size,
     uint64_t previous_monotonic_ms,

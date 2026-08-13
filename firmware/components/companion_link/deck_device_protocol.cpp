@@ -449,7 +449,7 @@ bool deck_device_protocol_validate_hello(
     return seen == 0x7fU && cursor.finished();
 }
 
-bool deck_device_protocol_parse_heartbeat(
+deck_device_heartbeat_result_t deck_device_protocol_parse_heartbeat(
     const char *message,
     size_t message_size,
     uint64_t previous_monotonic_ms,
@@ -459,23 +459,24 @@ bool deck_device_protocol_parse_heartbeat(
 {
     if (message == nullptr || message_size == 0 ||
         message_size > DECK_DEVICE_PROTOCOL_MAX_CONTROL_BYTES || heartbeat == nullptr) {
-        return false;
+        return DECK_DEVICE_HEARTBEAT_INVALID;
     }
     *heartbeat = {};
     JsonCursor cursor(message, message_size);
     if (!cursor.valid() || !cursor.consume('{')) {
-        return false;
+        return DECK_DEVICE_HEARTBEAT_INVALID;
     }
     uint16_t seen = 0;
     uint64_t tx_depth = 0;
     uint64_t tx_capacity = 0;
     uint64_t rx_depth = 0;
     uint64_t rx_capacity = 0;
+    bool unsupported_major = false;
     bool done = false;
     while (!done) {
         char key[32]{};
         if (!cursor.string(key, sizeof(key)) || !cursor.consume(':')) {
-            return false;
+            return DECK_DEVICE_HEARTBEAT_INVALID;
         }
         uint16_t bit = 0;
         if (std::strcmp(key, "type") == 0) {
@@ -483,58 +484,63 @@ bool deck_device_protocol_parse_heartbeat(
             char value[24]{};
             if (!cursor.string(value, sizeof(value)) ||
                 std::strcmp(value, "device.heartbeat") != 0) {
-                return false;
+                return DECK_DEVICE_HEARTBEAT_INVALID;
             }
         } else if (std::strcmp(key, "protocol_version") == 0) {
             bit = 2U;
             uint64_t value = 0;
-            if (!cursor.unsigned_integer(&value) || value != DECK_DEVICE_PROTOCOL_VERSION) {
-                return false;
+            if (!cursor.unsigned_integer(&value)) {
+                return DECK_DEVICE_HEARTBEAT_INVALID;
             }
+            unsupported_major = value != DECK_DEVICE_PROTOCOL_VERSION;
         } else if (std::strcmp(key, "utc") == 0) {
             bit = 4U;
             char value[32]{};
             if (!cursor.string(value, sizeof(value)) ||
                 !parse_canonical_utc(value, &heartbeat->utc_unix_ms)) {
-                return false;
+                return DECK_DEVICE_HEARTBEAT_INVALID;
             }
         } else if (std::strcmp(key, "monotonic_ms") == 0) {
             bit = 8U;
             if (!cursor.unsigned_integer(&heartbeat->monotonic_ms)) {
-                return false;
+                return DECK_DEVICE_HEARTBEAT_INVALID;
             }
         } else if (std::strcmp(key, "tx_queue_depth") == 0) {
             bit = 16U;
             if (!cursor.unsigned_integer(&tx_depth) || tx_depth > UINT32_MAX) {
-                return false;
+                return DECK_DEVICE_HEARTBEAT_INVALID;
             }
         } else if (std::strcmp(key, "tx_queue_capacity") == 0) {
             bit = 32U;
             if (!cursor.unsigned_integer(&tx_capacity) || tx_capacity > UINT32_MAX) {
-                return false;
+                return DECK_DEVICE_HEARTBEAT_INVALID;
             }
         } else if (std::strcmp(key, "rx_queue_depth") == 0) {
             bit = 64U;
             if (!cursor.unsigned_integer(&rx_depth) || rx_depth > UINT32_MAX) {
-                return false;
+                return DECK_DEVICE_HEARTBEAT_INVALID;
             }
         } else if (std::strcmp(key, "rx_queue_capacity") == 0) {
             bit = 128U;
             if (!cursor.unsigned_integer(&rx_capacity) || rx_capacity > UINT32_MAX) {
-                return false;
+                return DECK_DEVICE_HEARTBEAT_INVALID;
             }
         } else {
-            return false;
+            return DECK_DEVICE_HEARTBEAT_INVALID;
         }
         if ((seen & bit) != 0) {
-            return false;
+            return DECK_DEVICE_HEARTBEAT_INVALID;
         }
         seen |= bit;
         if (!cursor.object_separator(&done)) {
-            return false;
+            return DECK_DEVICE_HEARTBEAT_INVALID;
         }
     }
-    return seen == 0xffU && cursor.finished() && tx_capacity != 0 &&
-           rx_capacity != 0 && tx_depth <= tx_capacity && rx_depth <= rx_capacity &&
-           (!has_previous || heartbeat->monotonic_ms >= previous_monotonic_ms);
+    if (seen != 0xffU || !cursor.finished() || tx_capacity == 0 ||
+        rx_capacity == 0 || tx_depth > tx_capacity || rx_depth > rx_capacity ||
+        (has_previous && heartbeat->monotonic_ms < previous_monotonic_ms)) {
+        return DECK_DEVICE_HEARTBEAT_INVALID;
+    }
+    return unsupported_major ? DECK_DEVICE_HEARTBEAT_UNSUPPORTED_MAJOR
+                             : DECK_DEVICE_HEARTBEAT_VALID;
 }

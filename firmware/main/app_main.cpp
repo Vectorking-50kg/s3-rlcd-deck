@@ -189,6 +189,29 @@ const char *companion_link_state_name(deck_companion_link_state_t state)
     }
 }
 
+const char *companion_link_error_name(deck_companion_link_error_t error)
+{
+    switch (error) {
+        case DECK_COMPANION_LINK_ERROR_TRANSPORT:
+            return "transport";
+        case DECK_COMPANION_LINK_ERROR_TLS_PIN_MISMATCH:
+            return "tls_pin_mismatch";
+        case DECK_COMPANION_LINK_ERROR_AUTH_REJECTED:
+            return "auth_rejected";
+        case DECK_COMPANION_LINK_ERROR_PROTOCOL_MAJOR_REJECTED:
+            return "protocol_major_rejected";
+        case DECK_COMPANION_LINK_ERROR_PROTOCOL_INVALID:
+            return "protocol_invalid";
+        case DECK_COMPANION_LINK_ERROR_HEARTBEAT_TIMEOUT:
+            return "heartbeat_timeout";
+        case DECK_COMPANION_LINK_ERROR_INTERNAL:
+            return "internal";
+        case DECK_COMPANION_LINK_ERROR_NONE:
+        default:
+            return "none";
+    }
+}
+
 void emit_companion_link_diagnostics()
 {
     deck_companion_link_snapshot_t snapshot{};
@@ -202,6 +225,8 @@ void emit_companion_link_diagnostics()
         snapshot.profile_generation,
         snapshot.reconnect_attempts,
         snapshot.error_count,
+        companion_link_error_name(snapshot.last_error),
+        snapshot.error_generation,
         snapshot.last_heartbeat_monotonic_ms,
     };
     const deck_diagnostic_sink_t sink = {write_stdout, nullptr};

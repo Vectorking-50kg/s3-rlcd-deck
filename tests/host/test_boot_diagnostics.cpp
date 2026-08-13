@@ -182,6 +182,8 @@ int main()
         4,
         2,
         1,
+        "tls_pin_mismatch",
+        1,
         123456,
     };
     require(
@@ -193,6 +195,7 @@ int main()
             "{\"type\":\"companion_link_state\",\"state\":\"online\","
             "\"has_active_profile\":true,\"profile_generation\":4,"
             "\"reconnect_attempts\":2,\"error_count\":1,"
+            "\"last_error\":\"tls_pin_mismatch\",\"error_generation\":1,"
             "\"last_heartbeat_monotonic_ms\":123456}\n",
         "expected Companion Link diagnostics to contain state and counters only"
     );

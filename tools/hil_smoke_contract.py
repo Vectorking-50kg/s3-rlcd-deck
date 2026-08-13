@@ -133,6 +133,8 @@ EVENT_SCHEMAS: dict[str, dict[str, type]] = {
         "profile_generation": int,
         "reconnect_attempts": int,
         "error_count": int,
+        "last_error": str,
+        "error_generation": int,
         "last_heartbeat_monotonic_ms": int,
     },
 }

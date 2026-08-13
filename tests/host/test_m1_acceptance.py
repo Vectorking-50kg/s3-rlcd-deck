@@ -24,6 +24,8 @@ def test_serial_evidence_keeps_redacted_link_state_and_drops_setup_secret() -> N
             "profile_generation": 2,
             "reconnect_attempts": 0,
             "error_count": 1,
+            "last_error": "tls_pin_mismatch",
+            "error_generation": 1,
             "last_heartbeat_monotonic_ms": 1234,
         }
     )
@@ -85,6 +87,13 @@ def test_evidence_redaction_gate_rejects_every_secret_field() -> None:
         for secret in ('"password":"x"', '"token":"x"', '"certificate_der":"x"', '"fingerprint":"x"', '"code":"123456"', 'Authorization: Bearer x'):
             evidence.write_text(secret, encoding="utf-8")
             assert not m1.evidence_is_redacted(evidence), secret
+        for bare in (
+            "device token=PAIRING_SECRET",
+            "fingerprint=sha256:" + "a" * 64,
+            "certificate-fingerprint: hidden",
+        ):
+            evidence.write_text(bare, encoding="utf-8")
+            assert not m1.evidence_is_redacted(evidence), bare
 
 
 def test_build_identity_is_only_retained_for_an_exact_full_commit() -> None:
@@ -183,7 +192,7 @@ def test_post_flash_monitor_requests_a_fresh_boot_after_ready_handshake() -> Non
     evidence.command = commands.append
     evidence.reopen = lambda module, port, timeout: reopens.append((module, port, timeout))
     evidence.event = mock.Mock(
-        side_effect=[m1.AcceptanceFailure("missed"), {"type": "boot_ok"}]
+        side_effect=[m1.AcceptanceTimeout("missed"), {"type": "boot_ok"}]
     )
     marker = object()
     assert evidence.fresh_boot(marker, "/dev/cu.Deck", 12.0) == {"type": "boot_ok"}
@@ -198,6 +207,77 @@ def test_post_flash_monitor_requests_a_fresh_boot_after_ready_handshake() -> Non
     assert reopens == []
 
 
+def test_fatal_boot_evidence_is_not_retried() -> None:
+    evidence = m1.SerialEvidence.__new__(m1.SerialEvidence)
+    evidence.command = mock.Mock()
+    evidence.reopen = mock.Mock()
+    evidence.event = mock.Mock(side_effect=m1.AcceptanceFailure("fatal Deck log"))
+    try:
+        evidence.fresh_boot(object(), "/dev/cu.Deck", 12.0)
+    except m1.AcceptanceFailure as error:
+        assert "fatal" in str(error)
+    else:
+        raise AssertionError("fatal evidence must fail closed")
+    evidence.command.assert_called_once_with(m1.HIL_READY)
+    evidence.reopen.assert_not_called()
+
+
+def test_serial_command_never_calls_unbounded_flush() -> None:
+    class Connection:
+        def __init__(self) -> None:
+            self.writes: list[bytes] = []
+
+        def write(self, value: bytes) -> None:
+            self.writes.append(value)
+
+        def flush(self) -> None:
+            raise AssertionError("flush must not be called")
+
+    evidence = m1.SerialEvidence.__new__(m1.SerialEvidence)
+    evidence._connection = Connection()
+    evidence.command(b"DECK_SETUP\n")
+    assert evidence._connection.writes == [b"DECK_SETUP\n"]
+
+
+def test_cleanup_transaction_records_intent_before_observation() -> None:
+    cleanup = m1.CleanupTransaction()
+    cleanup.begin_setup()
+    assert cleanup.needs_compensation()
+    cleanup.observe_setup_access("S3Deck-111111")
+    cleanup.observe_setup_access("S3Deck-222222")
+    assert cleanup.setup_ssids == {"S3Deck-111111", "S3Deck-222222"}
+    cleanup.observe_setup_closed()
+    assert cleanup.restored()
+
+
+def test_exact_link_error_gate_rejects_unrelated_failures() -> None:
+    event = {
+        "type": "companion_link_state",
+        "state": "offline",
+        "last_error": "transport",
+        "error_generation": 4,
+    }
+    assert not m1.is_new_link_error(event, 3, "tls_pin_mismatch")
+    event["last_error"] = "tls_pin_mismatch"
+    assert m1.is_new_link_error(event, 3, "tls_pin_mismatch")
+
+
+def test_secret_tracker_catches_value_leaked_before_it_was_known() -> None:
+    tracker = m1.SensitiveValueTracker()
+    tracker.observe("ordinary prefix future-secret ordinary suffix")
+    assert tracker.clean()
+    tracker.add("future-secret")
+    assert not tracker.clean()
+
+
+def test_expected_setup_access_does_not_trip_secret_observation() -> None:
+    raw = '{"type":"hil_setup_access","ssid":"Deck","password":"secret","address":"192.168.4.1"}'
+    sanitized, _ = m1.sanitize_serial_line(raw)
+    assert not m1.serial_line_may_contain_secret(raw, sanitized)
+    assert m1.serial_line_may_contain_secret("device token=bare", m1.REDACTED_NON_DIAGNOSTIC)
+    assert m1.serial_line_may_contain_secret("pairing code 123456", m1.REDACTED_NON_DIAGNOSTIC)
+
+
 if __name__ == "__main__":
     test_serial_evidence_keeps_redacted_link_state_and_drops_setup_secret()
     test_summary_passes_only_with_every_real_gate_and_hashes_redacted_log()
@@ -208,4 +288,10 @@ if __name__ == "__main__":
     test_companion_logs_are_drained_redacted_and_secret_observation_fails_gate()
     test_profile_cleanup_revokes_only_temporary_profile_and_reselects_original()
     test_post_flash_monitor_requests_a_fresh_boot_after_ready_handshake()
+    test_fatal_boot_evidence_is_not_retried()
+    test_serial_command_never_calls_unbounded_flush()
+    test_cleanup_transaction_records_intent_before_observation()
+    test_exact_link_error_gate_rejects_unrelated_failures()
+    test_secret_tracker_catches_value_leaked_before_it_was_known()
+    test_expected_setup_access_does_not_trip_secret_observation()
     print("M1 acceptance contract passed")

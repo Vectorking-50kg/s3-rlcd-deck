@@ -44,6 +44,7 @@ enum class TransportEventType : uint8_t {
 
 struct TransportEvent {
     TransportEventType type = TransportEventType::wake;
+    deck_companion_link_error_t error = DECK_COMPANION_LINK_ERROR_NONE;
     int payload_length = 0;
     int payload_offset = 0;
     uint8_t opcode = 0;
@@ -153,12 +154,19 @@ void update_state(deck_companion_link_t *link, deck_companion_link_state_t state
     link->snapshot.state = state;
 }
 
-void increment_error(deck_companion_link_t *link)
+void record_error(
+    deck_companion_link_t *link,
+    deck_companion_link_error_t error
+)
 {
     const std::lock_guard<std::mutex> lock(link->mutex);
     if (link->snapshot.error_count != UINT32_MAX) {
         ++link->snapshot.error_count;
     }
+    if (link->snapshot.error_generation != UINT32_MAX) {
+        ++link->snapshot.error_generation;
+    }
+    link->snapshot.last_error = error;
 }
 
 bool state_is_online(const deck_companion_link_t *link)
@@ -190,11 +198,15 @@ void disconnect_transport(deck_companion_link_t *link)
     link->timing = {};
 }
 
-void schedule_retry(deck_companion_link_t *link, uint64_t now, bool failure)
+void schedule_retry(
+    deck_companion_link_t *link,
+    uint64_t now,
+    deck_companion_link_error_t error
+)
 {
     disconnect_transport(link);
-    if (failure) {
-        increment_error(link);
+    if (error != DECK_COMPANION_LINK_ERROR_NONE) {
+        record_error(link, error);
     }
     uint32_t attempts = 0;
     {
@@ -226,6 +238,18 @@ void websocket_event(
                event_id == WEBSOCKET_EVENT_CLOSED ||
                event_id == WEBSOCKET_EVENT_ERROR) {
         event.type = TransportEventType::disconnected;
+        event.error = DECK_COMPANION_LINK_ERROR_TRANSPORT;
+        if (event_id == WEBSOCKET_EVENT_ERROR && event_data != nullptr) {
+            const auto *data = static_cast<const esp_websocket_event_data_t *>(event_data);
+            if (data->error_handle.esp_tls_cert_verify_flags != 0) {
+                event.error = DECK_COMPANION_LINK_ERROR_TLS_PIN_MISMATCH;
+            } else if (
+                data->error_handle.error_type == WEBSOCKET_ERROR_TYPE_HANDSHAKE &&
+                data->error_handle.esp_ws_handshake_status_code == 401
+            ) {
+                event.error = DECK_COMPANION_LINK_ERROR_AUTH_REJECTED;
+            }
+        }
     } else if (event_id == WEBSOCKET_EVENT_DATA && event_data != nullptr) {
         const auto *data = static_cast<const esp_websocket_event_data_t *>(event_data);
         if (data->data_len < 0 || static_cast<size_t>(data->data_len) > sizeof(event.data)) {
@@ -278,10 +302,10 @@ bool certificate_matches(const deck_companion_profile_secret_t &secret)
     return matches;
 }
 
-bool start_transport(deck_companion_link_t *link)
+deck_companion_link_error_t start_transport(deck_companion_link_t *link)
 {
     if (link->secret == nullptr || !certificate_matches(*link->secret)) {
-        return false;
+        return DECK_COMPANION_LINK_ERROR_TLS_PIN_MISMATCH;
     }
     char uri[160]{};
     char headers[320]{};
@@ -302,7 +326,7 @@ bool start_transport(deck_companion_link_t *link)
     if (uri_size <= 0 || static_cast<size_t>(uri_size) >= sizeof(uri) ||
         headers_size <= 0 || static_cast<size_t>(headers_size) >= sizeof(headers)) {
         secure_clear(headers, sizeof(headers));
-        return false;
+        return DECK_COMPANION_LINK_ERROR_INTERNAL;
     }
     deck_companion_link_timing_begin_connection(
         &link->timing,
@@ -339,11 +363,11 @@ bool start_transport(deck_companion_link_t *link)
         if (client != nullptr) {
             (void)esp_websocket_client_destroy(client);
         }
-        return false;
+        return DECK_COMPANION_LINK_ERROR_TRANSPORT;
     }
     link->client = client;
     update_state(link, DECK_COMPANION_LINK_CONNECTING);
-    return true;
+    return DECK_COMPANION_LINK_ERROR_NONE;
 }
 
 bool send_text(deck_companion_link_t *link, const char *message, size_t size)
@@ -398,7 +422,7 @@ bool refresh_profile(deck_companion_link_t *link, uint64_t now)
 {
     deck_companion_profiles_snapshot_t profiles{};
     if (!deck_companion_profiles_snapshot(link->profiles, &profiles)) {
-        increment_error(link);
+        record_error(link, DECK_COMPANION_LINK_ERROR_INTERNAL);
         return false;
     }
     const bool changed = profiles.generation != link->observed_profile_generation ||
@@ -442,7 +466,7 @@ bool refresh_profile(deck_companion_link_t *link, uint64_t now)
         if (secret != nullptr) {
             deck_companion_profile_secret_clear(secret.get());
         }
-        increment_error(link);
+        record_error(link, DECK_COMPANION_LINK_ERROR_INTERNAL);
         return false;
     }
     link->secret = std::move(secret);
@@ -450,14 +474,17 @@ bool refresh_profile(deck_companion_link_t *link, uint64_t now)
     return true;
 }
 
-bool accept_data(deck_companion_link_t *link, const TransportEvent &event)
+deck_companion_link_error_t accept_data(
+    deck_companion_link_t *link,
+    const TransportEvent &event
+)
 {
     if (event.payload_length <= 0 ||
         event.payload_length > static_cast<int>(kMaximumMessageBytes) ||
         event.payload_offset < 0 || event.data_size > kFrameChunkBytes ||
         static_cast<size_t>(event.payload_offset) + event.data_size >
             static_cast<size_t>(event.payload_length)) {
-        return false;
+        return DECK_COMPANION_LINK_ERROR_PROTOCOL_INVALID;
     }
     if (event.payload_offset == 0) {
         link->frame_size = 0;
@@ -466,31 +493,35 @@ bool accept_data(deck_companion_link_t *link, const TransportEvent &event)
     } else if (link->frame_payload_length != event.payload_length ||
                static_cast<size_t>(event.payload_offset) != link->frame_size ||
                (event.opcode != 0 && event.opcode != link->frame_opcode)) {
-        return false;
+        return DECK_COMPANION_LINK_ERROR_PROTOCOL_INVALID;
     }
     if (link->frame_opcode != 1 || link->frame == nullptr) {
-        return false;
+        return DECK_COMPANION_LINK_ERROR_PROTOCOL_INVALID;
     }
     std::memcpy(link->frame.get() + link->frame_size, event.data, event.data_size);
     link->frame_size += event.data_size;
     if (!event.final) {
-        return true;
+        return DECK_COMPANION_LINK_ERROR_NONE;
     }
     if (link->frame_size != static_cast<size_t>(link->frame_payload_length)) {
-        return false;
+        return DECK_COMPANION_LINK_ERROR_PROTOCOL_INVALID;
     }
     link->frame[link->frame_size] = '\0';
     deck_device_heartbeat_t heartbeat{};
-    if (!deck_device_protocol_parse_heartbeat(
+    const deck_device_heartbeat_result_t parse_result =
+        deck_device_protocol_parse_heartbeat(
             link->frame.get(),
             link->frame_size,
             link->server_monotonic_ms,
             link->has_server_monotonic,
             &heartbeat
-        )) {
+        );
+    if (parse_result != DECK_DEVICE_HEARTBEAT_VALID) {
         secure_clear(link->frame.get(), link->frame_size + 1);
         link->frame_size = 0;
-        return false;
+        return parse_result == DECK_DEVICE_HEARTBEAT_UNSUPPORTED_MAJOR
+                   ? DECK_COMPANION_LINK_ERROR_PROTOCOL_MAJOR_REJECTED
+                   : DECK_COMPANION_LINK_ERROR_PROTOCOL_INVALID;
     }
     secure_clear(link->frame.get(), link->frame_size + 1);
     link->frame_size = 0;
@@ -524,7 +555,7 @@ bool accept_data(deck_companion_link_t *link, const TransportEvent &event)
             link->snapshot.profile_generation = profiles.generation;
         }
     }
-    return true;
+    return DECK_COMPANION_LINK_ERROR_NONE;
 }
 
 void link_task(void *argument)
@@ -538,20 +569,23 @@ void link_task(void *argument)
             link->next_profile_poll_ms = now + kProfilePollMs;
         }
         if (link->secret != nullptr && link->client == nullptr &&
-            now >= link->next_connect_ms && !start_transport(link)) {
-            schedule_retry(link, now, true);
+            now >= link->next_connect_ms) {
+            const deck_companion_link_error_t error = start_transport(link);
+            if (error != DECK_COMPANION_LINK_ERROR_NONE) {
+                schedule_retry(link, now, error);
+            }
         }
         if (link->client != nullptr && deck_companion_link_timing_server_expired(
                                            &link->timing,
                                            now,
                                            kHeartbeatTimeoutMs
                                        )) {
-            schedule_retry(link, now, true);
+            schedule_retry(link, now, DECK_COMPANION_LINK_ERROR_HEARTBEAT_TIMEOUT);
         }
         if (state_is_online(link) &&
             deck_companion_link_timing_client_due(&link->timing, now)) {
             if (!send_heartbeat(link, now)) {
-                schedule_retry(link, now, true);
+                schedule_retry(link, now, DECK_COMPANION_LINK_ERROR_TRANSPORT);
             } else {
                 deck_companion_link_timing_client_sent(
                     &link->timing,
@@ -561,7 +595,7 @@ void link_task(void *argument)
             }
         }
         if (link->queue_overflow.exchange(false, std::memory_order_acq_rel)) {
-            schedule_retry(link, now, true);
+            schedule_retry(link, now, DECK_COMPANION_LINK_ERROR_INTERNAL);
         }
 
         TransportEvent event{};
@@ -576,15 +610,17 @@ void link_task(void *argument)
             );
             link->has_server_monotonic = false;
             if (!send_hello(link)) {
-                schedule_retry(link, monotonic_ms(), true);
+                schedule_retry(link, monotonic_ms(), DECK_COMPANION_LINK_ERROR_TRANSPORT);
             }
         } else if (event.type == TransportEventType::disconnected) {
             if (link->client != nullptr) {
-                schedule_retry(link, monotonic_ms(), true);
+                schedule_retry(link, monotonic_ms(), event.error);
             }
-        } else if (event.type == TransportEventType::data &&
-                   !accept_data(link, event)) {
-            schedule_retry(link, monotonic_ms(), true);
+        } else if (event.type == TransportEventType::data) {
+            const deck_companion_link_error_t error = accept_data(link, event);
+            if (error != DECK_COMPANION_LINK_ERROR_NONE) {
+                schedule_retry(link, monotonic_ms(), error);
+            }
         }
         secure_clear(&event, sizeof(event));
     }
