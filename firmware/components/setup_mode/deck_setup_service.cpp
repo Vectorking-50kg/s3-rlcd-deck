@@ -33,6 +33,9 @@
 
 namespace {
 
+constexpr EventBits_t kProfilesReadyBit = BIT4;
+constexpr EventBits_t kProfilesFailedBit = BIT5;
+
 constexpr uint8_t kSetupChannel = 1;
 constexpr uint8_t kMaximumClients = 4;
 constexpr size_t kMaximumScanResults = 10;
@@ -1299,11 +1302,13 @@ void service_task(void *task_context)
     auto *service = static_cast<deck_setup_service_t *>(task_context);
     const char *initialization_error = initialize_wifi(service);
     if (initialization_error != nullptr) {
+        xEventGroupSetBits(service->wifi_events, kProfilesFailedBit);
         service->accepting_commands.store(false, std::memory_order_release);
         fail_session(service, initialization_error);
         vTaskDelete(nullptr);
         return;
     }
+    xEventGroupSetBits(service->wifi_events, kProfilesReadyBit);
     deck_wifi_config_snapshot_t initial_wifi{};
     if (!deck_wifi_config_snapshot(service->wifi_config, &initial_wifi)) {
         service->accepting_commands.store(false, std::memory_order_release);
@@ -1850,11 +1855,22 @@ bool deck_setup_service_revoke_companion(
     );
 }
 
-deck_companion_profiles_t *deck_setup_service_companion_profiles(
-    deck_setup_service_t *service
+deck_companion_profiles_t *deck_setup_service_wait_companion_profiles(
+    deck_setup_service_t *service,
+    uint32_t timeout_ms
 )
 {
-    return service == nullptr ? nullptr : service->companion_profiles;
+    if (service == nullptr || timeout_ms == 0) {
+        return nullptr;
+    }
+    const EventBits_t bits = xEventGroupWaitBits(
+        service->wifi_events,
+        kProfilesReadyBit | kProfilesFailedBit,
+        pdFALSE,
+        pdFALSE,
+        pdMS_TO_TICKS(timeout_ms)
+    );
+    return (bits & kProfilesReadyBit) != 0 ? service->companion_profiles : nullptr;
 }
 
 bool deck_setup_service_request_wifi_clear(

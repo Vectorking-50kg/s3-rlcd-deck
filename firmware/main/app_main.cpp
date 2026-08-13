@@ -574,7 +574,7 @@ void start_setup_after_ui_ready()
     if (application_setup != nullptr) {
         const esp_app_desc_t *app = esp_app_get_description();
         application_companion_link = deck_companion_link_start(
-            deck_setup_service_companion_profiles(application_setup),
+            deck_setup_service_wait_companion_profiles(application_setup, 10'000),
             app->version
         );
     }

@@ -64,8 +64,13 @@ bool deck_setup_service_revoke_companion(
 );
 
 /* Borrowed lifetime Profiles interface for the Device Link owner. */
-deck_companion_profiles_t *deck_setup_service_companion_profiles(
-    deck_setup_service_t *service
+/*
+ * Waits for the service-owned Profile module to finish initialization. A
+ * nonzero timeout is required because deck_setup_service_start is asynchronous.
+ */
+deck_companion_profiles_t *deck_setup_service_wait_companion_profiles(
+    deck_setup_service_t *service,
+    uint32_t timeout_ms
 );
 
 bool deck_setup_service_request_wifi_clear(
