@@ -66,31 +66,33 @@ func TestControllerStartReturnsListenerFailureAndPreservesItInStatus(t *testing.
 }
 
 func TestControllerStopWhileFactoryIsStartingPreventsListenerStart(t *testing.T) {
-	release := make(chan struct{})
-	factoryEntered := make(chan struct{})
-	var once sync.Once
-	controller, err := companionruntime.NewController(func() (*companionruntime.Runtime, error) {
-		once.Do(func() { close(factoryEntered) })
-		<-release
-		return companionruntime.New(testConfig())
-	})
-	if err != nil {
-		t.Fatalf("NewController() error = %v", err)
-	}
-	startDone := make(chan error, 1)
-	go func() { startDone <- controller.Start() }()
-	<-factoryEntered
-	stopDone := make(chan error, 1)
-	go func() { stopDone <- controller.Stop(context.Background()) }()
-	close(release)
-	if err = <-startDone; err != nil {
-		t.Fatalf("Start() error = %v", err)
-	}
-	if err = <-stopDone; err != nil {
-		t.Fatalf("Stop() error = %v", err)
-	}
-	if status := controller.Status(); status.State != companionruntime.StateStopped || status.ConnectedDecks != 0 {
-		t.Fatalf("status = %#v, want stopped without connected Decks", status)
+	for iteration := 0; iteration < 50; iteration++ {
+		release := make(chan struct{})
+		factoryEntered := make(chan struct{})
+		var once sync.Once
+		controller, err := companionruntime.NewController(func() (*companionruntime.Runtime, error) {
+			once.Do(func() { close(factoryEntered) })
+			<-release
+			return companionruntime.New(testConfig())
+		})
+		if err != nil {
+			t.Fatalf("NewController() error = %v", err)
+		}
+		startDone := make(chan error, 1)
+		go func() { startDone <- controller.Start() }()
+		<-factoryEntered
+		stopDone := make(chan error, 1)
+		go func() { stopDone <- controller.Stop(context.Background()) }()
+		close(release)
+		if err = <-startDone; err != nil {
+			t.Fatalf("iteration %d Start() error = %v", iteration, err)
+		}
+		if err = <-stopDone; err != nil {
+			t.Fatalf("iteration %d Stop() error = %v", iteration, err)
+		}
+		if status := controller.Status(); status.State != companionruntime.StateStopped || status.ConnectedDecks != 0 {
+			t.Fatalf("iteration %d status = %#v, want stopped without connected Decks", iteration, status)
+		}
 	}
 }
 

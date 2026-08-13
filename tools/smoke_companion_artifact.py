@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -54,6 +56,87 @@ def stop_process(process: subprocess.Popen[bytes]) -> None:
         raise RuntimeError(f"desktop process returned {return_code} during shutdown")
 
 
+def credential_account(data_directory: str) -> str:
+    absolute = str(Path(data_directory).resolve())
+    return "management-" + hashlib.sha256(absolute.encode()).hexdigest()[:32]
+
+
+def delete_smoke_credential(data_directory: str) -> None:
+    account = credential_account(data_directory)
+    if os.name == "nt":
+        script = (
+            "$target='S3 RLCD Deck Companion:" + account + "'; "
+            "$source=@'\n"
+            "using System; using System.Runtime.InteropServices; "
+            "public static class Native { "
+            "[DllImport(\"advapi32.dll\", CharSet=CharSet.Unicode)] "
+            "public static extern bool CredDelete(string target, int type, int flags); }\n"
+            "'@; Add-Type $source; [Native]::CredDelete($target,1,0) | Out-Null"
+        )
+        subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
+    elif sys.platform == "darwin":
+        subprocess.run(
+            [
+                "/usr/bin/security", "delete-generic-password",
+                "-s", "S3 RLCD Deck Companion", "-a", account,
+            ],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
+
+
+def run_desktop_generation(
+    executable: Path, expected_version: str, data_directory: str
+) -> None:
+    management_port = reserve_loopback_port()
+    device_port = reserve_loopback_port()
+    while device_port == management_port:
+        device_port = reserve_loopback_port()
+    management_address = f"127.0.0.1:{management_port}"
+    device_address = f"127.0.0.1:{device_port}"
+    creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+    environment = dict(os.environ)
+    environment.pop("S3DECK_MANAGEMENT_TOKEN", None)
+    process = subprocess.Popen(
+        [
+            str(executable),
+            "--management-address", management_address,
+            "--device-hub-address", device_address,
+            "--data-directory", data_directory,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=environment,
+        creationflags=creation_flags,
+    )
+    try:
+        bootstrap = read_bootstrap(management_address, process)
+        if bootstrap.get("version") != expected_version:
+            raise RuntimeError(f"bootstrap identity mismatch: {bootstrap!r}")
+        time.sleep(1.0)
+        if process.poll() is not None:
+            raise RuntimeError(
+                f"native tray process did not remain running: {process.returncode}"
+            )
+        stop_process(process)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=2)
+        stdout, stderr = process.communicate(timeout=2)
+        if process.returncode != 0:
+            print(stdout.decode("utf-8", errors="replace"), end="")
+            print(stderr.decode("utf-8", errors="replace"), end="")
+
+
 def run(executable: Path, expected_version: str, expected_commit: str) -> None:
     version_result = subprocess.run(
         [str(executable), "--version"],
@@ -70,52 +153,12 @@ def run(executable: Path, expected_version: str, expected_commit: str) -> None:
             f"version output {version_result.stdout.strip()!r}, want {expected_identity!r}"
         )
 
-    management_port = reserve_loopback_port()
-    device_port = reserve_loopback_port()
-    while device_port == management_port:
-        device_port = reserve_loopback_port()
-    management_address = f"127.0.0.1:{management_port}"
-    device_address = f"127.0.0.1:{device_port}"
-    creation_flags = (
-        subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
-    )
     with tempfile.TemporaryDirectory(prefix="s3deck-native-smoke-") as data_directory:
-        process = subprocess.Popen(
-            [
-                str(executable),
-                "--management-address",
-                management_address,
-                "--device-hub-address",
-                device_address,
-                "--data-directory",
-                data_directory,
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env={
-                **os.environ,
-                "S3DECK_MANAGEMENT_TOKEN": "native-smoke-management-token-32-bytes",
-            },
-            creationflags=creation_flags,
-        )
         try:
-            bootstrap = read_bootstrap(management_address, process)
-            if bootstrap.get("version") != expected_version:
-                raise RuntimeError(f"bootstrap identity mismatch: {bootstrap!r}")
-            time.sleep(1.0)
-            if process.poll() is not None:
-                raise RuntimeError(
-                    f"native tray process did not remain running: {process.returncode}"
-                )
-            stop_process(process)
+            run_desktop_generation(executable, expected_version, data_directory)
+            run_desktop_generation(executable, expected_version, data_directory)
         finally:
-            if process.poll() is None:
-                process.kill()
-                process.wait(timeout=2)
-            stdout, stderr = process.communicate(timeout=2)
-            if process.returncode != 0:
-                print(stdout.decode("utf-8", errors="replace"), end="")
-                print(stderr.decode("utf-8", errors="replace"), end="")
+            delete_smoke_credential(data_directory)
 
 
 def main() -> int:

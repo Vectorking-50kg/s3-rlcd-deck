@@ -29,6 +29,7 @@ type Controller struct {
 	starting     bool
 	startDone    chan struct{}
 	stopStarting bool
+	stopRuntime  bool
 	lastStatus   Status
 }
 
@@ -55,6 +56,7 @@ func (controller *Controller) Start() error {
 	controller.starting = true
 	controller.startDone = make(chan struct{})
 	controller.stopStarting = false
+	controller.stopRuntime = false
 	controller.lastStatus.LastError = ""
 	startDone := controller.startDone
 	controller.mu.Unlock()
@@ -103,6 +105,12 @@ func (controller *Controller) Start() error {
 			return nil
 		}
 		if status.State == StateStopped {
+			controller.mu.Lock()
+			stopRuntime := controller.stopRuntime
+			controller.mu.Unlock()
+			if stopRuntime {
+				return nil
+			}
 			if status.LastError != "" {
 				return errors.New(status.LastError)
 			}
@@ -129,6 +137,9 @@ func (controller *Controller) Stop(ctx context.Context) error {
 	application := controller.application
 	cancel := controller.cancel
 	done := controller.done
+	if application != nil {
+		controller.stopRuntime = true
+	}
 	controller.mu.Unlock()
 	if application == nil || cancel == nil || done == nil {
 		return nil
