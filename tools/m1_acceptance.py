@@ -8,6 +8,7 @@ import datetime
 import hashlib
 import http.cookiejar
 import importlib
+import ipaddress
 import json
 import os
 import pathlib
@@ -823,7 +824,37 @@ def set_wifi_power(enabled: bool, timeout: float = 10) -> None:
         raise AcceptanceFailure("cannot reset the Mac Wi-Fi interface")
 
 
+def wifi_command_output(command: list[str], timeout: float) -> str:
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
 def host_is_reachable(host: str, timeout: float) -> bool:
+    # macOS 15 redacts SSID/BSSID from all unprivileged status APIs. Prove the
+    # association at the interface layer instead: en0 must hold a DHCP address
+    # on the target /24 and the scoped route to the target must resolve to en0.
+    # A VPN, Ethernet route, or a stale previous Wi-Fi association cannot meet
+    # both conditions.
+    local_address = wifi_command_output(["ipconfig", "getifaddr", "en0"], timeout)
+    route = wifi_command_output(
+        ["route", "-n", "get", "-ifscope", "en0", host], timeout
+    )
+    try:
+        same_subnet = ipaddress.ip_address(local_address) in ipaddress.ip_network(
+            f"{host}/24", strict=False
+        )
+    except ValueError:
+        return False
+    if not same_subnet or re.search(r"(?m)^\s*interface:\s+en0\s*$", route) is None:
+        return False
     try:
         return subprocess.run(
             ["ping", "-c", "1", "-W", "1000", host],

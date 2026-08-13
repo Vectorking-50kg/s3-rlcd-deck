@@ -518,6 +518,28 @@ def test_target_ssid_is_selected_before_reachability_can_pass() -> None:
     assert operations == ["connect", "ping"]
 
 
+def test_wifi_reachability_requires_an_en0_address_on_the_target_subnet() -> None:
+    def command_output(command: list[str], _timeout: float) -> str:
+        if command[:2] == ["ipconfig", "getifaddr"]:
+            return "192.168.31.45"
+        return "route to: 192.168.4.1\ninterface: en0\n"
+
+    with mock.patch.object(
+        m1, "wifi_command_output", side_effect=command_output
+    ), mock.patch.object(m1.subprocess, "run", return_value=mock.Mock(returncode=0)):
+        assert not m1.host_is_reachable("192.168.4.1", 2)
+
+    def setup_output(command: list[str], _timeout: float) -> str:
+        if command[:2] == ["ipconfig", "getifaddr"]:
+            return "192.168.4.2"
+        return "route to: 192.168.4.1\ninterface: en0\n"
+
+    with mock.patch.object(
+        m1, "wifi_command_output", side_effect=setup_output
+    ), mock.patch.object(m1.subprocess, "run", return_value=mock.Mock(returncode=0)):
+        assert m1.host_is_reachable("192.168.4.1", 2)
+
+
 def test_original_wifi_power_and_association_share_one_deadline() -> None:
     observed: dict[str, object] = {}
 
@@ -675,6 +697,7 @@ if __name__ == "__main__":
     test_original_lan_recovery_uses_the_reachability_helper()
     test_wifi_operations_share_one_deadline_budget()
     test_target_ssid_is_selected_before_reachability_can_pass()
+    test_wifi_reachability_requires_an_en0_address_on_the_target_subnet()
     test_original_wifi_power_and_association_share_one_deadline()
     test_cleanup_transaction_records_intent_before_observation()
     test_setup_restart_requires_explicit_inactive_observation()
