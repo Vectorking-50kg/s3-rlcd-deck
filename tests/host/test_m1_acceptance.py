@@ -134,6 +134,29 @@ def test_command_output_can_use_the_pinned_toolchain_environment() -> None:
     assert run.call_args.kwargs["env"] is environment
 
 
+def test_summary_toolchain_identity_uses_the_pinned_environment() -> None:
+    checks = {name: True for name in m1.REQUIRED_CHECKS}
+    environment = {"PATH": "/pinned/bin", "ESP_IDF_VERSION": "6.0.2"}
+    with mock.patch.object(
+        m1, "command_output", side_effect=["go pinned", "ESP-IDF v6.0.2"]
+    ) as output:
+        summary = m1.build_summary(
+            firmware_commit="a" * 40,
+            companion_commit="a" * 40,
+            started_at="2026-08-13T01:00:00Z",
+            ended_at="2026-08-13T01:05:00Z",
+            checks=checks,
+            reconnect_count=2,
+            deck_error_count=1,
+            companion_error_count=3,
+            serial_log=None,
+            source_dirty=False,
+            toolchain_environment=environment,
+        )
+    assert summary["toolchains"]["esp_idf"] == "ESP-IDF v6.0.2"
+    assert all(call.args[1] is environment for call in output.call_args_list)
+
+
 def test_native_run_requires_same_commit_and_both_real_platform_jobs() -> None:
     full = "c" * 40
     document = {
@@ -343,6 +366,7 @@ if __name__ == "__main__":
     test_build_identity_is_only_retained_for_an_exact_full_commit()
     test_current_source_and_companion_identity_are_observed_not_assumed()
     test_command_output_can_use_the_pinned_toolchain_environment()
+    test_summary_toolchain_identity_uses_the_pinned_environment()
     test_native_run_requires_same_commit_and_both_real_platform_jobs()
     test_companion_logs_are_drained_redacted_and_secret_observation_fails_gate()
     test_profile_cleanup_revokes_only_temporary_profile_and_reselects_original()

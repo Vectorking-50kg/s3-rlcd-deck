@@ -161,11 +161,13 @@ def command_output(
     return result.stdout.strip()
 
 
-def toolchain_identity() -> dict[str, str]:
+def toolchain_identity(
+    environment: dict[str, str] | None = None,
+) -> dict[str, str]:
     identity: dict[str, str] = {}
     for name, command in (("go", ["go", "version"]), ("esp_idf", ["idf.py", "--version"])):
         try:
-            identity[name] = command_output(command)
+            identity[name] = command_output(command, environment)
         except (OSError, subprocess.SubprocessError):
             identity[name] = "unavailable"
     return identity
@@ -862,6 +864,7 @@ def build_summary(
     companion_error_count: int,
     serial_log: pathlib.Path | None,
     source_dirty: bool,
+    toolchain_environment: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     failures = [name for name in REQUIRED_CHECKS if checks.get(name) is not True]
     if source_dirty:
@@ -875,7 +878,7 @@ def build_summary(
         "firmware_commit": firmware_commit,
         "companion_commit": companion_commit,
         "platform": platform.platform(),
-        "toolchains": toolchain_identity(),
+        "toolchains": toolchain_identity(toolchain_environment),
         "started_at": started_at,
         "ended_at": ended_at,
         "checks": {name: checks.get(name, False) for name in REQUIRED_CHECKS},
@@ -933,10 +936,12 @@ def main() -> int:
     cleanup = CleanupTransaction()
     summary: dict[str, Any] = {"status": "failed"}
     summary_written = False
+    toolchain_environment: dict[str, str] | None = None
     try:
         if dirty:
             raise AcceptanceFailure("source tree is dirty; commit before auditable acceptance")
         environment = run_preflight(arguments.result_dir / "preflight.log")
+        toolchain_environment = environment
         if command_output(["idf.py", "--version"], environment) != "ESP-IDF v6.0.2":
             raise AcceptanceFailure("M1 acceptance requires ESP-IDF v6.0.2")
         executable = companion_for_current_host(commit)
@@ -1298,6 +1303,7 @@ def main() -> int:
                 companion_error_count=companion_error_count,
                 serial_log=serial_path,
                 source_dirty=dirty,
+                toolchain_environment=toolchain_environment,
             )
         except Exception as error:
             print(f"M1 summary assembly failed: {error}", file=sys.stderr)
