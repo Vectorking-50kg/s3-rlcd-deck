@@ -73,23 +73,15 @@ class SerialDisconnected(AcceptanceFailure):
     pass
 
 
-FATAL_RESET_REASONS = {
-    "panic",
-    "interrupt_watchdog",
-    "task_watchdog",
-    "watchdog",
-    "brownout",
-    "power_glitch",
-    "cpu_lockup",
-}
-
-
 def accept_boot_event(event: dict[str, Any], stage: str) -> bool:
     if event.get("type") != "boot_ok":
         return False
     reason = str(event.get("reset_reason", "unknown"))
-    if reason in FATAL_RESET_REASONS:
-        raise AcceptanceFailure(f"{stage}: fatal reset reason {reason} observed")
+    # Every M1 boot is initiated through esp_restart(), including the first
+    # boot after OpenOCD's app-only flash. Anything else is an unexplained
+    # reset and cannot serve as acceptance evidence.
+    if reason != "software":
+        raise AcceptanceFailure(f"{stage}: unexpected reset reason {reason} observed")
     return True
 
 

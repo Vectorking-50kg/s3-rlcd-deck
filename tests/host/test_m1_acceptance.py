@@ -260,23 +260,31 @@ def test_post_flash_monitor_requests_a_fresh_boot_after_ready_handshake() -> Non
     assert reopens == []
 
 
-def test_boot_gate_rejects_fatal_reset_reasons() -> None:
-    fatal_reasons = {
+def test_boot_gate_accepts_only_the_expected_software_reset() -> None:
+    unexpected_reasons = {
+        "unknown",
+        "power_on",
+        "external",
         "panic",
         "interrupt_watchdog",
         "task_watchdog",
         "watchdog",
+        "deep_sleep",
         "brownout",
+        "sdio",
+        "usb",
+        "jtag",
+        "efuse",
         "power_glitch",
         "cpu_lockup",
     }
-    for reason in fatal_reasons:
+    for reason in unexpected_reasons:
         try:
             m1.accept_boot_event({"type": "boot_ok", "reset_reason": reason}, "boot")
         except m1.AcceptanceFailure as error:
             assert reason in str(error)
         else:
-            raise AssertionError(f"fatal reset reason {reason} was accepted")
+            raise AssertionError(f"unexpected reset reason {reason} was accepted")
     assert m1.accept_boot_event(
         {"type": "boot_ok", "reset_reason": "software"}, "boot"
     )
@@ -543,7 +551,7 @@ if __name__ == "__main__":
     test_companion_logs_are_drained_redacted_and_secret_observation_fails_gate()
     test_profile_cleanup_revokes_only_temporary_profile_and_reselects_original()
     test_post_flash_monitor_requests_a_fresh_boot_after_ready_handshake()
-    test_boot_gate_rejects_fatal_reset_reasons()
+    test_boot_gate_accepts_only_the_expected_software_reset()
     test_post_flash_usb_reenumeration_reopens_without_a_second_reset()
     test_post_flash_usb_reenumeration_can_interrupt_the_ready_write()
     test_initial_serial_open_waits_for_usb_reenumeration()
