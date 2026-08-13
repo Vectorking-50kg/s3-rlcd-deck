@@ -449,6 +449,19 @@ void handle_diagnostic_control_line(char *line)
         write_stdout(nullptr, identity, sizeof(identity) - 1);
         return;
     }
+    if (std::strcmp(line, "DECK_BUILD_IDENTITY") == 0) {
+        char identity[128];
+        const int size = snprintf(
+            identity,
+            sizeof(identity),
+            "{\"type\":\"deck_build_identity\",\"firmware_commit\":\"%s\"}\n",
+            DECK_FIRMWARE_COMMIT
+        );
+        if (size > 0 && static_cast<size_t>(size) < sizeof(identity)) {
+            write_stdout(nullptr, identity, static_cast<size_t>(size));
+        }
+        return;
+    }
     if (std::strcmp(line, "DECK_HIL_SETUP_ACCESS") == 0) {
         char ssid[DECK_M0_SETUP_SSID_CAPACITY]{};
         char password[DECK_M0_SETUP_PASSWORD_CAPACITY]{};

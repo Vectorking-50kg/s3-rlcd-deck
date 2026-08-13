@@ -19,3 +19,16 @@ idf_component_register(
 
 target_compile_features(${COMPONENT_LIB} PRIVATE cxx_std_17)
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror)
+
+if(DEFINED DECK_FIRMWARE_COMMIT)
+    string(LENGTH "${DECK_FIRMWARE_COMMIT}" DECK_FIRMWARE_COMMIT_LENGTH)
+endif()
+if(NOT DEFINED DECK_FIRMWARE_COMMIT OR
+   NOT DECK_FIRMWARE_COMMIT_LENGTH EQUAL 40 OR
+   NOT DECK_FIRMWARE_COMMIT MATCHES "^[0-9a-f]+$")
+    set(DECK_FIRMWARE_COMMIT "unknown")
+endif()
+target_compile_definitions(
+    ${COMPONENT_LIB}
+    PRIVATE DECK_FIRMWARE_COMMIT="${DECK_FIRMWARE_COMMIT}"
+)

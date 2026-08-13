@@ -732,7 +732,7 @@ serial_rx → fixed blocks → serial_router
 V1 使用 ESP32-S3 USB Serial/JTAG 的单 CDC 通道作为目标串口桥：
 
 - 发布固件的目标串口流不与 ESP-IDF console 日志混用；发布配置关闭 ESP-IDF console。
-- 发布固件诊断走 Web/内存诊断环。开发/HIL 构建可临时启用结构化 USB `boot_ok`，仅用于启动验收，并在发布配置中关闭。
+- 发布固件诊断走 Web/内存诊断环。开发/HIL 构建可临时启用结构化 USB `boot_ok` 与无凭据的 `deck_build_identity`，仅用于启动和构建身份验收，并在发布配置中关闭。
 - 目标 UART 不使用 U0TXD；USB console/ROM 输出不会通过 GPIO17 注入目标设备。
 - USB sink 独立任务处理，不能从 UART RX 同步写 USB。
 - 电脑未打开端口时只允许 USB sink 自身丢弃。

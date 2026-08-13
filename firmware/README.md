@@ -212,7 +212,10 @@ Development builds additionally emit a redacted `companion_link_state` JSONL eve
 state, profile generation, reconnect/error counts, and last-heartbeat monotonic time. The M1
 acceptance tool may request one in-memory Setup access record to automate the same recovery-page
 flow a user performs; that record is immediately replaced by a fixed redaction marker and is
-never part of committed evidence. Release builds do not compile the diagnostic console.
+never part of committed evidence. It may also request `deck_build_identity`, which contains only
+the full source commit embedded by `tools/idf.sh`; the tool compares it with the clean checkout
+after safely programming both OTA application slots. Release builds do not compile the diagnostic
+console.
 
 ## Long-duration HIL
 

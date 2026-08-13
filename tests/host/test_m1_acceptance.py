@@ -5,6 +5,7 @@ import importlib.util
 import json
 import pathlib
 import tempfile
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -86,8 +87,102 @@ def test_evidence_redaction_gate_rejects_every_secret_field() -> None:
             assert not m1.evidence_is_redacted(evidence), secret
 
 
+def test_build_identity_is_only_retained_for_an_exact_full_commit() -> None:
+    full = "a" * 40
+    sanitized, event = m1.sanitize_serial_line(
+        json.dumps({"type": "deck_build_identity", "firmware_commit": full})
+    )
+    assert event == {"type": "deck_build_identity", "firmware_commit": full}
+    assert full in sanitized
+
+    sanitized, event = m1.sanitize_serial_line(
+        json.dumps({"type": "deck_build_identity", "firmware_commit": "a" * 12})
+    )
+    assert sanitized == m1.REDACTED_NON_DIAGNOSTIC
+    assert event is not None
+
+
+def test_current_source_and_companion_identity_are_observed_not_assumed() -> None:
+    with mock.patch.object(m1, "command_output", return_value=""):
+        assert m1.source_tree_clean()
+    with mock.patch.object(m1, "command_output", return_value=" M .github/workflows/ci.yml"):
+        assert not m1.source_tree_clean()
+
+    full = "b" * 40
+    expected = f"s3deck-companion 0.1.0-dev (commit {full})"
+    with mock.patch.object(m1.platform, "system", return_value="Darwin"), mock.patch.object(
+        m1, "command_output", side_effect=["arm64", expected]
+    ):
+        executable = m1.companion_for_current_host(full)
+    assert executable.name == "s3deck-companion"
+
+
+def test_native_run_requires_same_commit_and_both_real_platform_jobs() -> None:
+    full = "c" * 40
+    document = {
+        "headSha": full,
+        "conclusion": "success",
+        "jobs": [
+            {"name": "macOS native (arm64)", "conclusion": "success"},
+            {"name": "Windows native (amd64)", "conclusion": "success"},
+        ],
+    }
+    with mock.patch.object(m1, "command_output", return_value=json.dumps(document)):
+        assert m1.verified_native_run(
+            "https://github.com/owner/repo/actions/runs/123", full
+        ) == (True, True)
+    document["jobs"].pop()
+    with mock.patch.object(m1, "command_output", return_value=json.dumps(document)):
+        assert m1.verified_native_run(
+            "https://github.com/owner/repo/actions/runs/123", full
+        ) == (True, False)
+
+
+def test_companion_logs_are_drained_redacted_and_secret_observation_fails_gate() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        output = pathlib.Path(directory) / "companion.jsonl"
+        process = m1.CompanionProcess(
+            pathlib.Path("companion"), pathlib.Path(directory), "secret-value", output
+        )
+        process._log = output.open("w", encoding="utf-8")
+        stream = __import__("io").BytesIO(b"ordinary line\nsecret-value\n")
+        process._drain_output(stream)
+        process._log.close()
+        assert not process.logs_redacted()
+        assert "ordinary line" not in output.read_text(encoding="utf-8")
+        assert "secret-value" not in output.read_text(encoding="utf-8")
+
+
+def test_profile_cleanup_revokes_only_temporary_profile_and_reselects_original() -> None:
+    original = {"profile_ids": ["sha256:" + "a" * 64], "active_profile_id": "sha256:" + "a" * 64}
+    temporary = "sha256:" + "b" * 64
+    snapshots = [
+        {"profile_ids": original["profile_ids"] + [temporary], "active_profile_id": temporary},
+        original,
+    ]
+    operations: list[tuple[str, dict[str, str]]] = []
+
+    def fake_form(_base: str, path: str, fields: dict[str, str]) -> int:
+        operations.append((path, fields))
+        return 202
+
+    with mock.patch.object(m1, "snapshot_companion_profiles", side_effect=snapshots), mock.patch.object(
+        m1, "http_form", side_effect=fake_form
+    ):
+        m1.restore_companion_profiles("http://192.168.4.1", original, 1)
+    assert operations == [
+        ("/api/companions/revoke", {"profile_id": temporary}),
+        ("/api/companions/select", {"profile_id": original["active_profile_id"]}),
+    ]
+
+
 if __name__ == "__main__":
     test_serial_evidence_keeps_redacted_link_state_and_drops_setup_secret()
     test_summary_passes_only_with_every_real_gate_and_hashes_redacted_log()
     test_evidence_redaction_gate_rejects_every_secret_field()
+    test_build_identity_is_only_retained_for_an_exact_full_commit()
+    test_current_source_and_companion_identity_are_observed_not_assumed()
+    test_native_run_requires_same_commit_and_both_real_platform_jobs()
+    test_companion_logs_are_drained_redacted_and_secret_observation_fails_gate()
+    test_profile_cleanup_revokes_only_temporary_profile_and_reselects_original()
     print("M1 acceptance contract passed")
