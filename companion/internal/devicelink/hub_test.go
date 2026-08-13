@@ -296,6 +296,30 @@ func TestHubRejectsDuplicateDeviceIDAndAllowsReconnectAfterClose(t *testing.T) {
 	_ = readText(t, reconnected, time.Second)
 }
 
+func TestHubReportsConnectedDeckCount(t *testing.T) {
+	hub, _, server := newTestHub(t)
+	connection, _, err := dialTestDeck(t, server, testDeviceID, testDeviceToken)
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	if err = connection.Write(context.Background(), websocket.MessageText, validHello()); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+	_ = readText(t, connection, time.Second)
+	if got := hub.ConnectedDecks(); got != 1 {
+		t.Fatalf("ConnectedDecks() = %d, want 1", got)
+	}
+
+	connection.CloseNow()
+	deadline := time.Now().Add(time.Second)
+	for hub.ConnectedDecks() != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := hub.ConnectedDecks(); got != 0 {
+		t.Fatalf("ConnectedDecks() after close = %d, want 0", got)
+	}
+}
+
 func TestHubCloseIsBoundedWhenADeckDoesNotAnswerTheCloseHandshake(t *testing.T) {
 	hub, _, server := newTestHub(t)
 	connection, _, err := dialTestDeck(t, server, testDeviceID, testDeviceToken)

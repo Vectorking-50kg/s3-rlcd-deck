@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 )
 
+var ErrLockHeld = errors.New("protected lock is already held")
+
 type Lock struct {
 	file *os.File
 }
@@ -29,7 +31,7 @@ func AcquireDirectoryLock(directory string, name string) (*Lock, error) {
 	}
 	if err = lockFile(file); err != nil {
 		_ = file.Close()
-		return nil, fmt.Errorf("data directory is already owned by another Companion: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrLockHeld, err)
 	}
 	return &Lock{file: file}, nil
 }

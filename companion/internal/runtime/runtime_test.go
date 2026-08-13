@@ -200,6 +200,16 @@ func TestRuntimeServesReadOnlyStatus(t *testing.T) {
 	}
 }
 
+func TestRuntimeStatusIncludesConnectedDeckCount(t *testing.T) {
+	application, err := companionruntime.New(testConfig())
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if got := application.Status().ConnectedDecks; got != 0 {
+		t.Fatalf("ConnectedDecks = %d, want 0", got)
+	}
+}
+
 func loginManagement(
 	t *testing.T,
 	address string,

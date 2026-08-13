@@ -15,6 +15,7 @@ import (
 
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/protocol"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/notices"
 	webapp "github.com/Vectorking-50kg/s3-rlcd-deck/companion/web"
 )
 
@@ -52,6 +53,12 @@ func (application *Runtime) managementRoutes() http.Handler {
 		limits.SensitiveRateWindow,
 	)
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET "+ConsoleAccessPath, application.ServeConsoleAccess)
+	mux.HandleFunc("GET /third-party-licenses.txt", func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		response.Header().Set("Cache-Control", "no-store")
+		_, _ = response.Write([]byte(notices.ThirdParty()))
+	})
 	mux.HandleFunc("GET /api/v1/bootstrap", application.handleBootstrap)
 	mux.HandleFunc("POST /api/v1/login", limitManagementRequests(
 		sensitiveRateLimiter,
@@ -83,7 +90,17 @@ func (application *Runtime) managementRoutes() http.Handler {
 		http.Error(response, "not found", http.StatusNotFound)
 	})
 	mux.Handle("/", webapp.Handler())
-	return mux
+	return secureManagementResponses(mux)
+}
+
+func secureManagementResponses(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Security-Policy", "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+		response.Header().Set("Referrer-Policy", "no-referrer")
+		response.Header().Set("X-Content-Type-Options", "nosniff")
+		response.Header().Set("X-Frame-Options", "DENY")
+		next.ServeHTTP(response, request)
+	})
 }
 
 func (application *Runtime) handleIssuePairingCode(response http.ResponseWriter, request *http.Request) {
