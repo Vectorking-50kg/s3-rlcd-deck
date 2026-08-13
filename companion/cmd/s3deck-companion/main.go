@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	goruntime "runtime"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -24,6 +25,9 @@ import (
 var (
 	version = "0.1.0-dev"
 	commit  = "unknown"
+	// Acceptance builds may set this with -X to make a real Deck observe an
+	// incompatible server major. Shipped artifacts leave it empty.
+	hilServerProtocolVersion = ""
 )
 
 const (
@@ -73,6 +77,15 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if flags.NArg() != 0 {
 		fmt.Fprintln(stderr, "s3deck-companion does not accept positional arguments")
 		return 2
+	}
+	serverProtocolVersion := 0
+	if hilServerProtocolVersion != "" {
+		parsedVersion, versionErr := strconv.Atoi(hilServerProtocolVersion)
+		serverProtocolVersion = parsedVersion
+		if versionErr != nil || serverProtocolVersion < 1 {
+			fmt.Fprintln(stderr, "invalid HIL server protocol version")
+			return 2
+		}
 	}
 	if *showVersion {
 		fmt.Fprintf(stdout, "s3deck-companion %s (commit %s)\n", version, commit)
@@ -139,8 +152,9 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			AdminToken:    managementTokenValue,
 		},
 		DeviceHub: companionruntime.DeviceHubConfig{
-			Address:        *deviceHubAddress,
-			TLSCertificate: &tlsCertificate,
+			Address:               *deviceHubAddress,
+			TLSCertificate:        &tlsCertificate,
+			ServerProtocolVersion: serverProtocolVersion,
 		},
 		Pairing: pairingService,
 	}

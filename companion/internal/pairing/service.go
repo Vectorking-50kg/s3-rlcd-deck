@@ -55,6 +55,7 @@ type Store interface {
 	SaveRotationCode(context.Context, StoredCode) error
 	ConsumeCode(context.Context, string, time.Time, StoredTrust) error
 	LookupTrust(context.Context, string) (StoredTrust, error)
+	ListTrusts(context.Context) ([]StoredTrust, error)
 	RevokeTrust(context.Context, string, time.Time) error
 }
 
@@ -125,6 +126,15 @@ type StoredTrust struct {
 	ProtocolVersion        int       `json:"protocol_version"`
 	CreatedAt              time.Time `json:"created_at"`
 	RotatedAt              time.Time `json:"rotated_at,omitempty"`
+}
+
+// TrustView is the complete management-safe view of paired Deck trust. Secret
+// verifiers deliberately have no representation in this type.
+type TrustView struct {
+	DeviceID        string    `json:"device_id"`
+	ProtocolVersion int       `json:"protocol_version"`
+	CreatedAt       time.Time `json:"created_at"`
+	RotatedAt       time.Time `json:"rotated_at,omitempty"`
 }
 
 type Authentication struct {
@@ -315,6 +325,23 @@ func (service *Service) Verify(ctx context.Context, authentication Authenticatio
 	identityMatches := subtle.ConstantTimeCompare(expectedIdentity, actualIdentity[:])
 	protocolMatches := subtle.ConstantTimeEq(int32(trust.ProtocolVersion), int32(authentication.ProtocolVersion))
 	return tokenMatches&identityMatches&protocolMatches == 1, nil
+}
+
+func (service *Service) ListTrusts(ctx context.Context) ([]TrustView, error) {
+	trusts, err := service.store.ListTrusts(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list device trust: %w", err)
+	}
+	views := make([]TrustView, 0, len(trusts))
+	for _, trust := range trusts {
+		views = append(views, TrustView{
+			DeviceID:        trust.DeviceID,
+			ProtocolVersion: trust.ProtocolVersion,
+			CreatedAt:       trust.CreatedAt.UTC(),
+			RotatedAt:       trust.RotatedAt.UTC(),
+		})
+	}
+	return views, nil
 }
 
 func (service *Service) Revoke(ctx context.Context, deviceID string) error {

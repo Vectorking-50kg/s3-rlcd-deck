@@ -208,6 +208,11 @@ func TestRuntimeStatusIncludesConnectedDeckCount(t *testing.T) {
 	if got := application.Status().ConnectedDecks; got != 0 {
 		t.Fatalf("ConnectedDecks = %d, want 0", got)
 	}
+	status := application.Status()
+	if status.DeviceLinkConnections != 0 || status.DeviceLinkDisconnects != 0 ||
+		status.DeviceLinkAuthErrors != 0 || status.DeviceLinkProtocolErrors != 0 {
+		t.Fatalf("Status() Device Link counters = %#v, want zero-value counters", status)
+	}
 }
 
 func loginManagement(

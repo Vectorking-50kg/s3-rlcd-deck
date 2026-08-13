@@ -208,6 +208,12 @@ seconds. The ESP-IDF `tcp_transport` component is compiled without log calls bec
 stock handshake error path prints custom headers; Deck-owned diagnostics remain redacted.
 All credentials remain private to the Profile and Device Link modules.
 
+Development builds additionally emit a redacted `companion_link_state` JSONL event with only
+state, profile generation, reconnect/error counts, and last-heartbeat monotonic time. The M1
+acceptance tool may request one in-memory Setup access record to automate the same recovery-page
+flow a user performs; that record is immediately replaced by a fixed redaction marker and is
+never part of committed evidence. Release builds do not compile the diagnostic console.
+
 ## Long-duration HIL
 
 For fast development feedback, use the 90-second contract. It exercises the display and

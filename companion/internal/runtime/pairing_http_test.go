@@ -65,6 +65,11 @@ func TestPairingHTTPFlowIssuesRedeemsRotatesAndRevokesDeviceTrust(t *testing.T) 
 	if credential.Token == "" || credential.CertificateFingerprint != testCertificateFingerprint {
 		t.Fatalf("pairing credential = %#v", credential)
 	}
+	devices := listPairedDevices(t, client, status.ManagementAddress, session)
+	if len(devices) != 1 || devices[0].DeviceID != credential.DeviceID ||
+		devices[0].ProtocolVersion != pairing.ProtocolVersion || devices[0].CreatedAt.IsZero() {
+		t.Fatalf("paired devices = %#v, want the redacted paired Deck", devices)
+	}
 	redeemPairingCode(t, status.DeviceHubAddress, issued.Code, pairing.ProtocolVersion, http.StatusUnauthorized)
 	if got := deviceHealthStatus(t, status.DeviceHubAddress, credential.DeviceID, "ZGV2aWNlLXB1YmxpYy1rZXktbWF0ZXJpYWw", pairing.ProtocolVersion, credential.Token); got != http.StatusOK {
 		t.Fatalf("paired Device health = %d, want 200", got)
@@ -95,11 +100,43 @@ func TestPairingHTTPFlowIssuesRedeemsRotatesAndRevokesDeviceTrust(t *testing.T) 
 	if got := deviceHealthStatus(t, status.DeviceHubAddress, credential.DeviceID, "ZGV2aWNlLXB1YmxpYy1rZXktbWF0ZXJpYWw", pairing.ProtocolVersion, rotated.Token); got != http.StatusUnauthorized {
 		t.Fatalf("revoked token health = %d, want 401", got)
 	}
+	if devices = listPairedDevices(t, client, status.ManagementAddress, session); len(devices) != 0 {
+		t.Fatalf("paired devices after revoke = %#v, want empty", devices)
+	}
 
 	cancel()
 	if err = <-done; err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
+}
+
+func listPairedDevices(
+	t *testing.T,
+	client *http.Client,
+	managementAddress string,
+	session *http.Cookie,
+) []pairing.TrustView {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodGet, "http://"+managementAddress+"/api/v1/devices", nil)
+	if err != nil {
+		t.Fatalf("NewRequest(list devices) error = %v", err)
+	}
+	request.AddCookie(session)
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatalf("GET devices: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("GET devices = %d, want 200", response.StatusCode)
+	}
+	var document struct {
+		Devices []pairing.TrustView `json:"devices"`
+	}
+	if err = json.NewDecoder(response.Body).Decode(&document); err != nil {
+		t.Fatalf("decode devices: %v", err)
+	}
+	return document.Devices
 }
 
 func TestPairingRedeemRejectsWrongProtocolWithoutConsumingCode(t *testing.T) {

@@ -201,6 +201,36 @@ func TestServerHeartbeatUsesMonotonicElapsedAcrossWallClockCorrection(t *testing
 	}
 }
 
+func TestConfiguredIncompatibleServerMajorIsObservableToARealDeckClient(t *testing.T) {
+	authenticator := &testAuthenticator{}
+	hub, err := New(Config{
+		Authenticator:         authenticator,
+		HeartbeatInterval:     20 * time.Millisecond,
+		HeartbeatTimeout:      100 * time.Millisecond,
+		ServerProtocolVersion: ProtocolVersion + 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewTLSServer(hub)
+	defer func() { hub.Close(); server.Close() }()
+	connection, _, err := dialTestDeck(t, server, testDeviceID, testDeviceToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.CloseNow()
+	if err = connection.Write(context.Background(), websocket.MessageText, validHello()); err != nil {
+		t.Fatal(err)
+	}
+	var heartbeat Heartbeat
+	if err = json.Unmarshal(readText(t, connection, time.Second), &heartbeat); err != nil {
+		t.Fatal(err)
+	}
+	if heartbeat.ProtocolVersion != ProtocolVersion+1 {
+		t.Fatalf("server protocol = %d, want incompatible major", heartbeat.ProtocolVersion)
+	}
+}
+
 func TestHubRejectsWrongOrRevokedDeviceTokenBeforeUpgrade(t *testing.T) {
 	_, authenticator, server := newTestHub(t)
 	for name, token := range map[string]string{"wrong": "wrong-token", "revoked": testDeviceToken} {
@@ -317,6 +347,44 @@ func TestHubReportsConnectedDeckCount(t *testing.T) {
 	}
 	if got := hub.ConnectedDecks(); got != 0 {
 		t.Fatalf("ConnectedDecks() after close = %d, want 0", got)
+	}
+	snapshot := hub.Snapshot()
+	if snapshot.AcceptedConnections != 1 || snapshot.Disconnections != 1 ||
+		snapshot.AuthenticationErrors != 0 || snapshot.ProtocolErrors != 0 {
+		t.Fatalf("Snapshot() = %#v, want one accepted and disconnected session", snapshot)
+	}
+}
+
+func TestHubSnapshotCountsAuthenticationAndProtocolFailuresWithoutSecrets(t *testing.T) {
+	hub, _, server := newTestHub(t)
+	connection, response, err := dialTestDeck(t, server, testDeviceID, "wrong-token")
+	if connection != nil {
+		connection.CloseNow()
+	}
+	if err == nil || response == nil || response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("wrong-token Dial() response = %#v, error = %v", response, err)
+	}
+
+	connection, _, err = dialTestDeck(t, server, testDeviceID, testDeviceToken)
+	if err != nil {
+		t.Fatalf("valid Dial() error = %v", err)
+	}
+	defer connection.CloseNow()
+	if err = connection.Write(context.Background(), websocket.MessageText, validHeartbeat(1)); err != nil {
+		t.Fatalf("write invalid first frame: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	_, _, _ = connection.Read(ctx)
+	cancel()
+
+	deadline := time.Now().Add(time.Second)
+	for hub.Snapshot().ProtocolErrors == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	snapshot := hub.Snapshot()
+	if snapshot.AuthenticationErrors != 1 || snapshot.ProtocolErrors != 1 ||
+		snapshot.ConnectedDecks != 0 {
+		t.Fatalf("Snapshot() = %#v, want one auth error and one protocol error", snapshot)
 	}
 }
 

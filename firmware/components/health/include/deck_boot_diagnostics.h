@@ -73,6 +73,15 @@ typedef struct {
     int16_t temperature_offset_tenths_c;
 } deck_setup_diagnostic_info_t;
 
+typedef struct {
+    const char *state;
+    bool has_active_profile;
+    uint32_t profile_generation;
+    uint32_t reconnect_attempts;
+    uint32_t error_count;
+    uint64_t last_heartbeat_monotonic_ms;
+} deck_companion_link_diagnostic_info_t;
+
 typedef void (*deck_diagnostic_write_fn)(void *context, const char *data, size_t size);
 
 typedef struct {
@@ -92,6 +101,10 @@ bool deck_peripheral_diagnostics_emit(
 );
 bool deck_setup_diagnostics_emit(
     const deck_setup_diagnostic_info_t *info,
+    deck_diagnostic_sink_t sink
+);
+bool deck_companion_link_diagnostics_emit(
+    const deck_companion_link_diagnostic_info_t *info,
     deck_diagnostic_sink_t sink
 );
 

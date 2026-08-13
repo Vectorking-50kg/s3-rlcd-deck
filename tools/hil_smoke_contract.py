@@ -126,6 +126,15 @@ EVENT_SCHEMAS: dict[str, dict[str, type]] = {
     },
     "diagnostic_error": {"type": str, "stage": str},
     "deck_identity": {"type": str, "model": str, "protocol": int},
+    "companion_link_state": {
+        "type": str,
+        "state": str,
+        "has_active_profile": bool,
+        "profile_generation": int,
+        "reconnect_attempts": int,
+        "error_count": int,
+        "last_heartbeat_monotonic_ms": int,
+    },
 }
 
 

@@ -24,26 +24,43 @@ type Authenticator interface {
 }
 
 type Config struct {
-	Authenticator     Authenticator
-	HeartbeatInterval time.Duration
-	HeartbeatTimeout  time.Duration
-	Now               func() time.Time
-	Elapsed           func() time.Duration
+	Authenticator         Authenticator
+	HeartbeatInterval     time.Duration
+	HeartbeatTimeout      time.Duration
+	ServerProtocolVersion int
+	Now                   func() time.Time
+	Elapsed               func() time.Duration
 }
 
 type Hub struct {
-	authenticator     Authenticator
-	heartbeatInterval time.Duration
-	heartbeatTimeout  time.Duration
-	now               func() time.Time
-	elapsed           func() time.Duration
-	done              chan struct{}
-	closeOnce         sync.Once
+	authenticator         Authenticator
+	heartbeatInterval     time.Duration
+	heartbeatTimeout      time.Duration
+	serverProtocolVersion int
+	now                   func() time.Time
+	elapsed               func() time.Duration
+	done                  chan struct{}
+	closeOnce             sync.Once
 
-	mu          sync.Mutex
-	closed      bool
-	connections map[*websocket.Conn]struct{}
-	sessions    map[string]*websocket.Conn
+	mu                   sync.Mutex
+	closed               bool
+	connections          map[*websocket.Conn]struct{}
+	sessions             map[string]*websocket.Conn
+	acceptedConnections  uint64
+	disconnections       uint64
+	authenticationErrors uint64
+	protocolErrors       uint64
+}
+
+// Snapshot is the complete redacted Device Link observation surface. It is
+// safe to expose through management status because it contains counters only,
+// never device identities, bearer tokens, or certificate material.
+type Snapshot struct {
+	ConnectedDecks       int    `json:"connected_decks"`
+	AcceptedConnections  uint64 `json:"accepted_connections"`
+	Disconnections       uint64 `json:"disconnections"`
+	AuthenticationErrors uint64 `json:"authentication_errors"`
+	ProtocolErrors       uint64 `json:"protocol_errors"`
 }
 
 type authenticatedDeck struct {
@@ -72,6 +89,12 @@ func New(config Config) (*Hub, error) {
 	if config.HeartbeatInterval < 0 || config.HeartbeatTimeout <= config.HeartbeatInterval {
 		return nil, errors.New("Device Link heartbeat timing is invalid")
 	}
+	if config.ServerProtocolVersion == 0 {
+		config.ServerProtocolVersion = ProtocolVersion
+	}
+	if config.ServerProtocolVersion < 1 {
+		return nil, errors.New("Device Link server protocol version is invalid")
+	}
 	if config.Now == nil {
 		config.Now = time.Now
 	}
@@ -80,14 +103,15 @@ func New(config Config) (*Hub, error) {
 		config.Elapsed = func() time.Duration { return time.Since(started) }
 	}
 	return &Hub{
-		authenticator:     config.Authenticator,
-		heartbeatInterval: config.HeartbeatInterval,
-		heartbeatTimeout:  config.HeartbeatTimeout,
-		now:               config.Now,
-		elapsed:           config.Elapsed,
-		done:              make(chan struct{}),
-		connections:       make(map[*websocket.Conn]struct{}),
-		sessions:          make(map[string]*websocket.Conn),
+		authenticator:         config.Authenticator,
+		heartbeatInterval:     config.HeartbeatInterval,
+		heartbeatTimeout:      config.HeartbeatTimeout,
+		serverProtocolVersion: config.ServerProtocolVersion,
+		now:                   config.Now,
+		elapsed:               config.Elapsed,
+		done:                  make(chan struct{}),
+		connections:           make(map[*websocket.Conn]struct{}),
+		sessions:              make(map[string]*websocket.Conn),
 	}, nil
 }
 
@@ -99,6 +123,7 @@ func (hub *Hub) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	}
 	authentication, ok := requestAuthentication(request)
 	if !ok {
+		hub.recordAuthenticationError()
 		unauthorized(response)
 		return
 	}
@@ -113,6 +138,9 @@ func (hub *Hub) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 		return
 	}
 	if !verified || hub.isClosed() {
+		if !verified {
+			hub.recordAuthenticationError()
+		}
 		unauthorized(response)
 		return
 	}
@@ -123,6 +151,7 @@ func (hub *Hub) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 		return
 	}
 	if connection.Subprotocol() != Subprotocol || !hub.addConnection(connection) {
+		hub.recordProtocolError()
 		_ = connection.Close(websocket.StatusPolicyViolation, "unsupported Device Link")
 		return
 	}
@@ -152,12 +181,22 @@ func (hub *Hub) Close() {
 	})
 }
 
-// ConnectedDecks reports authenticated Device Link sessions. Connections that
-// have not completed device.hello are intentionally excluded.
-func (hub *Hub) ConnectedDecks() int {
+// Snapshot reports authenticated sessions and lifecycle counters. Connections
+// that have not completed device.hello are intentionally excluded.
+func (hub *Hub) Snapshot() Snapshot {
 	hub.mu.Lock()
 	defer hub.mu.Unlock()
-	return len(hub.sessions)
+	return Snapshot{
+		ConnectedDecks:       len(hub.sessions),
+		AcceptedConnections:  hub.acceptedConnections,
+		Disconnections:       hub.disconnections,
+		AuthenticationErrors: hub.authenticationErrors,
+		ProtocolErrors:       hub.protocolErrors,
+	}
+}
+
+func (hub *Hub) ConnectedDecks() int {
+	return hub.Snapshot().ConnectedDecks
 }
 
 func (hub *Hub) isClosed() bool {
@@ -186,6 +225,7 @@ func (hub *Hub) reserve(deviceID string, connection *websocket.Conn) bool {
 		return false
 	}
 	hub.sessions[deviceID] = connection
+	hub.acceptedConnections++
 	return true
 }
 
@@ -194,7 +234,20 @@ func (hub *Hub) removeConnection(connection *websocket.Conn, deviceID string) {
 	delete(hub.connections, connection)
 	if hub.sessions[deviceID] == connection {
 		delete(hub.sessions, deviceID)
+		hub.disconnections++
 	}
+	hub.mu.Unlock()
+}
+
+func (hub *Hub) recordAuthenticationError() {
+	hub.mu.Lock()
+	hub.authenticationErrors++
+	hub.mu.Unlock()
+}
+
+func (hub *Hub) recordProtocolError() {
+	hub.mu.Lock()
+	hub.protocolErrors++
 	hub.mu.Unlock()
 }
 
@@ -210,14 +263,17 @@ func (hub *Hub) serveConnection(
 		return
 	}
 	if messageType != websocket.MessageText {
+		hub.recordProtocolError()
 		_ = connection.Close(websocket.StatusPolicyViolation, "device.hello must be text")
 		return
 	}
 	if _, err = parseDeviceHello(message, authentication.deviceID); err != nil {
+		hub.recordProtocolError()
 		_ = connection.Close(websocket.StatusPolicyViolation, "invalid device.hello")
 		return
 	}
 	if !hub.reserve(authentication.deviceID, connection) {
+		hub.recordProtocolError()
 		_ = connection.Close(websocket.StatusPolicyViolation, "duplicate Device ID")
 		return
 	}
@@ -240,6 +296,7 @@ func (hub *Hub) serveConnection(
 		case <-requestContext.Done():
 			return
 		case <-heartbeatTimer.C:
+			hub.recordProtocolError()
 			_ = connection.Close(websocket.StatusPolicyViolation, "device heartbeat timeout")
 			return
 		case <-heartbeatTicker.C:
@@ -261,6 +318,7 @@ func (hub *Hub) serveConnection(
 				return
 			}
 			if frame.messageType != websocket.MessageText {
+				hub.recordProtocolError()
 				_ = connection.Close(websocket.StatusPolicyViolation, "control messages must be text")
 				return
 			}
@@ -270,6 +328,7 @@ func (hub *Hub) serveConnection(
 				hasPreviousMonotonic,
 			)
 			if parseErr != nil {
+				hub.recordProtocolError()
 				_ = connection.Close(websocket.StatusPolicyViolation, "invalid device.heartbeat")
 				return
 			}
@@ -300,7 +359,7 @@ func (hub *Hub) writeHeartbeat(connection *websocket.Conn) bool {
 	}
 	message, err := json.Marshal(Heartbeat{
 		Type:            MessageHeartbeat,
-		ProtocolVersion: ProtocolVersion,
+		ProtocolVersion: hub.serverProtocolVersion,
 		UTC:             now.UTC().Format(time.RFC3339Nano),
 		MonotonicMS:     uint64(elapsed / time.Millisecond),
 		TXQueueDepth:    0,

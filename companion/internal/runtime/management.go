@@ -66,6 +66,7 @@ func (application *Runtime) managementRoutes() http.Handler {
 		application.handleLogin,
 	))
 	mux.HandleFunc("GET /api/v1/status", application.requireManagementSession(application.handleStatus))
+	mux.HandleFunc("GET /api/v1/devices", application.requireManagementSession(application.handleListDevices))
 	mux.HandleFunc("POST /api/v1/logout", limitManagementRequests(
 		sensitiveRateLimiter,
 		limits.SensitiveRateWindow,
@@ -195,6 +196,17 @@ func (application *Runtime) handleLogin(response http.ResponseWriter, request *h
 
 func (application *Runtime) handleStatus(response http.ResponseWriter, _ *http.Request) {
 	writeManagementJSON(response, application.Status())
+}
+
+func (application *Runtime) handleListDevices(response http.ResponseWriter, request *http.Request) {
+	devices, err := application.pairing.ListTrusts(request.Context())
+	if err != nil {
+		http.Error(response, "paired devices unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	writeManagementJSON(response, struct {
+		Devices []pairing.TrustView `json:"devices"`
+	}{Devices: devices})
 }
 
 func (application *Runtime) handleLogout(response http.ResponseWriter, request *http.Request) {

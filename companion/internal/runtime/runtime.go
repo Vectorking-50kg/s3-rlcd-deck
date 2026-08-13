@@ -27,14 +27,18 @@ const (
 )
 
 type Status struct {
-	State                State  `json:"state"`
-	Version              string `json:"version"`
-	ManagementAddress    string `json:"management_address"`
-	DeviceHubAddress     string `json:"device_hub_address"`
-	ConnectedDecks       int    `json:"connected_decks"`
-	LANManagementEnabled bool   `json:"lan_management_enabled"`
-	SecurityWarning      string `json:"security_warning,omitempty"`
-	LastError            string `json:"last_error,omitempty"`
+	State                    State  `json:"state"`
+	Version                  string `json:"version"`
+	ManagementAddress        string `json:"management_address"`
+	DeviceHubAddress         string `json:"device_hub_address"`
+	ConnectedDecks           int    `json:"connected_decks"`
+	DeviceLinkConnections    uint64 `json:"device_link_connections"`
+	DeviceLinkDisconnects    uint64 `json:"device_link_disconnects"`
+	DeviceLinkAuthErrors     uint64 `json:"device_link_auth_errors"`
+	DeviceLinkProtocolErrors uint64 `json:"device_link_protocol_errors"`
+	LANManagementEnabled     bool   `json:"lan_management_enabled"`
+	SecurityWarning          string `json:"security_warning,omitempty"`
+	LastError                string `json:"last_error,omitempty"`
 }
 
 type Runtime struct {
@@ -69,9 +73,10 @@ func New(config Config) (*Runtime, error) {
 		status.SecurityWarning = "management Web is exposed beyond loopback"
 	}
 	deviceLink, err := devicelink.New(devicelink.Config{
-		Authenticator:     normalized.Pairing,
-		HeartbeatInterval: normalized.DeviceHub.HeartbeatInterval,
-		HeartbeatTimeout:  normalized.DeviceHub.HeartbeatTimeout,
+		Authenticator:         normalized.Pairing,
+		HeartbeatInterval:     normalized.DeviceHub.HeartbeatInterval,
+		HeartbeatTimeout:      normalized.DeviceHub.HeartbeatTimeout,
+		ServerProtocolVersion: normalized.DeviceHub.ServerProtocolVersion,
 	})
 	if err != nil {
 		return nil, err
@@ -91,7 +96,12 @@ func (application *Runtime) Status() Status {
 	application.mu.RLock()
 	status := application.status
 	application.mu.RUnlock()
-	status.ConnectedDecks = application.deviceLink.ConnectedDecks()
+	deviceLink := application.deviceLink.Snapshot()
+	status.ConnectedDecks = deviceLink.ConnectedDecks
+	status.DeviceLinkConnections = deviceLink.AcceptedConnections
+	status.DeviceLinkDisconnects = deviceLink.Disconnections
+	status.DeviceLinkAuthErrors = deviceLink.AuthenticationErrors
+	status.DeviceLinkProtocolErrors = deviceLink.ProtocolErrors
 	return status
 }
 

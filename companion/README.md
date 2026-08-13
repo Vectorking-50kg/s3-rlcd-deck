@@ -21,6 +21,12 @@ The current M1 runtime provides:
 
 Provider credentials and raw private content must never be sent to a Deck.
 
+The authenticated status document includes only redacted Device Link lifecycle counters:
+current sessions, accepted connections, disconnects, authentication rejections, and protocol
+rejections. It never includes Device IDs, Tokens, certificate material, or pairing codes. The
+development firmware exposes the matching redacted `companion_link_state` JSONL event over its
+opt-in diagnostic console so real-board reconnects can be audited without credential logging.
+
 ## Run
 
 Go 1.26.x is the development baseline.
@@ -75,7 +81,15 @@ Only one Companion may own a data directory. A repeated launch fails with an
 explicit `already running` error instead of competing for listeners or trust
 files. Login-start installation is deliberately deferred to M5.
 
-The authenticated management API issues codes at `POST /api/v1/pairing/codes`, issues a device-bound rotation code at `POST /api/v1/devices/{device_id}/rotate`, and revokes trust at `DELETE /api/v1/devices/{device_id}`. A Deck redeems a code once at the rate-limited Device Hub route `POST /api/v1/pairing/redeem`. Management writes require the login session, exact Origin, and CSRF token described above; a successful redeem response is the only place a plaintext device Token is returned. Device requests authenticate the complete Device ID + Token + identity + protocol-version binding.
+The authenticated management API lists redacted paired Decks at `GET /api/v1/devices`,
+issues codes at `POST /api/v1/pairing/codes`, issues a device-bound rotation code at
+`POST /api/v1/devices/{device_id}/rotate`, and revokes trust at
+`DELETE /api/v1/devices/{device_id}`. The list exposes only Device ID, protocol version,
+and trust timestamps—not Token or identity verifiers. A Deck redeems a code once at the
+rate-limited Device Hub route `POST /api/v1/pairing/redeem`. Management writes require
+the login session, exact Origin, and CSRF token described above; a successful redeem
+response is the only place a plaintext device Token is returned. Device requests
+authenticate the complete Device ID + Token + identity + protocol-version binding.
 
 The Device Link endpoint is `GET /api/v1/device/link` with WebSocket subprotocol
 `s3-rlcd-deck.v1`. An authenticated Deck must send `device.hello` first and continue with

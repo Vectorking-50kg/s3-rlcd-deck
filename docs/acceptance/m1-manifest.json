@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "issue": 31,
+  "required_platforms": [
+    "macOS 13+ arm64 or amd64",
+    "Windows 11 amd64"
+  ],
+  "commands": {
+    "host": "./tools/test_host.sh",
+    "companion": "./tools/test_companion.sh",
+    "firmware_dev": "./tools/idf.sh dev build",
+    "firmware_release": "./tools/idf.sh release build",
+    "real_pairing": "python tools/m1_acceptance.py --port <Deck> --companion <binary> --result-dir .hil-results/<run> --original-ssid <SSID> --hub-address <LAN IP:7780> --windows-native-run-url <Actions run>"
+  },
+  "summary": null
+}

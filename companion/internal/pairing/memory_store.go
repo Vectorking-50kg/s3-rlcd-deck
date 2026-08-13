@@ -2,6 +2,7 @@ package pairing
 
 import (
 	"context"
+	"sort"
 	"sync"
 	"time"
 )
@@ -88,6 +89,20 @@ func (store *MemoryStore) LookupTrust(_ context.Context, deviceID string) (Store
 		return StoredTrust{}, ErrTrustNotFound
 	}
 	return trust, nil
+}
+
+func (store *MemoryStore) ListTrusts(ctx context.Context) ([]StoredTrust, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	trusts := make([]StoredTrust, 0, len(store.trusts))
+	for _, trust := range store.trusts {
+		trusts = append(trusts, trust)
+	}
+	sort.Slice(trusts, func(left, right int) bool { return trusts[left].DeviceID < trusts[right].DeviceID })
+	return trusts, nil
 }
 
 func (store *MemoryStore) RevokeTrust(_ context.Context, deviceID string, _ time.Time) error {

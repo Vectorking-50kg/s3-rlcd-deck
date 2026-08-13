@@ -174,4 +174,26 @@ int main()
             "\"temperature_offset_tenths_c\":-35}\n",
         "expected setup diagnostics to omit the ephemeral password"
     );
+
+    output.clear();
+    const deck_companion_link_diagnostic_info_t companion_info = {
+        "online",
+        true,
+        4,
+        2,
+        1,
+        123456,
+    };
+    require(
+        deck_companion_link_diagnostics_emit(&companion_info, sink),
+        "expected the Companion Link state event to be emitted"
+    );
+    require(
+        output ==
+            "{\"type\":\"companion_link_state\",\"state\":\"online\","
+            "\"has_active_profile\":true,\"profile_generation\":4,"
+            "\"reconnect_attempts\":2,\"error_count\":1,"
+            "\"last_heartbeat_monotonic_ms\":123456}\n",
+        "expected Companion Link diagnostics to contain state and counters only"
+    );
 }

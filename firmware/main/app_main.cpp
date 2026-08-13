@@ -173,6 +173,42 @@ ButtonEventMapping map_button_event(deck_button_input_event_t event)
     }
 }
 
+#ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
+const char *companion_link_state_name(deck_companion_link_state_t state)
+{
+    switch (state) {
+        case DECK_COMPANION_LINK_OFFLINE:
+            return "offline";
+        case DECK_COMPANION_LINK_CONNECTING:
+            return "connecting";
+        case DECK_COMPANION_LINK_ONLINE:
+            return "online";
+        case DECK_COMPANION_LINK_UNPAIRED:
+        default:
+            return "unpaired";
+    }
+}
+
+void emit_companion_link_diagnostics()
+{
+    deck_companion_link_snapshot_t snapshot{};
+    if (application_companion_link == nullptr ||
+        !deck_companion_link_snapshot(application_companion_link, &snapshot)) {
+        return;
+    }
+    const deck_companion_link_diagnostic_info_t info = {
+        companion_link_state_name(snapshot.state),
+        snapshot.has_active_profile,
+        snapshot.profile_generation,
+        snapshot.reconnect_attempts,
+        snapshot.error_count,
+        snapshot.last_heartbeat_monotonic_ms,
+    };
+    const deck_diagnostic_sink_t sink = {write_stdout, nullptr};
+    (void)deck_companion_link_diagnostics_emit(&info, sink);
+}
+#endif
+
 bool release_display_resources()
 {
     if (application_display != nullptr) {
@@ -299,6 +335,7 @@ void peripheral_snapshot(void *, const deck_peripheral_snapshot_t *snapshot)
     };
     const deck_diagnostic_sink_t sink = {write_stdout, nullptr};
     (void)deck_peripheral_diagnostics_emit(&info, sink);
+    emit_companion_link_diagnostics();
 #endif
 }
 
@@ -410,6 +447,41 @@ void handle_diagnostic_control_line(char *line)
         static constexpr char identity[] =
             "{\"type\":\"deck_identity\",\"model\":\"s3-rlcd-deck\",\"protocol\":1}\n";
         write_stdout(nullptr, identity, sizeof(identity) - 1);
+        return;
+    }
+    if (std::strcmp(line, "DECK_HIL_SETUP_ACCESS") == 0) {
+        char ssid[DECK_M0_SETUP_SSID_CAPACITY]{};
+        char password[DECK_M0_SETUP_PASSWORD_CAPACITY]{};
+        char address[DECK_M0_SETUP_ADDRESS_CAPACITY]{};
+        bool active = false;
+        if (application_model_mutex != nullptr &&
+            xSemaphoreTake(application_model_mutex, portMAX_DELAY) == pdTRUE) {
+            active = application_model.setup_state == DECK_SETUP_ACTIVE;
+            if (active) {
+                std::memcpy(ssid, application_model.setup_ssid, sizeof(ssid));
+                std::memcpy(password, application_model.setup_password, sizeof(password));
+                std::memcpy(address, application_model.setup_address, sizeof(address));
+            }
+            xSemaphoreGive(application_model_mutex);
+        }
+        if (active) {
+            char response[192];
+            const int size = snprintf(
+                response,
+                sizeof(response),
+                "{\"type\":\"hil_setup_access\",\"ssid\":\"%s\","
+                "\"password\":\"%s\",\"address\":\"%s\"}\n",
+                ssid,
+                password,
+                address
+            );
+            if (size > 0 && static_cast<size_t>(size) < sizeof(response)) {
+                write_stdout(nullptr, response, static_cast<size_t>(size));
+            }
+        }
+        std::memset(ssid, 0, sizeof(ssid));
+        std::memset(password, 0, sizeof(password));
+        std::memset(address, 0, sizeof(address));
         return;
     }
     if (application_setup == nullptr) {

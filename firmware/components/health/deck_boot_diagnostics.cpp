@@ -201,3 +201,33 @@ bool deck_setup_diagnostics_emit(
     sink.write(sink.context, line, static_cast<size_t>(size));
     return true;
 }
+
+bool deck_companion_link_diagnostics_emit(
+    const deck_companion_link_diagnostic_info_t *info,
+    deck_diagnostic_sink_t sink
+)
+{
+    if (info == nullptr || info->state == nullptr || sink.write == nullptr) {
+        return false;
+    }
+    char line[320];
+    const int size = snprintf(
+        line,
+        sizeof(line),
+        "{\"type\":\"companion_link_state\",\"state\":\"%s\","
+        "\"has_active_profile\":%s,\"profile_generation\":%" PRIu32 ","
+        "\"reconnect_attempts\":%" PRIu32 ",\"error_count\":%" PRIu32 ","
+        "\"last_heartbeat_monotonic_ms\":%" PRIu64 "}\n",
+        info->state,
+        info->has_active_profile ? "true" : "false",
+        info->profile_generation,
+        info->reconnect_attempts,
+        info->error_count,
+        info->last_heartbeat_monotonic_ms
+    );
+    if (size < 0 || static_cast<size_t>(size) >= sizeof(line)) {
+        return false;
+    }
+    sink.write(sink.context, line, static_cast<size_t>(size));
+    return true;
+}
