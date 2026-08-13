@@ -176,6 +176,18 @@ def test_profile_cleanup_revokes_only_temporary_profile_and_reselects_original()
     ]
 
 
+def test_post_flash_monitor_requests_a_fresh_boot_after_ready_handshake() -> None:
+    evidence = m1.SerialEvidence.__new__(m1.SerialEvidence)
+    commands: list[bytes] = []
+    reopens: list[tuple[object, str, float]] = []
+    evidence.command = commands.append
+    evidence.reopen = lambda module, port, timeout: reopens.append((module, port, timeout))
+    marker = object()
+    evidence.fresh_boot(marker, "/dev/cu.Deck", 12.0)
+    assert commands == [m1.HIL_READY, b"DECK_RESTART\n"]
+    assert reopens == [(marker, "/dev/cu.Deck", 12.0)]
+
+
 if __name__ == "__main__":
     test_serial_evidence_keeps_redacted_link_state_and_drops_setup_secret()
     test_summary_passes_only_with_every_real_gate_and_hashes_redacted_log()
@@ -185,4 +197,5 @@ if __name__ == "__main__":
     test_native_run_requires_same_commit_and_both_real_platform_jobs()
     test_companion_logs_are_drained_redacted_and_secret_observation_fails_gate()
     test_profile_cleanup_revokes_only_temporary_profile_and_reselects_original()
+    test_post_flash_monitor_requests_a_fresh_boot_after_ready_handshake()
     print("M1 acceptance contract passed")

@@ -268,6 +268,14 @@ class SerialEvidence:
         self._connection.write(command)
         self._connection.flush()
 
+    def fresh_boot(self, serial_module: Any, port: str, timeout: float) -> None:
+        # The app-only flasher resets before this monitor can open. Establish the
+        # diagnostic host handshake, then request a second reset whose one-shot
+        # boot event this already-open monitor can observe.
+        self.command(HIL_READY)
+        self.command(b"DECK_RESTART\n")
+        self.reopen(serial_module, port, timeout)
+
     def event(
         self,
         predicate: Callable[[dict[str, Any]], bool],
@@ -770,6 +778,7 @@ def main() -> int:
         import serial
 
         serial_evidence = SerialEvidence(serial, arguments.port, serial_path, arguments.stage_timeout)
+        serial_evidence.fresh_boot(serial, arguments.port, arguments.stage_timeout)
         serial_evidence.event(
             lambda event: event.get("type") in {"boot_ok", "companion_link_state"},
             "Deck diagnostics after current app flash",
