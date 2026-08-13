@@ -12,6 +12,8 @@ var (
 	ErrControllerReady    = errors.New("Companion runtime is already running")
 )
 
+const controllerStartTimeout = 5 * time.Second
+
 type RuntimeFactory func() (*Runtime, error)
 
 // Controller owns restartable Runtime generations. It is the only interface a
@@ -53,6 +55,7 @@ func (controller *Controller) Start() error {
 	controller.starting = true
 	controller.startDone = make(chan struct{})
 	controller.stopStarting = false
+	controller.lastStatus.LastError = ""
 	startDone := controller.startDone
 	controller.mu.Unlock()
 
@@ -64,6 +67,7 @@ func (controller *Controller) Start() error {
 	controller.startDone = nil
 	close(startDone)
 	if err != nil {
+		controller.lastStatus.LastError = err.Error()
 		controller.mu.Unlock()
 		return err
 	}
@@ -82,6 +86,9 @@ func (controller *Controller) Start() error {
 		runErr := application.Run(ctx)
 		controller.mu.Lock()
 		controller.lastStatus = application.Status()
+		if runErr != nil {
+			controller.lastStatus.LastError = runErr.Error()
+		}
 		controller.application = nil
 		controller.cancel = nil
 		controller.done = nil
@@ -89,7 +96,21 @@ func (controller *Controller) Start() error {
 		done <- runErr
 		close(done)
 	}()
-	return nil
+	deadline := time.Now().Add(controllerStartTimeout)
+	for time.Now().Before(deadline) {
+		status := controller.Status()
+		if status.State == StateReady {
+			return nil
+		}
+		if status.State == StateStopped {
+			if status.LastError != "" {
+				return errors.New(status.LastError)
+			}
+			return errors.New("Companion runtime stopped before becoming ready")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return errors.New("Companion runtime did not become ready within 5 seconds")
 }
 
 func (controller *Controller) Stop(ctx context.Context) error {
@@ -115,6 +136,11 @@ func (controller *Controller) Stop(ctx context.Context) error {
 	cancel()
 	select {
 	case err := <-done:
+		if err != nil {
+			controller.mu.Lock()
+			controller.lastStatus.LastError = err.Error()
+			controller.mu.Unlock()
+		}
 		return err
 	case <-ctx.Done():
 		return ctx.Err()

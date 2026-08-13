@@ -104,6 +104,8 @@ func (shell *Shell) refresh() {
 		label = fmt.Sprintf("Running · %d %s connected", status.ConnectedDecks, deckLabel)
 	} else if status.State == companionruntime.StateNew {
 		label = "Starting"
+	} else if status.LastError != "" {
+		label = "Error · " + status.LastError
 	}
 	visibleStatus := label
 	if status.Version != "" {
@@ -116,8 +118,12 @@ func (shell *Shell) refresh() {
 
 func (shell *Shell) openConsole() {
 	accessURL, err := shell.controller.ConsoleAccessURL(consoleAccessDuration)
-	if err == nil {
-		_ = shell.openURL(accessURL)
+	if err != nil {
+		shell.showActionError(err)
+		return
+	}
+	if err = shell.openURL(accessURL); err != nil {
+		shell.showActionError(err)
 	}
 }
 
@@ -125,13 +131,25 @@ func (shell *Shell) toggleRuntime() {
 	shell.actionMu.Lock()
 	defer shell.actionMu.Unlock()
 	if shell.controller.Status().State == companionruntime.StateStopped {
-		_ = shell.controller.Start()
+		if err := shell.controller.Start(); err != nil {
+			shell.showActionError(err)
+			return
+		}
 	} else {
 		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
-		_ = shell.controller.Stop(ctx)
+		if err := shell.controller.Stop(ctx); err != nil {
+			cancel()
+			shell.showActionError(err)
+			return
+		}
 		cancel()
 	}
 	shell.refresh()
+}
+
+func (shell *Shell) showActionError(err error) {
+	shell.tray.SetStatus("Error · " + err.Error())
+	shell.tray.SetTooltip("S3 RLCD Deck Companion · Error · " + err.Error())
 }
 
 func (shell *Shell) Close() {

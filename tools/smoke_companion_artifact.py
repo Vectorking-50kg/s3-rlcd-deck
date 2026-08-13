@@ -92,6 +92,10 @@ def run(executable: Path, expected_version: str, expected_commit: str) -> None:
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env={
+                **os.environ,
+                "S3DECK_MANAGEMENT_TOKEN": "native-smoke-management-token-32-bytes",
+            },
             creationflags=creation_flags,
         )
         try:

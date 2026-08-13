@@ -2,6 +2,7 @@ package desktop
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -10,17 +11,23 @@ import (
 )
 
 type fakeController struct {
-	mu       sync.Mutex
-	status   companionruntime.Status
-	starts   int
-	stops    int
-	accesses int
+	mu        sync.Mutex
+	status    companionruntime.Status
+	starts    int
+	stops     int
+	accesses  int
+	startErr  error
+	stopErr   error
+	accessErr error
 }
 
 func (controller *fakeController) Start() error {
 	controller.mu.Lock()
 	defer controller.mu.Unlock()
 	controller.starts++
+	if controller.startErr != nil {
+		return controller.startErr
+	}
 	controller.status.State = companionruntime.StateReady
 	return nil
 }
@@ -29,6 +36,9 @@ func (controller *fakeController) Stop(context.Context) error {
 	controller.mu.Lock()
 	defer controller.mu.Unlock()
 	controller.stops++
+	if controller.stopErr != nil {
+		return controller.stopErr
+	}
 	controller.status.State = companionruntime.StateStopped
 	return nil
 }
@@ -43,7 +53,41 @@ func (controller *fakeController) ConsoleAccessURL(time.Duration) (string, error
 	controller.mu.Lock()
 	defer controller.mu.Unlock()
 	controller.accesses++
+	if controller.accessErr != nil {
+		return "", controller.accessErr
+	}
 	return "http://127.0.0.1:7777/api/v1/desktop/access?token=once", nil
+}
+
+func TestShellMakesControllerActionFailuresVisible(t *testing.T) {
+	controller := &fakeController{
+		status:   companionruntime.Status{State: companionruntime.StateStopped},
+		startErr: errors.New("address unavailable"),
+	}
+	tray := newFakeTray()
+	shell, err := NewShell(controller, tray, []byte("png"), func(string) error {
+		return errors.New("browser unavailable")
+	})
+	if err != nil {
+		t.Fatalf("NewShell() error = %v", err)
+	}
+	shell.toggleRuntime()
+	tray.mu.Lock()
+	status := tray.status
+	tray.mu.Unlock()
+	if status != "Error · address unavailable" {
+		t.Fatalf("tray status = %q", status)
+	}
+
+	controller.startErr = nil
+	controller.status.State = companionruntime.StateReady
+	shell.openConsole()
+	tray.mu.Lock()
+	status = tray.status
+	tray.mu.Unlock()
+	if status != "Error · browser unavailable" {
+		t.Fatalf("browser failure status = %q", status)
+	}
 }
 
 type fakeTray struct {

@@ -34,6 +34,7 @@ type Status struct {
 	ConnectedDecks       int    `json:"connected_decks"`
 	LANManagementEnabled bool   `json:"lan_management_enabled"`
 	SecurityWarning      string `json:"security_warning,omitempty"`
+	LastError            string `json:"last_error,omitempty"`
 }
 
 type Runtime struct {

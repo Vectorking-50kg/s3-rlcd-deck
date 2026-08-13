@@ -54,7 +54,9 @@ CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
     -o "$artifact_root/windows-amd64/s3deck-companion.exe" \
     ./cmd/s3deck-companion
 
-darwin_version="$($artifact_root/darwin-arm64/s3deck-companion --version)"
+native_arch="$(go env GOARCH)"
+native_darwin_artifact="$artifact_root/darwin-$native_arch/s3deck-companion"
+darwin_version="$($native_darwin_artifact --version)"
 expected_version="s3deck-companion $build_version (commit $build_commit)"
 if [[ "$darwin_version" != "$expected_version" ]]; then
     echo "darwin arm64 version mismatch: $darwin_version" >&2

@@ -97,7 +97,7 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	managementTokenValue := os.Getenv(managementTokenEnvironment)
 	if managementTokenValue == "" {
 		managementTokenValue, err = managementtoken.LoadOrCreate(
-			filepath.Join(resolvedDataDirectory, "management-token"),
+			resolvedDataDirectory,
 		)
 		if err != nil {
 			fmt.Fprintf(stderr, "cannot load the management token: %v\n", err)
@@ -171,15 +171,11 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "cannot start Companion runtime: %v\n", err)
 		return 1
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for controller.Status().State == companionruntime.StateNew && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
 	if controller.Status().State != companionruntime.StateReady {
 		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 		_ = controller.Stop(ctx)
 		cancel()
-		fmt.Fprintln(stderr, "Companion runtime did not become ready")
+		fmt.Fprintf(stderr, "Companion runtime did not become ready: %s\n", controller.Status().LastError)
 		return 1
 	}
 	shell, err := desktop.NewShell(

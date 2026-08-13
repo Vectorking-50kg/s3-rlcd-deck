@@ -2,6 +2,7 @@ package runtime_test
 
 import (
 	"context"
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -38,6 +39,29 @@ func TestControllerStartsStopsAndRestartsRuntime(t *testing.T) {
 	waitForControllerState(t, controller, companionruntime.StateReady)
 	if err = controller.Stop(context.Background()); err != nil {
 		t.Fatalf("final Stop() error = %v", err)
+	}
+}
+
+func TestControllerStartReturnsListenerFailureAndPreservesItInStatus(t *testing.T) {
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() error = %v", err)
+	}
+	defer occupied.Close()
+	config := testConfig()
+	config.Management.Address = occupied.Addr().String()
+	controller, err := companionruntime.NewController(func() (*companionruntime.Runtime, error) {
+		return companionruntime.New(config)
+	})
+	if err != nil {
+		t.Fatalf("NewController() error = %v", err)
+	}
+	if err = controller.Start(); err == nil {
+		t.Fatal("Start() accepted occupied management address")
+	}
+	status := controller.Status()
+	if status.State != companionruntime.StateStopped || status.LastError == "" {
+		t.Fatalf("status after failed Start = %#v", status)
 	}
 }
 

@@ -37,9 +37,10 @@ browser. **Stop Companion** stops both listeners without quitting the shell;
 **Start Companion** creates a fresh runtime generation. **Quit** performs the
 same bounded shutdown before removing the native tray item.
 
-The first desktop run generates a protected local management token inside the
-Companion data directory. `S3DECK_MANAGEMENT_TOKEN` can still explicitly
-override it for development and HIL, but is no longer required for the normal
+The first desktop run generates a local management token in macOS Keychain or
+Windows Credential Manager. The data-directory path only derives a stable,
+non-secret credential reference. `S3DECK_MANAGEMENT_TOKEN` can still explicitly
+override the vault for development and HIL, but is no longer required for normal
 desktop launch.
 
 The management token must contain at least 24 bytes and never appears in process
@@ -103,7 +104,7 @@ The command enforces formatting, runs `go vet`, regular and race-enabled tests,
 then cross-compiles menu-bar/tray executables for macOS arm64/amd64 and Windows
 amd64 under the ignored `build/companion/` directory. The SPA, build version,
 third-party notices, static assets, and native icon are embedded in each single
-executable. The local macOS arm64 artifact executes `--version`; the other
+executable. The local macOS artifact for the host architecture executes `--version`; the other
 cross-compiled artifacts receive executable metadata and embedded build-identity checks.
 The `Companion desktop native smoke` GitHub Actions workflow then runs the matching
 artifact on macOS arm64, macOS amd64, and Windows amd64, verifies `--version`, starts
