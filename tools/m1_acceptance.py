@@ -779,7 +779,22 @@ def plain_http_status(origin: str, path: str) -> int:
         return error.code
 
 
-def connect_wifi(ssid: str, password: str | None = None) -> None:
+def remaining_timeout(
+    deadline: float,
+    operation_limit: float,
+    reserve: float = 0,
+) -> float:
+    remaining = deadline - time.monotonic() - reserve
+    if remaining <= 0:
+        raise AcceptanceFailure("Mac Wi-Fi association timed out")
+    return min(operation_limit, remaining)
+
+
+def connect_wifi(
+    ssid: str,
+    password: str | None = None,
+    timeout: float = 60,
+) -> None:
     command = ["networksetup", "-setairportnetwork", "en0", ssid]
     if password is not None:
         command.append(password)
@@ -788,19 +803,19 @@ def connect_wifi(ssid: str, password: str | None = None) -> None:
     # after a previous failed association. Keep this bounded but allow the
     # platform to complete its own retry cycle.
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=60)
+        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as error:
         raise AcceptanceFailure("Mac Wi-Fi association timed out") from error
     if result.returncode != 0:
         raise AcceptanceFailure("cannot switch the Mac Wi-Fi network")
 
 
-def set_wifi_power(enabled: bool) -> None:
+def set_wifi_power(enabled: bool, timeout: float = 10) -> None:
     try:
         result = subprocess.run(
             ["networksetup", "-setairportpower", "en0", "on" if enabled else "off"],
             capture_output=True,
-            timeout=10,
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired as error:
         raise AcceptanceFailure("Mac Wi-Fi interface reset timed out") from error
@@ -808,10 +823,15 @@ def set_wifi_power(enabled: bool) -> None:
         raise AcceptanceFailure("cannot reset the Mac Wi-Fi interface")
 
 
-def host_is_reachable(host: str) -> bool:
-    return subprocess.run(
-        ["ping", "-c", "1", "-W", "1000", host], capture_output=True
-    ).returncode == 0
+def host_is_reachable(host: str, timeout: float) -> bool:
+    try:
+        return subprocess.run(
+            ["ping", "-c", "1", "-W", "1000", host],
+            capture_output=True,
+            timeout=timeout,
+        ).returncode == 0
+    except subprocess.TimeoutExpired:
+        return False
 
 
 def connect_wifi_for_host(
@@ -821,23 +841,40 @@ def connect_wifi_for_host(
     timeout: float,
 ) -> None:
     deadline = time.monotonic() + timeout
-    connect_wifi(ssid, password)
+    if host_is_reachable(host, remaining_timeout(deadline, 2)):
+        return
+    connect_wifi(ssid, password, remaining_timeout(deadline, 60))
     recovery_attempted = False
     while time.monotonic() < deadline:
-        if host_is_reachable(host):
+        if host_is_reachable(host, remaining_timeout(deadline, 2)):
             return
         if not recovery_attempted:
             # CoreWLAN occasionally reports success while retaining the prior
             # association. Reset the interface once, then retry the same target
             # and prove success by reachability instead of command exit status.
-            set_wifi_power(False)
-            time.sleep(2)
-            set_wifi_power(True)
-            time.sleep(3)
-            connect_wifi(ssid, password)
+            powered_off = False
+            try:
+                # Reserve the complete power-on budget before turning the
+                # interface off. This keeps the whole recovery inside the
+                # caller's deadline without risking a disabled host radio.
+                powered_off = True
+                set_wifi_power(False, remaining_timeout(deadline, 10, reserve=10))
+                time.sleep(min(2, remaining_timeout(deadline, 2, reserve=10)))
+            finally:
+                if powered_off:
+                    set_wifi_power(True, remaining_timeout(deadline, 10))
+            time.sleep(min(3, remaining_timeout(deadline, 3)))
+            connect_wifi(ssid, password, remaining_timeout(deadline, 60))
             recovery_attempted = True
-        time.sleep(0.5)
+        time.sleep(min(0.5, remaining_timeout(deadline, 0.5)))
     raise AcceptanceFailure(f"network host {host} did not become reachable")
+
+
+def restore_original_wifi(ssid: str, timeout: float) -> None:
+    # Always repair a half-finished power cycle before selecting and proving
+    # the original LAN. This is used by normal, compensation, and final paths.
+    set_wifi_power(True, min(10, timeout))
+    connect_wifi_for_host(ssid, None, "192.168.31.1", timeout)
 
 
 def forget_wifi(ssid: str) -> bool:
@@ -901,8 +938,7 @@ def pair_deck(
         30,
     )
     cleanup.observe_setup_closed()
-    connect_wifi(original_ssid)
-    wait_for_host("192.168.31.1", stage_timeout)
+    restore_original_wifi(original_ssid, stage_timeout)
     return serial_evidence.event(
         lambda event: event.get("type") == "companion_link_state"
         and event.get("state") == "online",
@@ -1329,8 +1365,7 @@ def main() -> int:
             arguments.stage_timeout,
             cleanup,
         )
-        connect_wifi(arguments.original_ssid)
-        wait_for_host("192.168.31.1", arguments.stage_timeout)
+        restore_original_wifi(arguments.original_ssid, arguments.stage_timeout)
     except (
         AcceptanceFailure,
         KeyboardInterrupt,
@@ -1403,7 +1438,7 @@ def main() -> int:
                 cleanup_ok = False
                 print(f"M1 cleanup failed: {error}", file=sys.stderr)
         try:
-            connect_wifi(arguments.original_ssid)
+            restore_original_wifi(arguments.original_ssid, arguments.stage_timeout)
         except Exception as error:
             cleanup_ok = False
             print(f"M1 Wi-Fi restore failed: {error}", file=sys.stderr)

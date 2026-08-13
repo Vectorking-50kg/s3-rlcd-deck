@@ -441,27 +441,66 @@ def test_setup_wifi_recovery_requires_the_target_host_to_be_reachable() -> None:
     operations: list[tuple[str, object]] = []
     reachable = iter([False, False, True])
 
-    def connect(ssid: str, password: str | None) -> None:
-        operations.append(("connect", (ssid, password)))
+    def connect(ssid: str, password: str | None, timeout: float) -> None:
+        operations.append(("connect", (ssid, password, timeout)))
 
-    def power(enabled: bool) -> None:
-        operations.append(("power", enabled))
+    def power(enabled: bool, timeout: float) -> None:
+        operations.append(("power", (enabled, timeout)))
 
     with mock.patch.object(m1, "connect_wifi", side_effect=connect), mock.patch.object(
         m1, "set_wifi_power", side_effect=power
     ), mock.patch.object(
-        m1, "host_is_reachable", side_effect=lambda _host: next(reachable)
+        m1, "host_is_reachable", side_effect=lambda _host, _timeout: next(reachable)
     ), mock.patch.object(m1.time, "sleep"), mock.patch.object(
-        m1.time,
-        "monotonic",
-        side_effect=[0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+        m1.time, "monotonic", side_effect=lambda: 1.0
     ):
         m1.connect_wifi_for_host("Setup", "password", "192.168.4.1", 90)
 
     assert operations[0][0] == "connect"
-    assert ("power", False) in operations
-    assert ("power", True) in operations
+    assert any(name == "power" and value[0] is False for name, value in operations)
+    assert any(name == "power" and value[0] is True for name, value in operations)
     assert sum(name == "connect" for name, _ in operations) == 2
+
+
+def test_wifi_power_is_restored_when_reassociation_fails() -> None:
+    operations: list[bool] = []
+
+    def power(enabled: bool, _timeout: float) -> None:
+        operations.append(enabled)
+        if enabled:
+            raise m1.AcceptanceFailure("power on failed")
+
+    with mock.patch.object(m1, "connect_wifi"), mock.patch.object(
+        m1, "host_is_reachable", return_value=False
+    ), mock.patch.object(m1, "set_wifi_power", side_effect=power), mock.patch.object(
+        m1.time, "sleep"
+    ):
+        try:
+            m1.connect_wifi_for_host("Setup", "password", "192.168.4.1", 90)
+        except m1.AcceptanceFailure:
+            pass
+        else:
+            raise AssertionError("power-on failure must fail")
+    assert operations == [False, True]
+
+
+def test_original_lan_recovery_uses_the_reachability_helper() -> None:
+    source = (m1.REPOSITORY_ROOT / "tools/m1_acceptance.py").read_text(encoding="utf-8")
+    assert source.count("restore_original_wifi(") == 4
+    assert 'connect_wifi_for_host(ssid, None, "192.168.31.1", timeout)' in source
+
+
+def test_wifi_operations_share_one_deadline_budget() -> None:
+    clock = iter([1.0, 1.0, 5.0])
+    with mock.patch.object(m1.time, "monotonic", side_effect=lambda: next(clock)):
+        assert m1.remaining_timeout(10.0, 60.0) == 9.0
+        assert m1.remaining_timeout(10.0, 60.0, reserve=3.0) == 6.0
+        try:
+            m1.remaining_timeout(10.0, 60.0, reserve=6.0)
+        except m1.AcceptanceFailure as error:
+            assert "timed out" in str(error)
+        else:
+            raise AssertionError("exhausted Wi-Fi deadline must fail")
 
 
 def test_diagnostic_console_resets_usb_after_app_only_jtag_flash() -> None:
@@ -590,6 +629,9 @@ if __name__ == "__main__":
     test_wifi_switch_timeout_never_exposes_the_password()
     test_dev_setup_window_outlives_slow_association()
     test_setup_wifi_recovery_requires_the_target_host_to_be_reachable()
+    test_wifi_power_is_restored_when_reassociation_fails()
+    test_original_lan_recovery_uses_the_reachability_helper()
+    test_wifi_operations_share_one_deadline_budget()
     test_cleanup_transaction_records_intent_before_observation()
     test_setup_restart_requires_explicit_inactive_observation()
     test_exact_link_error_gate_rejects_unrelated_failures()
