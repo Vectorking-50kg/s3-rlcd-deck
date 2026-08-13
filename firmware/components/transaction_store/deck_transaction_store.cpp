@@ -2,14 +2,14 @@
 
 #include <array>
 #include <cstring>
+#include <memory>
 #include <new>
+#include <utility>
 
 namespace {
 
 constexpr size_t kRecordHeaderSize = 12;
 constexpr size_t kChecksumSize = 4;
-constexpr size_t kRecordCapacity =
-    kRecordHeaderSize + DECK_TRANSACTION_PAYLOAD_CAPACITY + kChecksumSize;
 constexpr size_t kMarkerSize = 20;
 
 enum class DecodeResult : uint8_t {
@@ -17,6 +17,7 @@ enum class DecodeResult : uint8_t {
     corrupt,
     unsupported,
     migration_failed,
+    resource_failed,
 };
 
 struct DecodedMarker {
@@ -26,6 +27,85 @@ struct DecodedMarker {
     uint8_t previous_slot;
     uint32_t previous_generation;
 };
+
+void secure_clear(uint8_t *bytes, size_t size)
+{
+    auto *current = static_cast<volatile uint8_t *>(bytes);
+    while (size != 0) {
+        *current++ = 0;
+        --size;
+    }
+}
+
+struct OwnedRecord {
+    std::unique_ptr<uint8_t[]> payload;
+    size_t payload_size = 0;
+    uint32_t generation = 0;
+
+    OwnedRecord() = default;
+    OwnedRecord(const OwnedRecord &) = delete;
+    OwnedRecord &operator=(const OwnedRecord &) = delete;
+
+    OwnedRecord(OwnedRecord &&other) noexcept
+        : payload(std::move(other.payload)),
+          payload_size(other.payload_size),
+          generation(other.generation)
+    {
+        other.payload_size = 0;
+        other.generation = 0;
+    }
+
+    OwnedRecord &operator=(OwnedRecord &&other) noexcept
+    {
+        if (this != &other) {
+            secure_clear(payload.get(), payload_size);
+            payload = std::move(other.payload);
+            payload_size = other.payload_size;
+            generation = other.generation;
+            other.payload_size = 0;
+            other.generation = 0;
+        }
+        return *this;
+    }
+
+    ~OwnedRecord()
+    {
+        secure_clear(payload.get(), payload_size);
+    }
+};
+
+void clear_record(OwnedRecord *record)
+{
+    if (record == nullptr) {
+        return;
+    }
+    secure_clear(record->payload.get(), record->payload_size);
+    record->payload.reset();
+    record->payload_size = 0;
+    record->generation = 0;
+}
+
+bool assign_record(
+    OwnedRecord *record,
+    const uint8_t *payload,
+    size_t payload_size,
+    uint32_t generation
+)
+{
+    if (record == nullptr || payload == nullptr || payload_size == 0 || generation == 0) {
+        return false;
+    }
+    std::unique_ptr<uint8_t[]> copy(new (std::nothrow) uint8_t[payload_size]);
+    if (copy == nullptr) {
+        return false;
+    }
+    std::memcpy(copy.get(), payload, payload_size);
+    clear_record(record);
+    record->payload = std::move(copy);
+    record->payload_size = payload_size;
+    record->generation = generation;
+    return true;
+}
 
 uint32_t read_u32(const uint8_t *input)
 {
@@ -82,8 +162,8 @@ struct deck_transaction_store {
     deck_transaction_record_status_t record_status = DECK_TRANSACTION_RECORD_EMPTY;
     deck_transaction_record_status_t candidate_record_status =
         DECK_TRANSACTION_RECORD_EMPTY;
-    deck_transaction_record_t active{};
-    deck_transaction_record_t candidate{};
+    OwnedRecord active{};
+    OwnedRecord candidate{};
     uint8_t active_slot = 0;
     bool has_active = false;
     bool has_candidate = false;
@@ -99,25 +179,28 @@ size_t encode_record(
     const uint8_t *payload,
     size_t payload_size,
     uint32_t generation,
-    std::array<uint8_t, kRecordCapacity> *output
+    uint8_t *output,
+    size_t output_capacity
 )
 {
     if (store == nullptr || payload == nullptr || output == nullptr || payload_size == 0 ||
         payload_size < store->options.payload_length_excluded_prefix ||
-        payload_size > DECK_TRANSACTION_PAYLOAD_CAPACITY || generation == 0) {
+        payload_size > store->options.payload_capacity || generation == 0 ||
+        output_capacity < kRecordHeaderSize + payload_size + kChecksumSize) {
         return 0;
     }
-    output->fill(0);
-    std::memcpy(output->data(), store->options.record_magic, 4);
-    (*output)[4] = store->options.schema_version;
+    const size_t encoded_size = kRecordHeaderSize + payload_size + kChecksumSize;
+    std::memset(output, 0, encoded_size);
+    std::memcpy(output, store->options.record_magic, 4);
+    output[4] = store->options.schema_version;
     const size_t encoded_payload_size =
         payload_size - store->options.payload_length_excluded_prefix;
-    (*output)[6] = static_cast<uint8_t>(encoded_payload_size & 0xffU);
-    (*output)[7] = static_cast<uint8_t>((encoded_payload_size >> 8U) & 0xffU);
-    write_u32(output->data() + 8, generation);
-    std::memcpy(output->data() + kRecordHeaderSize, payload, payload_size);
+    output[6] = static_cast<uint8_t>(encoded_payload_size & 0xffU);
+    output[7] = static_cast<uint8_t>((encoded_payload_size >> 8U) & 0xffU);
+    write_u32(output + 8, generation);
+    std::memcpy(output + kRecordHeaderSize, payload, payload_size);
     const size_t checksum_offset = kRecordHeaderSize + payload_size;
-    write_u32(output->data() + checksum_offset, crc32(output->data(), checksum_offset));
+    write_u32(output + checksum_offset, crc32(output, checksum_offset));
     return checksum_offset + kChecksumSize;
 }
 
@@ -125,7 +208,7 @@ DecodeResult decode_record(
     const deck_transaction_store_t *store,
     const uint8_t *input,
     size_t size,
-    deck_transaction_record_t *record
+    OwnedRecord *record
 )
 {
     if (store == nullptr || input == nullptr || record == nullptr ||
@@ -141,7 +224,7 @@ DecodeResult decode_record(
     }
     const size_t encoded_payload_size = static_cast<size_t>(input[6]) |
                                         static_cast<size_t>(input[7]) << 8U;
-    if (encoded_payload_size > DECK_TRANSACTION_PAYLOAD_CAPACITY -
+    if (encoded_payload_size > store->options.payload_capacity -
                                    store->options.payload_length_excluded_prefix) {
         return DecodeResult::corrupt;
     }
@@ -150,7 +233,7 @@ DecodeResult decode_record(
     const size_t checksum_offset = kRecordHeaderSize + payload_size;
     const uint32_t generation = read_u32(input + 8);
     if (input[5] != 0 || payload_size == 0 ||
-        payload_size > DECK_TRANSACTION_PAYLOAD_CAPACITY ||
+        payload_size > store->options.payload_capacity ||
         checksum_offset + kChecksumSize != size || generation == 0 ||
         read_u32(input + checksum_offset) != crc32(input, checksum_offset) ||
         !store->options.validate_payload(
@@ -160,11 +243,14 @@ DecodeResult decode_record(
         )) {
         return DecodeResult::corrupt;
     }
-    *record = {};
-    std::memcpy(record->payload, input + kRecordHeaderSize, payload_size);
-    record->payload_size = payload_size;
-    record->generation = generation;
-    return DecodeResult::valid;
+    return assign_record(
+               record,
+               input + kRecordHeaderSize,
+               payload_size,
+               generation
+           )
+               ? DecodeResult::valid
+               : DecodeResult::resource_failed;
 }
 
 void encode_marker(
@@ -230,32 +316,44 @@ DecodeResult decode_marker(
 deck_transaction_storage_result_t read_encoded_record(
     const deck_transaction_store_t *store,
     deck_transaction_storage_key_t key,
-    deck_transaction_record_t *record,
+    OwnedRecord *record,
     DecodeResult *decode_result
 )
 {
-    std::array<uint8_t, kRecordCapacity> encoded{};
+    const size_t encoded_capacity =
+        kRecordHeaderSize + store->options.payload_capacity + kChecksumSize;
+    std::unique_ptr<uint8_t[]> encoded(
+        new (std::nothrow) uint8_t[encoded_capacity]
+    );
+    if (encoded == nullptr) {
+        return DECK_TRANSACTION_STORAGE_ERROR;
+    }
     size_t size = 0;
     const deck_transaction_storage_result_t result = store->options.storage.read(
         store->options.storage.context,
         key,
-        encoded.data(),
-        encoded.size(),
+        encoded.get(),
+        encoded_capacity,
         &size
     );
     if (result == DECK_TRANSACTION_STORAGE_OK) {
-        *decode_result = decode_record(store, encoded.data(), size, record);
+        *decode_result = decode_record(store, encoded.get(), size, record);
+        if (*decode_result == DecodeResult::resource_failed) {
+            return DECK_TRANSACTION_STORAGE_ERROR;
+        }
     }
     return result;
 }
 
 bool records_equal(
-    const deck_transaction_record_t &left,
-    const deck_transaction_record_t &right
+    const OwnedRecord &left,
+    const OwnedRecord &right
 )
 {
-    return left.generation == right.generation && left.payload_size == right.payload_size &&
-           std::memcmp(left.payload, right.payload, left.payload_size) == 0;
+    return left.generation == right.generation &&
+           left.payload_size == right.payload_size &&
+           left.payload_size != 0 &&
+           std::memcmp(left.payload.get(), right.payload.get(), left.payload_size) == 0;
 }
 
 void set_storage_failure(deck_transaction_store_t *store)
@@ -319,7 +417,7 @@ void load_active(deck_transaction_store_t *store)
         return;
     }
 
-    deck_transaction_record_t selected{};
+    OwnedRecord selected{};
     DecodeResult selected_decode = DecodeResult::corrupt;
     const deck_transaction_storage_result_t selected_read = read_encoded_record(
         store,
@@ -330,7 +428,7 @@ void load_active(deck_transaction_store_t *store)
     if (selected_read == DECK_TRANSACTION_STORAGE_OK &&
         selected_decode == DecodeResult::valid &&
         selected.generation == marker.active_generation) {
-        store->active = selected;
+        store->active = std::move(selected);
         store->active_slot = marker.active_slot;
         store->has_active = true;
         store->record_status = DECK_TRANSACTION_RECORD_VALID;
@@ -338,7 +436,7 @@ void load_active(deck_transaction_store_t *store)
         return;
     }
 
-    deck_transaction_record_t previous{};
+    OwnedRecord previous{};
     DecodeResult previous_decode = DecodeResult::corrupt;
     deck_transaction_storage_result_t previous_read =
         DECK_TRANSACTION_STORAGE_NOT_FOUND;
@@ -353,7 +451,7 @@ void load_active(deck_transaction_store_t *store)
     if (marker.has_previous && previous_read == DECK_TRANSACTION_STORAGE_OK &&
         previous_decode == DecodeResult::valid &&
         previous.generation == marker.previous_generation) {
-        store->active = previous;
+        store->active = std::move(previous);
         store->active_slot = marker.previous_slot;
         store->has_active = true;
         store->record_status = DECK_TRANSACTION_RECORD_RECOVERED_PREVIOUS;
@@ -430,8 +528,7 @@ deck_transaction_store_t *deck_transaction_store_create(
 {
     if (options == nullptr || options->storage.read == nullptr ||
         options->storage.write == nullptr || options->storage.erase == nullptr ||
-        options->validate_payload == nullptr || options->schema_version == 0 ||
-        options->payload_length_excluded_prefix > DECK_TRANSACTION_PAYLOAD_CAPACITY) {
+        options->validate_payload == nullptr || options->schema_version == 0) {
         return nullptr;
     }
     auto *store = new (std::nothrow) deck_transaction_store_t{};
@@ -439,6 +536,15 @@ deck_transaction_store_t *deck_transaction_store_create(
         return nullptr;
     }
     store->options = *options;
+    if (store->options.payload_capacity == 0) {
+        store->options.payload_capacity = DECK_TRANSACTION_PAYLOAD_CAPACITY;
+    }
+    if (store->options.payload_capacity > DECK_TRANSACTION_MAX_PAYLOAD_CAPACITY ||
+        store->options.payload_length_excluded_prefix >
+            store->options.payload_capacity) {
+        delete store;
+        return nullptr;
+    }
     load_candidate(store);
     load_active(store);
     return store;
@@ -447,14 +553,8 @@ deck_transaction_store_t *deck_transaction_store_create(
 void deck_transaction_store_destroy(deck_transaction_store_t *store)
 {
     if (store != nullptr) {
-        volatile uint8_t *bytes = reinterpret_cast<volatile uint8_t *>(&store->active);
-        for (size_t index = 0; index < sizeof(store->active); ++index) {
-            bytes[index] = 0;
-        }
-        bytes = reinterpret_cast<volatile uint8_t *>(&store->candidate);
-        for (size_t index = 0; index < sizeof(store->candidate); ++index) {
-            bytes[index] = 0;
-        }
+        clear_record(&store->active);
+        clear_record(&store->candidate);
     }
     delete store;
 }
@@ -467,7 +567,7 @@ deck_transaction_update_result_t deck_transaction_store_stage(
 {
     if (store == nullptr || payload == nullptr || size == 0 ||
         size < store->options.payload_length_excluded_prefix ||
-        size > DECK_TRANSACTION_PAYLOAD_CAPACITY ||
+        size > store->options.payload_capacity ||
         !store->options.validate_payload(store->options.payload_context, payload, size)) {
         return DECK_TRANSACTION_INVALID_PAYLOAD;
     }
@@ -478,19 +578,31 @@ deck_transaction_update_result_t deck_transaction_store_stage(
     if (generation == 0) {
         generation = 1;
     }
-    std::array<uint8_t, kRecordCapacity> encoded{};
-    const size_t encoded_size = encode_record(store, payload, size, generation, &encoded);
+    const size_t encoded_capacity = kRecordHeaderSize + size + kChecksumSize;
+    std::unique_ptr<uint8_t[]> encoded(
+        new (std::nothrow) uint8_t[encoded_capacity]
+    );
+    const size_t encoded_size = encoded == nullptr
+                                    ? 0
+                                    : encode_record(
+                                          store,
+                                          payload,
+                                          size,
+                                          generation,
+                                          encoded.get(),
+                                          encoded_capacity
+                                      );
     if (encoded_size == 0 ||
         !store->options.storage.write(
             store->options.storage.context,
             DECK_TRANSACTION_STORAGE_CANDIDATE,
-            encoded.data(),
+            encoded.get(),
             encoded_size
         )) {
         set_storage_failure(store);
         return DECK_TRANSACTION_STORAGE_FAILURE;
     }
-    deck_transaction_record_t verified{};
+    OwnedRecord verified{};
     DecodeResult decoded = DecodeResult::corrupt;
     if (read_encoded_record(
             store,
@@ -499,11 +611,13 @@ deck_transaction_update_result_t deck_transaction_store_stage(
             &decoded
         ) != DECK_TRANSACTION_STORAGE_OK ||
         decoded != DecodeResult::valid || verified.generation != generation ||
-        verified.payload_size != size || std::memcmp(verified.payload, payload, size) != 0) {
+        verified.payload_size != size ||
+        std::memcmp(verified.payload.get(), payload, size) != 0) {
         set_storage_failure(store);
         return DECK_TRANSACTION_STORAGE_FAILURE;
     }
-    store->candidate = verified;
+    clear_record(&store->candidate);
+    store->candidate = std::move(verified);
     store->has_candidate = true;
     store->candidate_record_status = DECK_TRANSACTION_RECORD_VALID;
     return DECK_TRANSACTION_UPDATED;
@@ -557,25 +671,32 @@ deck_transaction_update_result_t deck_transaction_store_commit(
     const uint8_t next_slot = store->has_active
                                   ? static_cast<uint8_t>(1U - store->active_slot)
                                   : 0U;
-    std::array<uint8_t, kRecordCapacity> encoded{};
-    const size_t encoded_size = encode_record(
-        store,
-        store->candidate.payload,
-        store->candidate.payload_size,
-        store->candidate.generation,
-        &encoded
+    const size_t encoded_capacity =
+        kRecordHeaderSize + store->candidate.payload_size + kChecksumSize;
+    std::unique_ptr<uint8_t[]> encoded(
+        new (std::nothrow) uint8_t[encoded_capacity]
     );
+    const size_t encoded_size = encoded == nullptr
+                                    ? 0
+                                    : encode_record(
+                                          store,
+                                          store->candidate.payload.get(),
+                                          store->candidate.payload_size,
+                                          store->candidate.generation,
+                                          encoded.get(),
+                                          encoded_capacity
+                                      );
     if (encoded_size == 0 ||
         !store->options.storage.write(
             store->options.storage.context,
             slot_key(next_slot),
-            encoded.data(),
+            encoded.get(),
             encoded_size
         )) {
         set_storage_failure(store);
         return DECK_TRANSACTION_STORAGE_FAILURE;
     }
-    deck_transaction_record_t verified{};
+    OwnedRecord verified{};
     DecodeResult decoded = DecodeResult::corrupt;
     if (read_encoded_record(store, slot_key(next_slot), &verified, &decoded) !=
             DECK_TRANSACTION_STORAGE_OK ||
@@ -620,7 +741,8 @@ deck_transaction_update_result_t deck_transaction_store_commit(
         return DECK_TRANSACTION_STORAGE_FAILURE;
     }
 
-    store->active = verified;
+    clear_record(&store->active);
+    store->active = std::move(verified);
     store->active_slot = next_slot;
     store->has_active = true;
     store->record_status = DECK_TRANSACTION_RECORD_VALID;
@@ -630,7 +752,7 @@ deck_transaction_update_result_t deck_transaction_store_commit(
             store->options.storage.context,
             DECK_TRANSACTION_STORAGE_CANDIDATE
         )) {
-        store->candidate = {};
+        clear_record(&store->candidate);
         store->has_candidate = false;
         store->candidate_record_status = DECK_TRANSACTION_RECORD_EMPTY;
     } else {
@@ -669,8 +791,8 @@ bool deck_transaction_store_clear(deck_transaction_store_t *store)
     }
     store->record_status = DECK_TRANSACTION_RECORD_EMPTY;
     store->candidate_record_status = DECK_TRANSACTION_RECORD_EMPTY;
-    store->active = {};
-    store->candidate = {};
+    clear_record(&store->active);
+    clear_record(&store->candidate);
     store->active_slot = 0;
     store->has_active = false;
     store->has_candidate = false;
@@ -688,15 +810,22 @@ bool deck_transaction_store_snapshot(
     if (store == nullptr || snapshot == nullptr) {
         return false;
     }
-    *snapshot = {
-        store->record_status,
-        store->candidate_record_status,
-        store->active,
-        store->candidate,
-        store->active_slot,
-        store->has_active,
-        store->has_candidate,
-        store->storage_faulted,
+    *snapshot = {};
+    snapshot->record_status = store->record_status;
+    snapshot->candidate_record_status = store->candidate_record_status;
+    snapshot->active = {
+        store->active.payload.get(),
+        store->active.payload_size,
+        store->active.generation,
     };
+    snapshot->candidate = {
+        store->candidate.payload.get(),
+        store->candidate.payload_size,
+        store->candidate.generation,
+    };
+    snapshot->active_slot = store->active_slot;
+    snapshot->has_active = store->has_active;
+    snapshot->has_candidate = store->has_candidate;
+    snapshot->storage_faulted = store->storage_faulted;
     return true;
 }

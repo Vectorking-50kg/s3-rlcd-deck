@@ -102,6 +102,30 @@ deck_transaction_nvs_storage_t *deck_transaction_nvs_storage_open(
     return storage;
 }
 
+deck_transaction_nvs_storage_t *deck_transaction_nvs_storage_open_from_partition(
+    const char *partition_name,
+    const char *namespace_name
+)
+{
+    if (partition_name == nullptr || namespace_name == nullptr) {
+        return nullptr;
+    }
+    auto *storage = new (std::nothrow) deck_transaction_nvs_storage_t{};
+    if (storage == nullptr) {
+        return nullptr;
+    }
+    if (nvs_open_from_partition(
+            partition_name,
+            namespace_name,
+            NVS_READWRITE,
+            &storage->handle
+        ) != ESP_OK) {
+        delete storage;
+        return nullptr;
+    }
+    return storage;
+}
+
 void deck_transaction_nvs_storage_close(deck_transaction_nvs_storage_t *storage)
 {
     if (storage != nullptr) {

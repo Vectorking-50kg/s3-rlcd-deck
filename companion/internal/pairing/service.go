@@ -23,6 +23,7 @@ const (
 	defaultCodeTTL    = 5 * time.Minute
 	pairingCodeSpace  = 1_000_000
 	deviceTokenBytes  = 32
+	maxCertificateDER = 1024
 	maxCodeCollisions = 8
 )
 
@@ -75,17 +76,19 @@ type Config struct {
 	Auditor                Auditor
 	CodeTTL                time.Duration
 	CertificateFingerprint string
+	CertificateDER         []byte
 	CodePepper             []byte
 }
 
 type Service struct {
-	clock       Clock
-	store       Store
-	random      Random
-	auditor     Auditor
-	codeTTL     time.Duration
-	fingerprint string
-	codePepper  []byte
+	clock          Clock
+	store          Store
+	random         Random
+	auditor        Auditor
+	codeTTL        time.Duration
+	fingerprint    string
+	certificateDER string
+	codePepper     []byte
 }
 
 type IssuedCode struct {
@@ -104,6 +107,7 @@ type Credential struct {
 	DeviceID               string `json:"device_id"`
 	Token                  string `json:"token"`
 	CertificateFingerprint string `json:"certificate_fingerprint"`
+	CertificateDER         string `json:"certificate_der"`
 	ProtocolVersion        int    `json:"protocol_version"`
 }
 
@@ -181,14 +185,22 @@ func New(config Config) (*Service, error) {
 	if !fingerprintPattern.MatchString(config.CertificateFingerprint) {
 		return nil, errors.New("certificate fingerprint must be canonical sha256 hex")
 	}
+	if len(config.CertificateDER) == 0 || len(config.CertificateDER) > maxCertificateDER {
+		return nil, errors.New("Device Hub certificate DER is required")
+	}
+	certificateDigest := sha256.Sum256(config.CertificateDER)
+	if "sha256:"+hex.EncodeToString(certificateDigest[:]) != config.CertificateFingerprint {
+		return nil, errors.New("Device Hub certificate does not match its fingerprint")
+	}
 	return &Service{
-		clock:       config.Clock,
-		store:       config.Store,
-		random:      config.Random,
-		auditor:     config.Auditor,
-		codeTTL:     config.CodeTTL,
-		fingerprint: config.CertificateFingerprint,
-		codePepper:  append([]byte(nil), config.CodePepper...),
+		clock:          config.Clock,
+		store:          config.Store,
+		random:         config.Random,
+		auditor:        config.Auditor,
+		codeTTL:        config.CodeTTL,
+		fingerprint:    config.CertificateFingerprint,
+		certificateDER: base64.StdEncoding.EncodeToString(config.CertificateDER),
+		codePepper:     append([]byte(nil), config.CodePepper...),
 	}, nil
 }
 
@@ -268,6 +280,7 @@ func (service *Service) Redeem(ctx context.Context, request RedeemRequest) (Cred
 		DeviceID:               request.DeviceID,
 		Token:                  token,
 		CertificateFingerprint: service.fingerprint,
+		CertificateDER:         service.certificateDER,
 		ProtocolVersion:        ProtocolVersion,
 	}, nil
 }

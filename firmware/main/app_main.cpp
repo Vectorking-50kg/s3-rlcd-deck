@@ -5,6 +5,7 @@
 #include "deck_application_ui.h"
 #include "deck_peripherals.h"
 #include "deck_boot_diagnostics.h"
+#include "deck_companion_link.h"
 #include "deck_device_settings.h"
 #include "deck_display.h"
 #include "deck_m0_view_model.h"
@@ -27,6 +28,7 @@ deck_rlcd_panel_t *application_panel = nullptr;
 deck_display_service_t *application_display = nullptr;
 deck_peripherals_t *application_peripherals = nullptr;
 deck_setup_service_t *application_setup = nullptr;
+deck_companion_link_t *application_companion_link = nullptr;
 deck_m0_view_model_t application_model{};
 SemaphoreHandle_t application_model_mutex = nullptr;
 uint32_t handled_boot_long_press_count = 0;
@@ -569,6 +571,13 @@ void start_setup_after_ui_ready()
         return;
     }
     application_setup = deck_setup_service_start(setup_event, nullptr);
+    if (application_setup != nullptr) {
+        const esp_app_desc_t *app = esp_app_get_description();
+        application_companion_link = deck_companion_link_start(
+            deck_setup_service_wait_companion_profiles(application_setup, 10'000),
+            app->version
+        );
+    }
 #ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
     if (application_setup == nullptr) {
         static constexpr char error[] =
@@ -587,6 +596,11 @@ void start_setup_after_ui_ready()
             "\"temperature_offset_tenths_c\":-40}\n";
         write_stdout(nullptr, error, sizeof(error) - 1);
     } else {
+        if (application_companion_link == nullptr) {
+            static constexpr char link_error[] =
+                "{\"type\":\"diagnostic_error\",\"stage\":\"companion_link\"}\n";
+            write_stdout(nullptr, link_error, sizeof(link_error) - 1);
+        }
         if (xTaskCreatePinnedToCore(
                 diagnostic_control_task,
                 "diagnostic_control",

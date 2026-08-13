@@ -26,7 +26,7 @@
     },
     "credential": {
       "type": "object",
-      "required": ["device_id", "token", "certificate_fingerprint", "protocol_version"],
+      "required": ["device_id", "token", "certificate_fingerprint", "certificate_der", "protocol_version"],
       "properties": {
         "device_id": {"type": "string"},
         "token": {
@@ -38,6 +38,12 @@
         "certificate_fingerprint": {
           "type": "string",
           "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "certificate_der": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1368,
+          "pattern": "^[A-Za-z0-9+/]+={0,2}$"
         },
         "protocol_version": {"const": 1}
       },

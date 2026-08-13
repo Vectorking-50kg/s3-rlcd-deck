@@ -3,6 +3,7 @@
 #include "deck_setup_mode.h"
 #include "deck_setup_confirmation.h"
 #include "deck_device_settings.h"
+#include "deck_companion_profiles.h"
 #include "deck_wifi_config.h"
 
 #include <stdbool.h>
@@ -25,6 +26,9 @@ typedef enum {
     DECK_SETUP_HTTP_TEMPERATURE,
     DECK_SETUP_HTTP_WIFI_CLEAR_REQUEST,
     DECK_SETUP_HTTP_WIFI_CLEAR_CONFIRM,
+    DECK_SETUP_HTTP_COMPANION_PAIR,
+    DECK_SETUP_HTTP_COMPANION_SELECT,
+    DECK_SETUP_HTTP_COMPANION_REVOKE,
 } deck_setup_http_route_t;
 
 typedef enum {
@@ -66,6 +70,13 @@ typedef enum {
     DECK_SETUP_TEMPERATURE_REQUEST_NOT_EXACT_TENTH,
 } deck_setup_temperature_request_result_t;
 
+typedef enum {
+    DECK_SETUP_COMPANION_REQUEST_OK = 0,
+    DECK_SETUP_COMPANION_REQUEST_MALFORMED,
+    DECK_SETUP_COMPANION_REQUEST_INVALID_ADDRESS,
+    DECK_SETUP_COMPANION_REQUEST_INVALID_CODE,
+} deck_setup_companion_request_result_t;
+
 const deck_setup_http_route_spec_t *deck_setup_http_routes(size_t *route_count);
 deck_setup_http_route_t deck_setup_http_route(const char *method, const char *path);
 bool deck_setup_http_convert_scan_results(
@@ -92,10 +103,22 @@ bool deck_setup_http_parse_confirmation_request(
     char *token,
     size_t token_capacity
 );
+deck_setup_companion_request_result_t deck_setup_http_parse_companion_pair_request(
+    const char *body,
+    size_t body_size,
+    deck_companion_pair_request_t *request
+);
+bool deck_setup_http_parse_companion_profile_request(
+    const char *body,
+    size_t body_size,
+    char *profile_id,
+    size_t profile_id_capacity
+);
 bool deck_setup_http_render_status(
     const deck_setup_snapshot_t *snapshot,
     const deck_wifi_config_snapshot_t *wifi,
     const deck_device_settings_snapshot_t *settings,
+    const deck_companion_profiles_snapshot_t *companions,
     const deck_setup_scan_result_t *networks,
     size_t network_count,
     char *buffer,

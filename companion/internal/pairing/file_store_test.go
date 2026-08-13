@@ -146,6 +146,7 @@ func TestPairingCodeVerifierIsPepperedAndRestartInvalidatesOutstandingCode(t *te
 		Random:                 firstRandom,
 		CodePepper:             makeTokenBytes(0xa1),
 		CertificateFingerprint: testCertificateFingerprint,
+		CertificateDER:         []byte(testCertificateDER),
 	})
 	if err != nil {
 		t.Fatalf("pairing.New(first) error = %v", err)
@@ -177,6 +178,7 @@ func TestPairingCodeVerifierIsPepperedAndRestartInvalidatesOutstandingCode(t *te
 		Random:                 &fakeRandom{tokens: [][]byte{makeTokenBytes(0xb1)}},
 		CodePepper:             makeTokenBytes(0xa2),
 		CertificateFingerprint: testCertificateFingerprint,
+		CertificateDER:         []byte(testCertificateDER),
 	})
 	if err != nil {
 		t.Fatalf("pairing.New(restarted) error = %v", err)

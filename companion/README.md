@@ -6,16 +6,18 @@ The current M1 runtime provides:
 
 - a Go background executable with bounded shutdown;
 - a loopback-only management listener at `127.0.0.1:7777` by default;
-- an independently authenticated Device Hub listener at `127.0.0.1:7780` by default;
+- an independently authenticated TLS Device Hub listener at `0.0.0.0:7780` by default;
 - management login sessions with strict Origin/CSRF checks on writes;
 - bounded Device Hub headers, bodies, timeouts, concurrency, and per-IP request rate;
 - short-lived, one-time Pairing codes and revocable per-device trust;
 - a persistent self-signed Device Hub identity with a stable SHA-256 fingerprint;
+- a token-authenticated, fingerprint-pinned WSS Device Link with strict `device.hello`,
+  bidirectional heartbeat, duplicate-device rejection, revocation, and bounded frames;
 - an embedded, offline Web application;
 - an authenticated, read-only `/api/v1/status` endpoint and public `/api/v1/bootstrap`;
 - a size-limited, versioned control-message envelope parser backed by shared fixtures.
 
-Pinned WSS transport is delivered by its linked GitHub Issue. Provider credentials and raw private content must never be sent to a Deck.
+Provider credentials and raw private content must never be sent to a Deck.
 
 ## Run
 
@@ -29,7 +31,12 @@ go run ./cmd/s3deck-companion
 
 The management token must contain at least 24 bytes and is read from the environment so it does not appear in process arguments. Device Hub access is never authorized by this token: redeeming a six-digit one-time code produces an independent 256-bit token for exactly one Device ID.
 
-Until #29 installs fingerprint-pinned TLS/WSS, the Device Hub is deliberately restricted to loopback. This keeps the one-time redeem response off untrusted LAN links; configuring a non-loopback Device Hub fails closed rather than sending the Pairing code, device identity, or Token over plaintext HTTP.
+The Device Hub always uses the persistent Companion TLS identity when exposed beyond
+loopback. During Pairing, the computer running Companion must also be connected to the
+Deck's random WPA2 Setup AP. That isolated network authorizes one certificate-discovery
+redeem; the Deck verifies that the returned DER certificate hashes to the returned
+fingerprint before committing the Companion Profile. Every normal Device Link connection
+then requires the exact saved certificate plus the independently issued device Token.
 
 The Companion stores its certificate identity, token verifiers, and bounded redacted Pairing audit under the platform user-configuration directory. Files and their directory are protected with owner-only permissions. Override the location for development with `--data-directory`; neither Pairing codes nor device Tokens are stored in plaintext.
 
@@ -40,6 +47,12 @@ go run ./cmd/s3deck-companion --version
 ```
 
 The authenticated management API issues codes at `POST /api/v1/pairing/codes`, issues a device-bound rotation code at `POST /api/v1/devices/{device_id}/rotate`, and revokes trust at `DELETE /api/v1/devices/{device_id}`. A Deck redeems a code once at the rate-limited Device Hub route `POST /api/v1/pairing/redeem`. Management writes require the login session, exact Origin, and CSRF token described above; a successful redeem response is the only place a plaintext device Token is returned. Device requests authenticate the complete Device ID + Token + identity + protocol-version binding.
+
+The Device Link endpoint is `GET /api/v1/device/link` with WebSocket subprotocol
+`s3-rlcd-deck.v1`. An authenticated Deck must send `device.hello` first and continue with
+strict, size-limited `device.heartbeat` control messages. Missing heartbeats close the
+session after 30 seconds; a revoked trust is rechecked and disconnected without waiting
+for a Companion restart.
 
 LAN management is off by default. Enabling it requires all three explicit options and causes the status document to report a security warning:
 

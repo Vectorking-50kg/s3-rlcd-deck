@@ -86,11 +86,13 @@ deck_add_host_test(
         test_setup_mode.cpp
         ../../firmware/components/setup_mode/deck_setup_mode.cpp
         ../../firmware/components/setup_mode/deck_setup_http.cpp
+        ../../firmware/components/companion_profiles/deck_companion_profiles.cpp
         ../../firmware/components/device_settings/deck_device_settings.cpp
         ../../firmware/components/transaction_store/deck_transaction_store.cpp
         ../../firmware/components/wifi_config/deck_wifi_config.cpp
     INCLUDE_DIRS
         ../../firmware/components/device_settings/include
+        ../../firmware/components/companion_profiles/include
         ../../firmware/components/setup_mode/include
         ../../firmware/components/transaction_store/include
         ../../firmware/components/wifi_config/include
@@ -116,11 +118,50 @@ deck_add_host_test(
         ../../firmware/components/transaction_store/include
 )
 deck_add_host_test(
+    test_companion_profiles
+    SOURCES
+        test_companion_profiles.cpp
+        ../../firmware/components/companion_profiles/deck_companion_profiles.cpp
+        ../../firmware/components/transaction_store/deck_transaction_store.cpp
+    INCLUDE_DIRS
+        ../../firmware/components/companion_profiles/include
+        ../../firmware/components/transaction_store/include
+)
+deck_add_host_test(
+    test_device_protocol
+    SOURCES
+        test_device_protocol.cpp
+        ../../firmware/components/companion_link/deck_device_protocol.cpp
+    INCLUDE_DIRS ../../firmware/components/companion_link/include
+)
+target_compile_definitions(
+    test_device_protocol
+    PRIVATE DECK_REPOSITORY_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../.."
+)
+deck_add_host_test(
+    test_companion_link_timing
+    SOURCES
+        test_companion_link_timing.cpp
+        ../../firmware/components/companion_link/deck_companion_link_timing.cpp
+    INCLUDE_DIRS ../../firmware/components/companion_link/include
+)
+deck_add_host_test(
     test_setup_confirmation
     SOURCES
         test_setup_confirmation.cpp
         ../../firmware/components/setup_mode/deck_setup_confirmation.cpp
     INCLUDE_DIRS ../../firmware/components/setup_mode/include
+)
+deck_add_host_test(
+    test_setup_command_queue
+    SOURCES
+        test_setup_command_queue.cpp
+        ../../firmware/components/setup_mode/deck_setup_command_queue.cpp
+    INCLUDE_DIRS
+        ../../firmware/components/companion_profiles/include
+        ../../firmware/components/setup_mode/include
+        ../../firmware/components/transaction_store/include
+        ../../firmware/components/wifi_config/include
 )
 
 add_test(

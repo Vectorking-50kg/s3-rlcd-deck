@@ -9,6 +9,7 @@ extern "C" {
 #endif
 
 #define DECK_TRANSACTION_PAYLOAD_CAPACITY 128
+#define DECK_TRANSACTION_MAX_PAYLOAD_CAPACITY 8192
 
 typedef struct deck_transaction_store deck_transaction_store_t;
 typedef struct deck_transaction_nvs_storage deck_transaction_nvs_storage_t;
@@ -63,6 +64,8 @@ typedef struct {
     uint8_t record_magic[4];
     uint8_t marker_magic[4];
     uint8_t schema_version;
+    /* Zero selects DECK_TRANSACTION_PAYLOAD_CAPACITY. */
+    size_t payload_capacity;
     /* Leading payload bytes omitted from the schema's encoded length field. */
     uint8_t payload_length_excluded_prefix;
     deck_transaction_validate_payload_fn validate_payload;
@@ -80,7 +83,8 @@ typedef enum {
 } deck_transaction_record_status_t;
 
 typedef struct {
-    uint8_t payload[DECK_TRANSACTION_PAYLOAD_CAPACITY];
+    /* Borrowed from the store; valid until its next mutation or destruction. */
+    const uint8_t *payload;
     size_t payload_size;
     uint32_t generation;
 } deck_transaction_record_t;
@@ -123,6 +127,10 @@ bool deck_transaction_store_snapshot(
 
 /* nvs_flash_init() must succeed before opening the namespaced adapter. */
 deck_transaction_nvs_storage_t *deck_transaction_nvs_storage_open(
+    const char *namespace_name
+);
+deck_transaction_nvs_storage_t *deck_transaction_nvs_storage_open_from_partition(
+    const char *partition_name,
     const char *namespace_name
 );
 void deck_transaction_nvs_storage_close(deck_transaction_nvs_storage_t *storage);

@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -49,8 +50,11 @@ type ManagementLimits struct {
 }
 
 type DeviceHubConfig struct {
-	Address string
-	Limits  DeviceHubLimits
+	Address           string
+	TLSCertificate    *tls.Certificate
+	HeartbeatInterval time.Duration
+	HeartbeatTimeout  time.Duration
+	Limits            DeviceHubLimits
 }
 
 type DeviceHubLimits struct {
@@ -103,8 +107,19 @@ func normalizeConfig(config Config) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("invalid Device Hub address: %w", err)
 	}
-	if !deviceHubIP.IsLoopback() {
+	hasTLSCertificate := config.DeviceHub.TLSCertificate != nil &&
+		len(config.DeviceHub.TLSCertificate.Certificate) != 0 &&
+		config.DeviceHub.TLSCertificate.PrivateKey != nil
+	if config.DeviceHub.TLSCertificate != nil && !hasTLSCertificate {
+		return Config{}, errors.New("Device Hub TLS certificate is incomplete")
+	}
+	if !deviceHubIP.IsLoopback() && !hasTLSCertificate {
 		return Config{}, ErrDeviceHubTLSRequired
+	}
+	if config.DeviceHub.HeartbeatInterval < 0 || config.DeviceHub.HeartbeatTimeout < 0 ||
+		(config.DeviceHub.HeartbeatTimeout != 0 &&
+			config.DeviceHub.HeartbeatInterval >= config.DeviceHub.HeartbeatTimeout) {
+		return Config{}, errors.New("Device Hub heartbeat timing is invalid")
 	}
 	config.DeviceHub.Limits = normalizeDeviceHubLimits(config.DeviceHub.Limits)
 	config.Management.Limits = normalizeManagementLimits(config.Management.Limits)

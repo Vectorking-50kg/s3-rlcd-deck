@@ -1,0 +1,1 @@
+{"type":"device.hello","protocol_version":1,"device_id":"deck-001122334455","firmware_version":"0.2.0-dev","board":"other-board","capabilities":["display"],"serial_state":"disarmed"}

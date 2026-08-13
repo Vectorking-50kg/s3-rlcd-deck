@@ -1,8 +1,12 @@
 #include "deck_setup_service.h"
 
+#include "deck_setup_command_queue.h"
+
 #include "deck_setup_http.h"
 #include "deck_setup_confirmation.h"
 #include "deck_device_settings_nvs.h"
+#include "deck_companion_pairing_esp.h"
+#include "deck_companion_profiles_nvs.h"
 #include "deck_wifi_config_nvs.h"
 #include "sdkconfig.h"
 
@@ -10,6 +14,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <new>
 
 #include "esp_event.h"
@@ -30,6 +35,9 @@
 
 namespace {
 
+constexpr EventBits_t kProfilesReadyBit = BIT4;
+constexpr EventBits_t kProfilesFailedBit = BIT5;
+
 constexpr uint8_t kSetupChannel = 1;
 constexpr uint8_t kMaximumClients = 4;
 constexpr size_t kMaximumScanResults = 10;
@@ -47,21 +55,21 @@ constexpr uint64_t kValidationTimeoutMs =
     static_cast<uint64_t>(CONFIG_DECK_WIFI_VALIDATION_TIMEOUT_SECONDS) * 1'000U;
 constexpr uint64_t kClearConfirmationLifetimeMs = 60'000;
 
-enum class CommandType : uint8_t {
-    enter_from_boot,
-    submit_wifi,
-    validation_connected,
-    validation_auth_failed,
-    validation_connection_failed,
-    submit_temperature_offset,
-    clear_wifi,
-};
-
-struct Command {
-    CommandType type;
-    deck_wifi_credentials_t credentials;
-    int16_t temperature_offset_tenths_c;
-};
+using Command = deck_setup_command_t;
+namespace CommandType {
+constexpr auto enter_from_boot = DECK_SETUP_COMMAND_ENTER_FROM_BOOT;
+constexpr auto submit_wifi = DECK_SETUP_COMMAND_SUBMIT_WIFI;
+constexpr auto validation_connected = DECK_SETUP_COMMAND_VALIDATION_CONNECTED;
+constexpr auto validation_auth_failed = DECK_SETUP_COMMAND_VALIDATION_AUTH_FAILED;
+constexpr auto validation_connection_failed =
+    DECK_SETUP_COMMAND_VALIDATION_CONNECTION_FAILED;
+constexpr auto submit_temperature_offset =
+    DECK_SETUP_COMMAND_SUBMIT_TEMPERATURE_OFFSET;
+constexpr auto clear_wifi = DECK_SETUP_COMMAND_CLEAR_WIFI;
+constexpr auto pair_companion = DECK_SETUP_COMMAND_PAIR_COMPANION;
+constexpr auto select_companion = DECK_SETUP_COMMAND_SELECT_COMPANION;
+constexpr auto revoke_companion = DECK_SETUP_COMMAND_REVOKE_COMPANION;
+}  // namespace CommandType
 
 enum class EnterSessionResult : uint8_t {
     handled,
@@ -90,6 +98,23 @@ bool fill_random(void *, uint8_t *output, size_t size)
     return true;
 }
 
+bool redeem_companion(
+    void *,
+    const char *hub_address,
+    const char *pairing_address,
+    const char *pairing_code,
+    deck_companion_pairing_credential_t *credential
+)
+{
+    return deck_companion_pairing_esp_redeem(
+        nullptr,
+        hub_address,
+        pairing_address,
+        pairing_code,
+        credential
+    );
+}
+
 void secure_clear(char *buffer, size_t size)
 {
     if (buffer == nullptr) {
@@ -109,9 +134,10 @@ struct deck_setup_service {
     void *callback_context;
     SemaphoreHandle_t state_mutex;
     SemaphoreHandle_t network_mutex;
-    QueueHandle_t commands;
+    deck_setup_command_queue_t *commands;
     QueueHandle_t notifications;
     TaskHandle_t publisher_task;
+    TaskHandle_t service_task;
     EventGroupHandle_t wifi_events;
     esp_event_handler_instance_t wifi_event_handler;
     esp_event_handler_instance_t ip_event_handler;
@@ -120,6 +146,8 @@ struct deck_setup_service {
     deck_wifi_config_t *wifi_config;
     deck_device_settings_nvs_storage_t *settings_storage;
     deck_device_settings_t *settings;
+    deck_companion_profiles_nvs_storage_t *companion_storage;
+    deck_companion_profiles_t *companion_profiles;
     deck_setup_confirmation_t *clear_confirmation;
     deck_setup_scan_result_t scan_results[kMaximumScanResults];
     size_t scan_count;
@@ -146,6 +174,7 @@ bool copy_state(
     deck_setup_snapshot_t *snapshot,
     deck_wifi_config_snapshot_t *wifi,
     deck_device_settings_snapshot_t *settings,
+    deck_companion_profiles_snapshot_t *companions,
     deck_setup_scan_result_t *networks,
     size_t network_capacity,
     size_t *network_count
@@ -169,7 +198,17 @@ bool copy_state(
         settings_copied = service->settings == nullptr ||
                           deck_device_settings_snapshot(service->settings, settings);
     }
-    const bool copied = snapshot_locked(service, snapshot) && wifi_copied && settings_copied;
+    bool companions_copied = true;
+    if (companions != nullptr) {
+        *companions = {};
+        companions_copied = service->companion_profiles == nullptr ||
+                            deck_companion_profiles_snapshot(
+                                service->companion_profiles,
+                                companions
+                            );
+    }
+    const bool copied = snapshot_locked(service, snapshot) && wifi_copied && settings_copied &&
+                        companions_copied;
     const size_t count = std::min(service->scan_count, network_capacity);
     if (networks != nullptr && count != 0) {
         std::memcpy(networks, service->scan_results, count * sizeof(networks[0]));
@@ -194,6 +233,7 @@ void notify(
             &snapshot,
             &wifi,
             &settings,
+            nullptr,
             nullptr,
             0,
             &unused_count
@@ -232,11 +272,14 @@ void publisher_task(void *task_context)
 bool enqueue_command(deck_setup_service_t *service, const Command &command)
 {
     if (service == nullptr ||
-        xQueueSend(service->commands, &command, 0) != pdPASS) {
+        !deck_setup_command_queue_try_send(service->commands, &command)) {
         if (service != nullptr) {
             service->command_overflow.store(true, std::memory_order_release);
         }
         return false;
+    }
+    if (service->service_task != nullptr) {
+        xTaskNotifyGive(service->service_task);
     }
     return true;
 }
@@ -265,13 +308,10 @@ void wifi_event(void *context, esp_event_base_t, int32_t event_id, void *event_d
         }
         const auto *disconnected =
             static_cast<const wifi_event_sta_disconnected_t *>(event_data);
-        const Command command = {
-            authentication_failure(disconnected->reason)
-                ? CommandType::validation_auth_failed
-                : CommandType::validation_connection_failed,
-            {},
-            0,
-        };
+        Command command{};
+        command.type = authentication_failure(disconnected->reason)
+                           ? CommandType::validation_auth_failed
+                           : CommandType::validation_connection_failed;
         (void)enqueue_command(service, command);
     }
 }
@@ -284,7 +324,8 @@ void ip_event(void *context, esp_event_base_t, int32_t event_id, void *)
     }
     xEventGroupSetBits(service->wifi_events, kStaGotIpBit);
     if (service->accepting_commands.load(std::memory_order_acquire)) {
-        const Command command = {CommandType::validation_connected, {}, 0};
+        Command command{};
+        command.type = CommandType::validation_connected;
         (void)enqueue_command(service, command);
     }
 }
@@ -353,6 +394,7 @@ esp_err_t render_status(deck_setup_service_t *service, httpd_req_t *request)
     deck_setup_snapshot_t snapshot{};
     deck_wifi_config_snapshot_t wifi{};
     deck_device_settings_snapshot_t settings{};
+    deck_companion_profiles_snapshot_t companions{};
     deck_setup_scan_result_t networks[kMaximumScanResults]{};
     size_t network_count = 0;
     if (!copy_state(
@@ -360,25 +402,33 @@ esp_err_t render_status(deck_setup_service_t *service, httpd_req_t *request)
             &snapshot,
             &wifi,
             &settings,
+            &companions,
             networks,
             kMaximumScanResults,
             &network_count
         )) {
         return httpd_resp_send_500(request);
     }
-    char response[2'048];
+    constexpr size_t kStatusResponseCapacity = 8'192;
+    const std::unique_ptr<char[]> response(
+        new (std::nothrow) char[kStatusResponseCapacity]
+    );
+    if (response == nullptr) {
+        return httpd_resp_send_500(request);
+    }
     if (!deck_setup_http_render_status(
             &snapshot,
             &wifi,
             &settings,
+            &companions,
             networks,
             network_count,
-            response,
-            sizeof(response)
+            response.get(),
+            kStatusResponseCapacity
         )) {
         return httpd_resp_send_500(request);
     }
-    return send_json(request, response);
+    return send_json(request, response.get());
 }
 
 esp_err_t status_handler(httpd_req_t *request)
@@ -470,7 +520,8 @@ esp_err_t wifi_handler(httpd_req_t *request)
         return send_json(request, "{\"accepted\":false,\"error\":\"malformed\"}");
     }
 
-    Command command{CommandType::submit_wifi, {}, 0};
+    Command command{};
+    command.type = CommandType::submit_wifi;
     const deck_setup_wifi_request_result_t parsed = deck_setup_http_parse_wifi_request(
         body,
         received,
@@ -616,6 +667,135 @@ esp_err_t wifi_clear_confirm_handler(httpd_req_t *request)
     }
 }
 
+esp_err_t companion_pair_handler(httpd_req_t *request)
+{
+    auto *service = static_cast<deck_setup_service_t *>(request->user_ctx);
+    if (!mark_activity(service)) {
+        httpd_resp_set_status(request, "503 Service Unavailable");
+        return send_json(request, "{\"accepted\":false,\"error\":\"setup_inactive\"}");
+    }
+    char body[160];
+    size_t received = 0;
+    deck_companion_pair_request_t pair_request{};
+    if (!receive_body(request, body, sizeof(body), &received)) {
+        secure_clear(body, sizeof(body));
+        httpd_resp_set_status(request, "400 Bad Request");
+        return send_json(request, "{\"accepted\":false,\"error\":\"malformed\"}");
+    }
+    const deck_setup_companion_request_result_t parsed =
+        deck_setup_http_parse_companion_pair_request(
+            body,
+            received,
+            &pair_request
+        );
+    secure_clear(body, sizeof(body));
+    if (parsed != DECK_SETUP_COMPANION_REQUEST_OK) {
+        secure_clear(
+            reinterpret_cast<char *>(&pair_request),
+            sizeof(pair_request)
+        );
+        httpd_resp_set_status(request, "400 Bad Request");
+        if (parsed == DECK_SETUP_COMPANION_REQUEST_INVALID_ADDRESS) {
+            return send_json(request, "{\"accepted\":false,\"error\":\"invalid_address\"}");
+        }
+        if (parsed == DECK_SETUP_COMPANION_REQUEST_INVALID_CODE) {
+            return send_json(request, "{\"accepted\":false,\"error\":\"invalid_code\"}");
+        }
+        return send_json(request, "{\"accepted\":false,\"error\":\"malformed\"}");
+    }
+    sockaddr_storage peer_address{};
+    socklen_t peer_size = sizeof(peer_address);
+    const int socket_fd = httpd_req_to_sockfd(request);
+    uint16_t hub_port = 0;
+    char peer_ip[INET_ADDRSTRLEN]{};
+    const bool peer_valid =
+        socket_fd >= 0 &&
+        getpeername(
+            socket_fd,
+            reinterpret_cast<sockaddr *>(&peer_address),
+            &peer_size
+        ) == 0 &&
+        peer_address.ss_family == AF_INET &&
+        inet_ntop(
+            AF_INET,
+            &reinterpret_cast<sockaddr_in *>(&peer_address)->sin_addr,
+            peer_ip,
+            sizeof(peer_ip)
+        ) != nullptr &&
+        deck_companion_hub_address_port(pair_request.hub_address, &hub_port);
+    const int pairing_size = peer_valid
+                                 ? std::snprintf(
+                                       pair_request.pairing_address,
+                                       sizeof(pair_request.pairing_address),
+                                       "%s:%u",
+                                       peer_ip,
+                                       static_cast<unsigned>(hub_port)
+                                   )
+                                 : -1;
+    if (pairing_size <= 0 || static_cast<size_t>(pairing_size) >=
+                                 sizeof(pair_request.pairing_address)) {
+        secure_clear(
+            reinterpret_cast<char *>(&pair_request),
+            sizeof(pair_request)
+        );
+        httpd_resp_set_status(request, "400 Bad Request");
+        return send_json(request, "{\"accepted\":false,\"error\":\"invalid_peer\"}");
+    }
+    const bool queued = deck_setup_service_pair_companion(service, &pair_request);
+    secure_clear(reinterpret_cast<char *>(&pair_request), sizeof(pair_request));
+    if (!queued) {
+        httpd_resp_set_status(request, "503 Service Unavailable");
+        return send_json(request, "{\"accepted\":false,\"error\":\"busy\"}");
+    }
+    httpd_resp_set_status(request, "202 Accepted");
+    return send_json(request, "{\"accepted\":true,\"state\":\"queued\"}");
+}
+
+esp_err_t companion_profile_handler(httpd_req_t *request, bool revoke)
+{
+    auto *service = static_cast<deck_setup_service_t *>(request->user_ctx);
+    if (!mark_activity(service)) {
+        httpd_resp_set_status(request, "503 Service Unavailable");
+        return send_json(request, "{\"accepted\":false,\"error\":\"setup_inactive\"}");
+    }
+    char body[128];
+    char profile_id[DECK_COMPANION_PROFILE_ID_CAPACITY];
+    size_t received = 0;
+    if (!receive_body(request, body, sizeof(body), &received) ||
+        !deck_setup_http_parse_companion_profile_request(
+            body,
+            received,
+            profile_id,
+            sizeof(profile_id)
+        )) {
+        secure_clear(body, sizeof(body));
+        secure_clear(profile_id, sizeof(profile_id));
+        httpd_resp_set_status(request, "400 Bad Request");
+        return send_json(request, "{\"accepted\":false,\"error\":\"malformed\"}");
+    }
+    const bool queued = revoke
+                            ? deck_setup_service_revoke_companion(service, profile_id)
+                            : deck_setup_service_select_companion(service, profile_id);
+    secure_clear(body, sizeof(body));
+    secure_clear(profile_id, sizeof(profile_id));
+    if (!queued) {
+        httpd_resp_set_status(request, "503 Service Unavailable");
+        return send_json(request, "{\"accepted\":false,\"error\":\"busy\"}");
+    }
+    httpd_resp_set_status(request, "202 Accepted");
+    return send_json(request, "{\"accepted\":true,\"state\":\"queued\"}");
+}
+
+esp_err_t companion_select_handler(httpd_req_t *request)
+{
+    return companion_profile_handler(request, false);
+}
+
+esp_err_t companion_revoke_handler(httpd_req_t *request)
+{
+    return companion_profile_handler(request, true);
+}
+
 esp_err_t accept_ap_session(httpd_handle_t, int socket_fd)
 {
     sockaddr_storage local_address{};
@@ -650,6 +830,12 @@ HttpHandler handler_for_route(deck_setup_http_route_t route)
             return wifi_clear_request_handler;
         case DECK_SETUP_HTTP_WIFI_CLEAR_CONFIRM:
             return wifi_clear_confirm_handler;
+        case DECK_SETUP_HTTP_COMPANION_PAIR:
+            return companion_pair_handler;
+        case DECK_SETUP_HTTP_COMPANION_SELECT:
+            return companion_select_handler;
+        case DECK_SETUP_HTTP_COMPANION_REVOKE:
+            return companion_revoke_handler;
         case DECK_SETUP_HTTP_NOT_FOUND:
         case DECK_SETUP_HTTP_METHOD_NOT_ALLOWED:
         default:
@@ -987,6 +1173,9 @@ const char *initialize_wifi(deck_setup_service_t *service)
     if (nvs_result != ESP_OK) {
         return "nvs_init";
     }
+    if (nvs_flash_init_partition("companion_nvs") != ESP_OK) {
+        return "companion_nvs_init";
+    }
     const esp_err_t netif_result = esp_netif_init();
     if (netif_result != ESP_OK && netif_result != ESP_ERR_INVALID_STATE) {
         return "netif_init";
@@ -1053,6 +1242,23 @@ const char *initialize_wifi(deck_setup_service_t *service)
     if (service->settings == nullptr) {
         return "settings_config";
     }
+    service->companion_storage = deck_companion_profiles_nvs_storage_open();
+    deck_companion_storage_adapter_t companion_storage_adapter{};
+    if (service->companion_storage == nullptr ||
+        !deck_companion_profiles_nvs_storage_adapter(
+            service->companion_storage,
+            &companion_storage_adapter
+        )) {
+        return "companion_store";
+    }
+    const deck_companion_profiles_options_t companion_options = {
+        companion_storage_adapter,
+        {redeem_companion, service},
+    };
+    service->companion_profiles = deck_companion_profiles_create(&companion_options);
+    if (service->companion_profiles == nullptr) {
+        return "companion_profiles";
+    }
     return nullptr;
 }
 
@@ -1099,11 +1305,13 @@ void service_task(void *task_context)
     auto *service = static_cast<deck_setup_service_t *>(task_context);
     const char *initialization_error = initialize_wifi(service);
     if (initialization_error != nullptr) {
+        xEventGroupSetBits(service->wifi_events, kProfilesFailedBit);
         service->accepting_commands.store(false, std::memory_order_release);
         fail_session(service, initialization_error);
         vTaskDelete(nullptr);
         return;
     }
+    xEventGroupSetBits(service->wifi_events, kProfilesReadyBit);
     deck_wifi_config_snapshot_t initial_wifi{};
     if (!deck_wifi_config_snapshot(service->wifi_config, &initial_wifi)) {
         service->accepting_commands.store(false, std::memory_order_release);
@@ -1123,7 +1331,18 @@ void service_task(void *task_context)
     bool boot_enter_pending = false;
     while (true) {
         Command command{};
-        if (xQueueReceive(service->commands, &command, kServicePollTicks) == pdTRUE) {
+        bool received = deck_setup_command_queue_try_receive(
+            service->commands,
+            &command
+        );
+        if (!received) {
+            (void)ulTaskNotifyTake(pdTRUE, kServicePollTicks);
+            received = deck_setup_command_queue_try_receive(
+                service->commands,
+                &command
+            );
+        }
+        if (received) {
             switch (command.type) {
                 case CommandType::enter_from_boot:
                     boot_enter_pending = true;
@@ -1268,7 +1487,88 @@ void service_task(void *task_context)
                     );
                     break;
                 }
+                case CommandType::pair_companion: {
+                    deck_companion_pair_result_t result =
+                        DECK_COMPANION_PAIR_STORAGE_FAILURE;
+                    bool setup_active = false;
+                    if (xSemaphoreTake(service->state_mutex, portMAX_DELAY) == pdTRUE) {
+                        deck_setup_snapshot_t setup{};
+                        setup_active = snapshot_locked(service, &setup) && setup.active;
+                        xSemaphoreGive(service->state_mutex);
+                    }
+                    if (setup_active) {
+                        result = deck_companion_profiles_pair(
+                            service->companion_profiles,
+                            &command.companion_pair
+                        );
+                    }
+                    secure_clear(
+                        reinterpret_cast<char *>(&command.companion_pair),
+                        sizeof(command.companion_pair)
+                    );
+                    if (result == DECK_COMPANION_PAIR_PAIRED) {
+                        if (xSemaphoreTake(service->state_mutex, portMAX_DELAY) == pdTRUE) {
+                            (void)deck_setup_mode_stop(service->mode);
+                            xSemaphoreGive(service->state_mutex);
+                        }
+                        const char *stop_error = stop_network(service);
+                        notify(
+                            service,
+                            stop_error == nullptr ? DECK_SETUP_SERVICE_INACTIVE
+                                                  : DECK_SETUP_SERVICE_ERROR,
+                            stop_error
+                        );
+                        break;
+                    }
+                    const bool storage_failure =
+                        result == DECK_COMPANION_PAIR_STORAGE_FAILURE;
+                    notify(
+                        service,
+                        storage_failure ? DECK_SETUP_SERVICE_ERROR
+                                        : setup_active ? DECK_SETUP_SERVICE_ACTIVE
+                                                       : DECK_SETUP_SERVICE_INACTIVE,
+                        storage_failure ? "companion_commit" : nullptr
+                    );
+                    break;
+                }
+                case CommandType::select_companion:
+                case CommandType::revoke_companion: {
+                    deck_companion_profile_update_result_t result =
+                        DECK_COMPANION_PROFILE_STORAGE_FAILURE;
+                    bool setup_active = false;
+                    if (xSemaphoreTake(service->state_mutex, portMAX_DELAY) == pdTRUE) {
+                        deck_setup_snapshot_t setup{};
+                        setup_active = snapshot_locked(service, &setup) && setup.active;
+                        if (setup_active) {
+                            result = command.type == CommandType::select_companion
+                                         ? deck_companion_profiles_select_active(
+                                               service->companion_profiles,
+                                               command.companion_profile_id
+                                           )
+                                         : deck_companion_profiles_revoke(
+                                               service->companion_profiles,
+                                               command.companion_profile_id
+                                           );
+                        }
+                        xSemaphoreGive(service->state_mutex);
+                    }
+                    secure_clear(
+                        command.companion_profile_id,
+                        sizeof(command.companion_profile_id)
+                    );
+                    const bool storage_failure =
+                        result == DECK_COMPANION_PROFILE_STORAGE_FAILURE;
+                    notify(
+                        service,
+                        storage_failure ? DECK_SETUP_SERVICE_ERROR
+                                        : setup_active ? DECK_SETUP_SERVICE_ACTIVE
+                                                       : DECK_SETUP_SERVICE_INACTIVE,
+                        storage_failure ? "companion_commit" : nullptr
+                    );
+                    break;
+                }
             }
+            deck_setup_command_clear(&command);
         }
         if (service->command_overflow.exchange(false, std::memory_order_acq_rel)) {
             notify(service, DECK_SETUP_SERVICE_ERROR, "command_queue");
@@ -1320,12 +1620,14 @@ void release_unstarted(deck_setup_service_t *service)
     deck_wifi_nvs_storage_close(service->wifi_storage);
     deck_device_settings_destroy(service->settings);
     deck_device_settings_nvs_storage_close(service->settings_storage);
+    deck_companion_profiles_destroy(service->companion_profiles);
+    deck_companion_profiles_nvs_storage_close(service->companion_storage);
     deck_setup_confirmation_destroy(service->clear_confirmation);
     if (service->publisher_task != nullptr) {
         vTaskDelete(service->publisher_task);
     }
     if (service->commands != nullptr) {
-        vQueueDelete(service->commands);
+        deck_setup_command_queue_destroy(service->commands);
     }
     if (service->notifications != nullptr) {
         vQueueDelete(service->notifications);
@@ -1362,7 +1664,7 @@ deck_setup_service_t *deck_setup_service_start(
     service->network_mutex = xSemaphoreCreateMutex();
     // A BOOT request means "enter now" rather than "enter N times". Coalesce
     // repeated notifications while the service task is busy with a scan or restart.
-    service->commands = xQueueCreate(8, sizeof(Command));
+    service->commands = deck_setup_command_queue_create();
     // State publication is latest-only: a slow external callback must not leave
     // stale credentials or ACTIVE state queued ahead of the terminal state.
     service->notifications = xQueueCreate(1, sizeof(ServiceNotification));
@@ -1406,7 +1708,7 @@ deck_setup_service_t *deck_setup_service_start(
             kServiceTaskStackBytes,
             service,
             kServiceTaskPriority,
-            nullptr,
+            &service->service_task,
             0
         ) != pdPASS) {
         release_unstarted(service);
@@ -1421,7 +1723,8 @@ bool deck_setup_service_enter_from_boot(deck_setup_service_t *service)
         !service->accepting_commands.load(std::memory_order_acquire)) {
         return false;
     }
-    const Command command = {CommandType::enter_from_boot, {}, 0};
+    Command command{};
+    command.type = CommandType::enter_from_boot;
     return enqueue_command(service, command);
 }
 
@@ -1443,8 +1746,12 @@ bool deck_setup_service_submit_wifi(
     if (!setup_active) {
         return false;
     }
-    const Command command = {CommandType::submit_wifi, *credentials, 0};
-    return enqueue_command(service, command);
+    Command command{};
+    command.type = CommandType::submit_wifi;
+    command.credentials = *credentials;
+    const bool queued = enqueue_command(service, command);
+    deck_wifi_credentials_clear(&command.credentials);
+    return queued;
 }
 
 bool deck_setup_service_submit_temperature_offset(
@@ -1469,12 +1776,119 @@ bool deck_setup_service_submit_temperature_offset(
     if (!setup_active) {
         return false;
     }
-    const Command command = {
-        CommandType::submit_temperature_offset,
-        {},
-        temperature_offset_tenths_c,
-    };
+    Command command{};
+    command.type = CommandType::submit_temperature_offset;
+    command.temperature_offset_tenths_c = temperature_offset_tenths_c;
     return enqueue_command(service, command);
+}
+
+bool deck_setup_service_pair_companion(
+    deck_setup_service_t *service,
+    const deck_companion_pair_request_t *request
+)
+{
+    if (service == nullptr || request == nullptr ||
+        strnlen(request->hub_address, sizeof(request->hub_address)) >=
+            sizeof(request->hub_address) ||
+        strnlen(request->code, sizeof(request->code)) >= sizeof(request->code) ||
+        !service->accepting_commands.load(std::memory_order_acquire)) {
+        return false;
+    }
+    deck_setup_snapshot_t setup{};
+    if (xSemaphoreTake(service->state_mutex, portMAX_DELAY) != pdTRUE) {
+        return false;
+    }
+    const bool setup_active = snapshot_locked(service, &setup) && setup.active;
+    xSemaphoreGive(service->state_mutex);
+    if (!setup_active) {
+        return false;
+    }
+    Command command{};
+    command.type = CommandType::pair_companion;
+    command.companion_pair = *request;
+    const bool queued = enqueue_command(service, command);
+    secure_clear(
+        reinterpret_cast<char *>(&command.companion_pair),
+        sizeof(command.companion_pair)
+    );
+    return queued;
+}
+
+namespace {
+
+bool queue_companion_profile_command(
+    deck_setup_service_t *service,
+    const char *profile_id,
+    deck_setup_command_type_t type
+)
+{
+    if (service == nullptr || profile_id == nullptr ||
+        strnlen(profile_id, DECK_COMPANION_PROFILE_ID_CAPACITY) != 71 ||
+        !service->accepting_commands.load(std::memory_order_acquire)) {
+        return false;
+    }
+    deck_setup_snapshot_t setup{};
+    if (xSemaphoreTake(service->state_mutex, portMAX_DELAY) != pdTRUE) {
+        return false;
+    }
+    const bool setup_active = snapshot_locked(service, &setup) && setup.active;
+    xSemaphoreGive(service->state_mutex);
+    if (!setup_active) {
+        return false;
+    }
+    Command command{};
+    command.type = type;
+    std::memcpy(command.companion_profile_id, profile_id, 72);
+    const bool queued = enqueue_command(service, command);
+    secure_clear(
+        command.companion_profile_id,
+        sizeof(command.companion_profile_id)
+    );
+    return queued;
+}
+
+}  // namespace
+
+bool deck_setup_service_select_companion(
+    deck_setup_service_t *service,
+    const char *profile_id
+)
+{
+    return queue_companion_profile_command(
+        service,
+        profile_id,
+        CommandType::select_companion
+    );
+}
+
+bool deck_setup_service_revoke_companion(
+    deck_setup_service_t *service,
+    const char *profile_id
+)
+{
+    return queue_companion_profile_command(
+        service,
+        profile_id,
+        CommandType::revoke_companion
+    );
+}
+
+deck_companion_profiles_t *deck_setup_service_wait_companion_profiles(
+    deck_setup_service_t *service,
+    uint32_t timeout_ms
+)
+{
+    if (service == nullptr || timeout_ms == 0) {
+        return nullptr;
+    }
+    const EventBits_t bits = xEventGroupWaitBits(
+        service->wifi_events,
+        kProfilesReadyBit | kProfilesFailedBit,
+        pdFALSE,
+        pdFALSE,
+        pdMS_TO_TICKS(timeout_ms)
+    );
+    return (bits & kProfilesReadyBit) != 0 ? service->companion_profiles : nullptr;
 }
 
 bool deck_setup_service_request_wifi_clear(
@@ -1535,7 +1949,8 @@ deck_setup_wifi_clear_confirm_result_t deck_setup_service_confirm_wifi_clear(
         default:
             break;
     }
-    const Command command = {CommandType::clear_wifi, {}, 0};
+    Command command{};
+    command.type = CommandType::clear_wifi;
     return enqueue_command(service, command) ? DECK_SETUP_WIFI_CLEAR_QUEUED
                                              : DECK_SETUP_WIFI_CLEAR_BUSY;
 }

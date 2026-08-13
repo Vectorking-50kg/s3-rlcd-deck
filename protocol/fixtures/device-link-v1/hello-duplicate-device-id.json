@@ -1,0 +1,1 @@
+{"type":"device.hello","protocol_version":1,"device_id":"deck-001122334455","device_id":"deck-aabbccddeeff","firmware_version":"0.2.0-dev","board":"esp32-s3-rlcd-4.2","capabilities":["display"],"serial_state":"disarmed"}

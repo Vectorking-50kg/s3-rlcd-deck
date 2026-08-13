@@ -75,6 +75,7 @@ func (application *Runtime) deviceHubRoutes() http.Handler {
 	pairingLimiter := newIPRateLimiter(limits.PairingAttempts, limits.PairingRateWindow)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/device/health", application.handleDeviceHealth)
+	mux.Handle("GET /api/v1/device/link", application.deviceLink)
 	mux.HandleFunc("POST /api/v1/pairing/redeem", func(response http.ResponseWriter, request *http.Request) {
 		if !pairingLimiter.allow(request.RemoteAddr, time.Now()) {
 			response.Header().Set("Retry-After", strconv.Itoa(max(1, int(limits.PairingRateWindow.Seconds()))))

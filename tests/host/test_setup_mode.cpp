@@ -169,12 +169,12 @@ void explicit_stop_clears_ephemeral_credentials()
     deck_setup_mode_destroy(setup);
 }
 
-void http_contract_is_read_only_and_labels_pairing_as_m1()
+void http_contract_exposes_profile_pairing_without_secrets()
 {
     size_t route_count = 0;
     const deck_setup_http_route_spec_t *routes = deck_setup_http_routes(&route_count);
     assert(routes != nullptr);
-    assert(route_count == 7);
+    assert(route_count == 10);
     assert(routes[0].route == DECK_SETUP_HTTP_PAGE);
     assert(routes[0].method == DECK_SETUP_HTTP_GET);
     assert(std::string(routes[0].path) == "/");
@@ -193,6 +193,12 @@ void http_contract_is_read_only_and_labels_pairing_as_m1()
     assert(std::string(routes[5].path) == "/api/wifi/clear/request");
     assert(routes[6].route == DECK_SETUP_HTTP_WIFI_CLEAR_CONFIRM);
     assert(std::string(routes[6].path) == "/api/wifi/clear/confirm");
+    assert(routes[7].route == DECK_SETUP_HTTP_COMPANION_PAIR);
+    assert(std::string(routes[7].path) == "/api/companions/pair");
+    assert(routes[8].route == DECK_SETUP_HTTP_COMPANION_SELECT);
+    assert(std::string(routes[8].path) == "/api/companions/select");
+    assert(routes[9].route == DECK_SETUP_HTTP_COMPANION_REVOKE);
+    assert(std::string(routes[9].path) == "/api/companions/revoke");
 
     assert(deck_setup_http_route("GET", "/") == DECK_SETUP_HTTP_PAGE);
     assert(deck_setup_http_route("GET", "/api/status") == DECK_SETUP_HTTP_STATUS);
@@ -205,7 +211,12 @@ void http_contract_is_read_only_and_labels_pairing_as_m1()
     assert(deck_setup_http_route("POST", "/api/wifi/clear/confirm") ==
            DECK_SETUP_HTTP_WIFI_CLEAR_CONFIRM);
     assert(deck_setup_http_route("GET", "/api/wifi") == DECK_SETUP_HTTP_METHOD_NOT_ALLOWED);
-    assert(deck_setup_http_route("POST", "/api/pair") == DECK_SETUP_HTTP_NOT_FOUND);
+    assert(deck_setup_http_route("POST", "/api/companions/pair") ==
+           DECK_SETUP_HTTP_COMPANION_PAIR);
+    assert(deck_setup_http_route("POST", "/api/companions/select") ==
+           DECK_SETUP_HTTP_COMPANION_SELECT);
+    assert(deck_setup_http_route("POST", "/api/companions/revoke") ==
+           DECK_SETUP_HTTP_COMPANION_REVOKE);
     assert(deck_setup_http_route("GET", "/api/scan") == DECK_SETUP_HTTP_METHOD_NOT_ALLOWED);
 
     DeterministicRandom random{0};
@@ -220,7 +231,13 @@ void http_contract_is_read_only_and_labels_pairing_as_m1()
     const std::string html(page);
     assert(html.find("Setup / Recovery") != std::string::npos);
     assert(html.find("Scan networks") != std::string::npos);
-    assert(html.find("Companion pairing is planned for M1") != std::string::npos);
+    assert(html.find("Companion pairing") != std::string::npos);
+    assert(html.find("name=hub_address") != std::string::npos);
+    assert(html.find("name=code") != std::string::npos);
+    assert(html.find("/api/companions/pair") != std::string::npos);
+    assert(html.find("/api/companions/select") != std::string::npos);
+    assert(html.find("/api/companions/revoke") != std::string::npos);
+    assert(html.find("innerHTML") == std::string::npos);
     assert(html.find("name=password") != std::string::npos);
     assert(html.find("name=offset") != std::string::npos);
     assert(html.find("Clear Wi-Fi") != std::string::npos);
@@ -252,11 +269,25 @@ void http_contract_is_read_only_and_labels_pairing_as_m1()
         3,
         -35,
     };
-    char status[1'024];
+    deck_companion_profiles_snapshot_t companions{};
+    companions.record_status = DECK_COMPANION_RECORD_VALID;
+    companions.has_active = true;
+    companions.generation = 4;
+    companions.count = 1;
+    std::strcpy(companions.active_profile_id, "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    companions.profiles[0].profile_version = 1;
+    std::strcpy(companions.profiles[0].profile_id, companions.active_profile_id);
+    std::strcpy(companions.profiles[0].display_name, "Desk Companion");
+    std::strcpy(companions.profiles[0].hub_address, "desk.local:7780");
+    std::strcpy(companions.profiles[0].certificate_fingerprint, companions.active_profile_id);
+    companions.profiles[0].priority = 3;
+    companions.profiles[0].last_success_unix_ms = 1234;
+    char status[2'048];
     assert(deck_setup_http_render_status(
         &snapshot,
         &wifi,
         &settings,
+        &companions,
         networks.data(),
         networks.size(),
         status,
@@ -265,7 +296,11 @@ void http_contract_is_read_only_and_labels_pairing_as_m1()
     const std::string json(status);
     assert(json.find("\"active\":true") != std::string::npos);
     assert(json.find("\"address\":\"192.168.4.1\"") != std::string::npos);
-    assert(json.find("\"pairing\":\"m1_not_available\"") != std::string::npos);
+    assert(json.find("\"companions\":{") != std::string::npos);
+    assert(json.find("\"hub_address\":\"desk.local:7780\"") != std::string::npos);
+    assert(json.find("Desk Companion") != std::string::npos);
+    assert(json.find("\"priority\":3") != std::string::npos);
+    assert(json.find("\"last_success_unix_ms\":1234") != std::string::npos);
     assert(json.find("Office") != std::string::npos);
     assert(json.find("Guest\\\\\\\"WiFi") != std::string::npos);
     assert(json.find("\"state\":\"validating\"") != std::string::npos);
@@ -276,8 +311,45 @@ void http_contract_is_read_only_and_labels_pairing_as_m1()
     assert(json.find("\"temperature_offset_tenths_c\":-35") != std::string::npos);
     assert(json.find(snapshot.password) == std::string::npos);
     assert(json.find("correct-horse") == std::string::npos);
+    assert(json.find("token") == std::string::npos);
 
     deck_setup_mode_destroy(setup);
+}
+
+void companion_requests_are_strict_and_do_not_accept_secret_shaped_extras()
+{
+    deck_companion_pair_request_t pair{};
+    const char valid_pair[] = "hub_address=desk.local%3A7780&code=012345";
+    assert(deck_setup_http_parse_companion_pair_request(
+        valid_pair, sizeof(valid_pair) - 1, &pair
+    ) == DECK_SETUP_COMPANION_REQUEST_OK);
+    assert(std::string(pair.hub_address) == "desk.local:7780");
+    assert(std::string(pair.code) == "012345");
+
+    const char path[] = "hub_address=desk.local%3A7780%2Fapi&code=012345";
+    assert(deck_setup_http_parse_companion_pair_request(path, sizeof(path) - 1, &pair) ==
+           DECK_SETUP_COMPANION_REQUEST_INVALID_ADDRESS);
+    const char duplicate[] =
+        "hub_address=desk.local%3A7780&hub_address=other.local%3A7780&code=012345";
+    assert(deck_setup_http_parse_companion_pair_request(
+               duplicate, sizeof(duplicate) - 1, &pair
+           ) == DECK_SETUP_COMPANION_REQUEST_MALFORMED);
+    const char secret_extra[] =
+        "hub_address=desk.local%3A7780&code=012345&token=should-not-be-accepted";
+    assert(deck_setup_http_parse_companion_pair_request(
+               secret_extra, sizeof(secret_extra) - 1, &pair
+           ) == DECK_SETUP_COMPANION_REQUEST_MALFORMED);
+
+    char profile_id[DECK_COMPANION_PROFILE_ID_CAPACITY];
+    const char valid_id[] =
+        "profile_id=sha256%3Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    assert(deck_setup_http_parse_companion_profile_request(
+        valid_id, sizeof(valid_id) - 1, profile_id, sizeof(profile_id)
+    ));
+    assert(std::string(profile_id).rfind("sha256:", 0) == 0);
+    assert(!deck_setup_http_parse_companion_profile_request(
+        "profile_id=x", 12, profile_id, sizeof(profile_id)
+    ));
 }
 
 void temperature_and_confirmation_parsers_are_strict()
@@ -407,7 +479,8 @@ int main()
     failed_credential_generation_preserves_the_active_session();
     only_explicit_activity_refreshes_the_timeout();
     explicit_stop_clears_ephemeral_credentials();
-    http_contract_is_read_only_and_labels_pairing_as_m1();
+    http_contract_exposes_profile_pairing_without_secrets();
+    companion_requests_are_strict_and_do_not_accept_secret_shaped_extras();
     wifi_submission_parser_rejects_malformed_or_invalid_credentials();
     temperature_and_confirmation_parsers_are_strict();
     production_scan_conversion_bounds_and_terminates_ssids();
