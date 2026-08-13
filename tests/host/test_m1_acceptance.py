@@ -439,7 +439,6 @@ def test_dev_setup_window_outlives_slow_association() -> None:
 
 def test_setup_wifi_recovery_requires_the_target_host_to_be_reachable() -> None:
     operations: list[tuple[str, object]] = []
-    reachable = iter([False, False, True])
 
     def connect(ssid: str, password: str | None, timeout: float) -> None:
         operations.append(("connect", (ssid, password, timeout)))
@@ -450,13 +449,15 @@ def test_setup_wifi_recovery_requires_the_target_host_to_be_reachable() -> None:
     with mock.patch.object(m1, "connect_wifi", side_effect=connect), mock.patch.object(
         m1, "set_wifi_power", side_effect=power
     ), mock.patch.object(
-        m1, "host_is_reachable", side_effect=lambda _host, _timeout: next(reachable)
+        m1, "wait_for_wifi_host", side_effect=[False, True]
     ), mock.patch.object(m1.time, "sleep"), mock.patch.object(
         m1.time, "monotonic", side_effect=lambda: 1.0
     ):
         m1.connect_wifi_for_host("Setup", "password", "192.168.4.1", 90)
 
-    assert operations[0][0] == "connect"
+    assert operations[0] == ("power", (False, mock.ANY))
+    assert operations[1] == ("power", (True, mock.ANY))
+    assert operations[2][0] == "connect"
     assert any(name == "power" and value[0] is False for name, value in operations)
     assert any(name == "power" and value[0] is True for name, value in operations)
     assert sum(name == "connect" for name, _ in operations) == 2
@@ -467,7 +468,7 @@ def test_setup_wifi_recovery_survives_the_initial_association_timeout() -> None:
 
     def connect(_ssid: str, _password: str | None, _timeout: float) -> None:
         operations.append("connect")
-        if len(operations) == 1:
+        if operations.count("connect") == 1:
             raise m1.AcceptanceFailure("Mac Wi-Fi association timed out")
 
     with mock.patch.object(m1, "connect_wifi", side_effect=connect), mock.patch.object(
@@ -477,13 +478,44 @@ def test_setup_wifi_recovery_survives_the_initial_association_timeout() -> None:
             "power-on" if enabled else "power-off"
         ),
     ), mock.patch.object(
-        m1, "host_is_reachable", side_effect=lambda *_args: operations.count("connect") == 2
+        m1, "wait_for_wifi_host", return_value=True
     ), mock.patch.object(m1.time, "sleep"), mock.patch.object(
         m1.time, "monotonic", side_effect=lambda: 1.0
     ):
         m1.connect_wifi_for_host("Setup", "password", "192.168.4.1", 60)
 
-    assert operations == ["connect", "power-off", "power-on", "connect"]
+    assert operations == [
+        "power-off",
+        "power-on",
+        "connect",
+        "power-off",
+        "power-on",
+        "connect",
+    ]
+
+
+def test_successful_association_waits_for_dhcp_before_resetting_again() -> None:
+    operations: list[str] = []
+    reachable = iter([False, False, True])
+
+    with mock.patch.object(
+        m1,
+        "connect_wifi",
+        side_effect=lambda *_args: operations.append("connect"),
+    ), mock.patch.object(
+        m1,
+        "set_wifi_power",
+        side_effect=lambda enabled, _timeout: operations.append(
+            "power-on" if enabled else "power-off"
+        ),
+    ), mock.patch.object(
+        m1, "host_is_reachable", side_effect=lambda *_args: next(reachable)
+    ), mock.patch.object(m1.time, "sleep"), mock.patch.object(
+        m1.time, "monotonic", side_effect=lambda: 1.0
+    ):
+        m1.connect_wifi_for_host("Setup", "password", "192.168.4.1", 60)
+
+    assert operations == ["power-off", "power-on", "connect"]
 
 
 def test_wifi_power_is_restored_when_reassociation_fails() -> None:
@@ -537,9 +569,15 @@ def test_target_ssid_is_selected_before_reachability_can_pass() -> None:
         m1,
         "host_is_reachable",
         side_effect=lambda *_args: operations.append("ping") or True,
+    ), mock.patch.object(
+        m1,
+        "set_wifi_power",
+        side_effect=lambda enabled, _timeout: operations.append(
+            "power-on" if enabled else "power-off"
+        ),
     ), mock.patch.object(m1.time, "monotonic", side_effect=lambda: 1.0):
         m1.connect_wifi_for_host("Setup", "password", "192.168.4.1", 30)
-    assert operations == ["connect", "ping"]
+    assert operations == ["power-off", "power-on", "connect", "ping"]
 
 
 def test_wifi_reachability_requires_an_en0_address_on_the_target_subnet() -> None:
@@ -745,6 +783,7 @@ if __name__ == "__main__":
     test_dev_setup_window_outlives_slow_association()
     test_setup_wifi_recovery_requires_the_target_host_to_be_reachable()
     test_setup_wifi_recovery_survives_the_initial_association_timeout()
+    test_successful_association_waits_for_dhcp_before_resetting_again()
     test_wifi_power_is_restored_when_reassociation_fails()
     test_original_lan_recovery_uses_the_reachability_helper()
     test_wifi_operations_share_one_deadline_budget()
