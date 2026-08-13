@@ -895,10 +895,24 @@ def connect_wifi_for_host(
     # Select the requested SSID before using reachability as proof. A stale
     # route or VPN may make the same private address reachable via another
     # interface and must never satisfy this transaction.
-    connect_wifi(ssid, password, remaining_timeout(deadline, 60))
+    # Keep the first CoreWLAN attempt short enough that a hung association
+    # cannot consume the recovery budget. The one permitted interface reset
+    # and second association must still fit inside the caller's same deadline.
+    recovery_reserve = min(30.0, timeout / 2)
+    association_failed = False
+    try:
+        connect_wifi(
+            ssid,
+            password,
+            remaining_timeout(deadline, 20, reserve=recovery_reserve),
+        )
+    except AcceptanceFailure:
+        association_failed = True
     recovery_attempted = False
     while time.monotonic() < deadline:
-        if host_is_reachable(host, remaining_timeout(deadline, 2)):
+        if not association_failed and host_is_reachable(
+            host, remaining_timeout(deadline, 2)
+        ):
             return
         if not recovery_attempted:
             # CoreWLAN occasionally reports success while retaining the prior
@@ -917,6 +931,7 @@ def connect_wifi_for_host(
                     set_wifi_power(True, remaining_timeout(deadline, 10))
             time.sleep(min(3, remaining_timeout(deadline, 3)))
             connect_wifi(ssid, password, remaining_timeout(deadline, 60))
+            association_failed = False
             recovery_attempted = True
         time.sleep(min(0.5, remaining_timeout(deadline, 0.5)))
     raise AcceptanceFailure(f"network host {host} did not become reachable")

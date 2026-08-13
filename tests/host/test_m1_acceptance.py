@@ -462,6 +462,30 @@ def test_setup_wifi_recovery_requires_the_target_host_to_be_reachable() -> None:
     assert sum(name == "connect" for name, _ in operations) == 2
 
 
+def test_setup_wifi_recovery_survives_the_initial_association_timeout() -> None:
+    operations: list[str] = []
+
+    def connect(_ssid: str, _password: str | None, _timeout: float) -> None:
+        operations.append("connect")
+        if len(operations) == 1:
+            raise m1.AcceptanceFailure("Mac Wi-Fi association timed out")
+
+    with mock.patch.object(m1, "connect_wifi", side_effect=connect), mock.patch.object(
+        m1,
+        "set_wifi_power",
+        side_effect=lambda enabled, _timeout: operations.append(
+            "power-on" if enabled else "power-off"
+        ),
+    ), mock.patch.object(
+        m1, "host_is_reachable", side_effect=lambda *_args: operations.count("connect") == 2
+    ), mock.patch.object(m1.time, "sleep"), mock.patch.object(
+        m1.time, "monotonic", side_effect=lambda: 1.0
+    ):
+        m1.connect_wifi_for_host("Setup", "password", "192.168.4.1", 60)
+
+    assert operations == ["connect", "power-off", "power-on", "connect"]
+
+
 def test_wifi_power_is_restored_when_reassociation_fails() -> None:
     operations: list[bool] = []
 
@@ -720,6 +744,7 @@ if __name__ == "__main__":
     test_wifi_switch_timeout_never_exposes_the_password()
     test_dev_setup_window_outlives_slow_association()
     test_setup_wifi_recovery_requires_the_target_host_to_be_reachable()
+    test_setup_wifi_recovery_survives_the_initial_association_timeout()
     test_wifi_power_is_restored_when_reassociation_fails()
     test_original_lan_recovery_uses_the_reachability_helper()
     test_wifi_operations_share_one_deadline_budget()
