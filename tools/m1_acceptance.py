@@ -13,6 +13,7 @@ import pathlib
 import platform
 import re
 import signal
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -271,6 +272,33 @@ def http_form(base: str, path: str, fields: dict[str, str]) -> int:
         return error.code
 
 
+def device_hub_json(
+    method: str,
+    path: str,
+    document: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    data = None if document is None else json.dumps(document).encode()
+    request = urllib.request.Request(
+        "https://127.0.0.1:7780" + path,
+        data=data,
+        method=method,
+        headers=headers or {},
+    )
+    if data is not None:
+        request.add_header("Content-Type", "application/json")
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    try:
+        with urllib.request.urlopen(request, timeout=3, context=context) as response:
+            body = response.read()
+            return response.status, json.loads(body) if body else {}
+    except urllib.error.HTTPError as error:
+        error.read()
+        return error.code, {}
+
+
 def connect_wifi(ssid: str, password: str | None = None) -> None:
     command = ["networksetup", "-setairportnetwork", "en0", ssid]
     if password is not None:
@@ -478,15 +506,57 @@ def main() -> int:
         serial_evidence.event(lambda event: event.get("type") == "companion_link_state" and event.get("state") != "online" and int(event.get("error_count", 0)) > deck_error_count, "revoked Token rejection", 45)
         checks["revoked_device_trust_rejected"] = True
 
-        # Cross-port and cross-token authority rejection is performed against live listeners.
-        status, _ = management.request("GET", "/api/v1/devices")
+        # Cross-port and cross-token rejection is performed against live listeners.
+        status, _ = device_hub_json("GET", "/api/v1/status")
+        if status != 404:
+            raise AcceptanceFailure("Device Hub exposed a management route")
+        status, _ = device_hub_json(
+            "GET",
+            "/api/v1/device/health",
+            headers={
+                "Authorization": "Bearer " + token,
+                "X-Device-ID": "deck-authority1",
+                "X-Device-Identity": "YXV0aG9yaXR5LXNlcGFyYXRpb24taWRlbnRpdHk",
+                "X-Protocol-Version": "1",
+            },
+        )
+        if status != 401:
+            raise AcceptanceFailure("management credential authorized Device Hub")
+        status, temporary_code = management.request("POST", "/api/v1/pairing/codes")
         if status != 200:
-            raise AcceptanceFailure("management device list unavailable")
-        try:
-            urllib.request.urlopen("https://127.0.0.1:7780/api/v1/status", timeout=2)
-            raise AcceptanceFailure("Device Hub served management status")
-        except (urllib.error.HTTPError, urllib.error.URLError):
-            checks["management_device_authority_separated"] = True
+            raise AcceptanceFailure("temporary authority code unavailable")
+        status, temporary_credential = device_hub_json(
+            "POST",
+            "/api/v1/pairing/redeem",
+            {
+                "code": temporary_code.get("code"),
+                "device_id": "deck-authority1",
+                "device_identity": "YXV0aG9yaXR5LXNlcGFyYXRpb24taWRlbnRpdHk",
+                "protocol_version": 1,
+            },
+        )
+        if status != 200 or type(temporary_credential.get("token")) is not str:
+            raise AcceptanceFailure("temporary device credential unavailable")
+        temporary_token = temporary_credential["token"]
+        unauthorized_management = ManagementClient.__new__(ManagementClient)
+        unauthorized_management.address = "127.0.0.1:7777"
+        unauthorized_management.origin = "http://127.0.0.1:7777"
+        unauthorized_management.cookie_jar = http.cookiejar.CookieJar()
+        unauthorized_management.opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(unauthorized_management.cookie_jar)
+        )
+        login_status, _ = unauthorized_management.request(
+            "POST", "/api/v1/login", {"token": temporary_token}, authenticated=False
+        )
+        temporary_token = ""
+        temporary_credential = {}
+        temporary_code = {}
+        if login_status != 401:
+            raise AcceptanceFailure("device credential authorized management Web")
+        revoke_status, _ = management.request("DELETE", "/api/v1/devices/deck-authority1")
+        if revoke_status != 204:
+            raise AcceptanceFailure("temporary device trust cleanup failed")
+        checks["management_device_authority_separated"] = True
 
         checks["macos_native_shell_observed"] = True
         checks["windows_native_shell_observed"] = verified_windows_native_run(
