@@ -44,10 +44,25 @@ deck_add_host_test(
     test_m0_view_model
     SOURCES
         test_m0_view_model.cpp
+        ../../firmware/components/application_ui/deck_ai_page_view_model.cpp
         ../../firmware/components/application_ui/deck_m0_view_model.cpp
     INCLUDE_DIRS
+        ../../firmware/components/ai_snapshot/include
         ../../firmware/components/application_ui/include
         "${DECK_M0_GENERATED_DIR}"
+)
+deck_add_host_test(
+    test_ai_page_view_model
+    SOURCES
+        test_ai_page_view_model.cpp
+        ../../firmware/components/application_ui/deck_ai_page_view_model.cpp
+    INCLUDE_DIRS
+        ../../firmware/components/ai_snapshot/include
+        ../../firmware/components/application_ui/include
+)
+target_compile_definitions(
+    test_ai_page_view_model
+    PRIVATE DECK_REPOSITORY_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../.."
 )
 deck_add_host_test(
     test_button_input
@@ -208,6 +223,10 @@ deck_add_host_test(
 add_test(
     NAME hil_boot_smoke_replay
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_hil_boot_smoke.py
+)
+add_test(
+    NAME ai_page_font_layout_contract
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_ai_page_font_layout.py
 )
 add_test(
     NAME hil_wifi_transaction_contract

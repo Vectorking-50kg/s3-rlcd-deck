@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "deck_ai_page_view_model.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -85,10 +87,17 @@ typedef struct {
     uint32_t refresh_count;
     uint64_t uptime_seconds;
     uint32_t minimum_free_heap_bytes;
+    deck_ai_page_view_model_t ai_page;
 } deck_m0_view_model_t;
 
 bool deck_m0_view_model_equal(const deck_m0_view_model_t *left, const deck_m0_view_model_t *right);
 bool deck_m0_view_model_format(const deck_m0_view_model_t *model, char *buffer, size_t buffer_size);
+bool deck_m0_view_model_format_active_page(
+    const deck_m0_view_model_t *model,
+    char *buffer,
+    size_t buffer_size,
+    bool *ai_page_visible
+);
 const char *deck_m0_required_glyphs(void);
 
 #ifdef __cplusplus

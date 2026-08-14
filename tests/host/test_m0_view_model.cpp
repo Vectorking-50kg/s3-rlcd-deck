@@ -38,6 +38,7 @@ deck_m0_view_model_t sample_model()
         42,
         754,
         7'192'576,
+        {},
     };
 }
 
@@ -185,6 +186,34 @@ void renders_ephemeral_setup_credentials_on_the_deck()
     assert(page.find("HTTP http://192.168.4.1") != std::string::npos);
 }
 
+void valid_snapshot_activates_ai_page_but_setup_overrides_it()
+{
+    deck_m0_view_model_t model = sample_model();
+    model.ai_page.active = true;
+    model.ai_page.snapshot_state = DECK_AI_PAGE_SNAPSHOT_UNAVAILABLE;
+    bool ai_page_visible = false;
+    char text[1024];
+    assert(deck_m0_view_model_format_active_page(
+        &model, text, sizeof(text), &ai_page_visible
+    ));
+    assert(ai_page_visible);
+    assert(std::string(text).find("CODEX  UNAVAILABLE") != std::string::npos);
+
+    deck_m0_view_model_t hidden_diagnostic_change = model;
+    ++hidden_diagnostic_change.refresh_count;
+    assert(deck_m0_view_model_equal(&model, &hidden_diagnostic_change));
+
+    model.setup_state = DECK_SETUP_ACTIVE;
+    std::strcpy(model.setup_ssid, "S3-RLCD-A1B2");
+    std::strcpy(model.setup_password, "ABCD-EFGH-JKLM");
+    std::strcpy(model.setup_address, "192.168.4.1");
+    assert(deck_m0_view_model_format_active_page(
+        &model, text, sizeof(text), &ai_page_visible
+    ));
+    assert(!ai_page_visible);
+    assert(std::string(text).find("Setup ACTIVE") != std::string::npos);
+}
+
 }  // namespace
 
 int main()
@@ -197,5 +226,6 @@ int main()
     treats_unknown_data_sources_as_unavailable();
     renders_unavailable_button_inputs_explicitly();
     renders_ephemeral_setup_credentials_on_the_deck();
+    valid_snapshot_activates_ai_page_but_setup_overrides_it();
     return 0;
 }

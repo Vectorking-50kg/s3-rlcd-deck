@@ -144,6 +144,7 @@ struct deck_companion_link {
     uint64_t server_utc_ms = 0;
     uint64_t server_monotonic_ms = 0;
     bool has_server_monotonic = false;
+    deck_companion_trusted_clock_t trusted_clock{};
     std::atomic<bool> stop_requested{false};
     std::atomic<bool> queue_overflow{false};
     mutable std::mutex mutex;
@@ -525,11 +526,16 @@ bool accept_data(deck_companion_link_t *link, const TransportEvent &event)
         now,
         kHeartbeatIntervalMs
     );
-    link->server_utc_ms = heartbeat.utc_unix_ms;
-    link->server_monotonic_ms = heartbeat.monotonic_ms;
-    link->has_server_monotonic = true;
     {
         const std::lock_guard<std::mutex> lock(link->mutex);
+        link->server_utc_ms = heartbeat.utc_unix_ms;
+        link->server_monotonic_ms = heartbeat.monotonic_ms;
+        link->has_server_monotonic = true;
+        (void)deck_companion_trusted_clock_accept(
+            &link->trusted_clock,
+            heartbeat.utc_unix_ms,
+            now
+        );
         link->snapshot.state = DECK_COMPANION_LINK_ONLINE;
         link->snapshot.reconnect_attempts = 0;
         link->snapshot.last_heartbeat_monotonic_ms = now;
@@ -726,6 +732,17 @@ bool deck_companion_link_snapshot(
     }
     const std::lock_guard<std::mutex> lock(link->mutex);
     *snapshot = link->snapshot;
+    const uint64_t now = monotonic_ms();
+    if (!deck_companion_trusted_clock_current(
+            &link->trusted_clock,
+            now,
+            &snapshot->trusted_utc_ms
+        )) {
+        snapshot->has_trusted_utc = false;
+        snapshot->trusted_utc_ms = 0;
+    } else {
+        snapshot->has_trusted_utc = true;
+    }
     return true;
 }
 

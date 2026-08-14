@@ -1,6 +1,7 @@
 #include "deck_ai_snapshot.h"
 
 #include <cassert>
+#include <cstring>
 #include <fstream>
 #include <iterator>
 #include <string>
@@ -165,11 +166,86 @@ void retained_snapshot_survives_an_unsupported_major()
     assert(after_metadata.generated_at_unix_ms == before_metadata.generated_at_unix_ms);
 }
 
+void projects_only_bounded_codex_display_fields()
+{
+    const std::string root = DECK_REPOSITORY_ROOT;
+    const std::string document = read_file(
+        root + "/protocol/fixtures/ai-snapshot-v1/valid-full.json"
+    );
+    deck_ai_snapshot_codex_projection_t projection{};
+    assert(deck_ai_snapshot_project_codex(document.data(), document.size(), &projection));
+    assert(projection.has_timezone);
+    assert(std::strcmp(projection.timezone, "Asia/Shanghai") == 0);
+    assert(projection.provider_present);
+    assert(std::strcmp(projection.provider_display_name, "Codex") == 0);
+    assert(projection.provider_status == DECK_AI_SNAPSHOT_PROVIDER_OK);
+    assert(projection.provider_confidence == DECK_AI_SNAPSHOT_CONFIDENCE_VERIFIED);
+    assert(projection.has_provider_updated_at);
+    assert(projection.window_count == 1U);
+    assert(std::strcmp(projection.windows[0].name, "primary") == 0);
+    assert(projection.windows[0].has_used_basis_points);
+    assert(projection.windows[0].used_basis_points == 3'800U);
+    assert(projection.windows[0].has_remaining_basis_points);
+    assert(projection.windows[0].remaining_basis_points == 6'200U);
+    assert(projection.windows[0].has_window_minutes);
+    assert(projection.windows[0].window_minutes == 300U);
+    assert(projection.windows[0].has_resets_at);
+    assert(projection.has_total_tokens && projection.total_tokens == 146'000U);
+    assert(projection.session_count == 1U);
+    assert(projection.featured_session.present);
+    assert(std::strcmp(projection.featured_session.display_name, "Deck development") == 0);
+    assert(projection.featured_session.state == DECK_AI_SNAPSHOT_SESSION_RUNNING);
+    assert(projection.featured_session.confidence == DECK_AI_SNAPSHOT_CONFIDENCE_VERIFIED);
+    assert(projection.featured_session.has_duration_seconds);
+    assert(projection.featured_session.duration_seconds == 890U);
+    assert(projection.featured_session.has_turn_tokens);
+    assert(projection.featured_session.turn_tokens == 18'420U);
+    assert(projection.featured_session.has_context_used_basis_points);
+    assert(projection.featured_session.context_used_basis_points == 4'100U);
+}
+
+void projection_decodes_unicode_and_prioritizes_actionable_sessions()
+{
+    const std::string root = DECK_REPOSITORY_ROOT;
+    const std::string unicode = read_file(
+        root + "/protocol/fixtures/ai-snapshot-v1/valid-unicode-boundary.json"
+    );
+    deck_ai_snapshot_codex_projection_t projection{};
+    assert(deck_ai_snapshot_project_codex(unicode.data(), unicode.size(), &projection));
+    assert(projection.provider_present);
+    assert(std::string(projection.provider_display_name).find("甲乙丙") == 0U);
+
+    const std::string enumerations = read_file(
+        root + "/protocol/fixtures/ai-snapshot-v1/valid-enumerations.json"
+    );
+    assert(deck_ai_snapshot_project_codex(
+        enumerations.data(), enumerations.size(), &projection
+    ));
+    assert(projection.session_count == 9U);
+    assert(projection.featured_session.present);
+    assert(projection.featured_session.state == DECK_AI_SNAPSHOT_SESSION_WAITING_APPROVAL);
+    assert(projection.featured_session.confidence == DECK_AI_SNAPSHOT_CONFIDENCE_VERIFIED);
+}
+
+void projection_fails_closed_without_mutating_output()
+{
+    deck_ai_snapshot_codex_projection_t projection{};
+    projection.provider_present = true;
+    std::strcpy(projection.provider_display_name, "sentinel");
+    const char malformed[] = "{}";
+    assert(!deck_ai_snapshot_project_codex(malformed, sizeof(malformed) - 1U, &projection));
+    assert(!projection.provider_present);
+    assert(projection.provider_display_name[0] == '\0');
+}
+
 }  // namespace
 
 int main()
 {
     shared_fixtures_match_the_firmware_contract();
     retained_snapshot_survives_an_unsupported_major();
+    projects_only_bounded_codex_display_fields();
+    projection_decodes_unicode_and_prioritizes_actionable_sessions();
+    projection_fails_closed_without_mutating_output();
     return 0;
 }

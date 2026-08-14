@@ -395,6 +395,127 @@ public:
         return true;
     }
 
+    bool decode_utf8(size_t index, char *output, size_t capacity) const
+    {
+        const Node &value = nodes_[index];
+        if (value.type != NodeType::string || output == nullptr || capacity == 0) {
+            return false;
+        }
+        size_t written = 0;
+        auto append_codepoint = [&](uint32_t codepoint) {
+            uint8_t encoded[4]{};
+            size_t count = 0;
+            if (codepoint <= 0x7fU) {
+                encoded[0] = static_cast<uint8_t>(codepoint);
+                count = 1;
+            } else if (codepoint <= 0x7ffU) {
+                encoded[0] = static_cast<uint8_t>(0xc0U | (codepoint >> 6U));
+                encoded[1] = static_cast<uint8_t>(0x80U | (codepoint & 0x3fU));
+                count = 2;
+            } else if (codepoint <= 0xffffU) {
+                encoded[0] = static_cast<uint8_t>(0xe0U | (codepoint >> 12U));
+                encoded[1] = static_cast<uint8_t>(0x80U | ((codepoint >> 6U) & 0x3fU));
+                encoded[2] = static_cast<uint8_t>(0x80U | (codepoint & 0x3fU));
+                count = 3;
+            } else if (codepoint <= 0x10ffffU) {
+                encoded[0] = static_cast<uint8_t>(0xf0U | (codepoint >> 18U));
+                encoded[1] = static_cast<uint8_t>(0x80U | ((codepoint >> 12U) & 0x3fU));
+                encoded[2] = static_cast<uint8_t>(0x80U | ((codepoint >> 6U) & 0x3fU));
+                encoded[3] = static_cast<uint8_t>(0x80U | (codepoint & 0x3fU));
+                count = 4;
+            } else {
+                return false;
+            }
+            if (written + count >= capacity) {
+                return false;
+            }
+            for (size_t offset = 0; offset < count; ++offset) {
+                output[written++] = static_cast<char>(encoded[offset]);
+            }
+            return true;
+        };
+        auto hex_quad = [&](size_t *cursor, uint32_t *codepoint) {
+            if (*cursor + 4U > value.end) {
+                return false;
+            }
+            uint32_t parsed = 0;
+            for (unsigned digit = 0; digit < 4U; ++digit) {
+                const char character = text_[(*cursor)++];
+                parsed <<= 4U;
+                if (character >= '0' && character <= '9') {
+                    parsed |= static_cast<uint32_t>(character - '0');
+                } else if (character >= 'a' && character <= 'f') {
+                    parsed |= static_cast<uint32_t>(character - 'a' + 10);
+                } else if (character >= 'A' && character <= 'F') {
+                    parsed |= static_cast<uint32_t>(character - 'A' + 10);
+                } else {
+                    return false;
+                }
+            }
+            *codepoint = parsed;
+            return true;
+        };
+        for (size_t cursor = value.start; cursor < value.end;) {
+            const uint8_t byte = static_cast<uint8_t>(text_[cursor++]);
+            if (byte != '\\') {
+                size_t count = 1;
+                if ((byte & 0xe0U) == 0xc0U) {
+                    count = 2;
+                } else if ((byte & 0xf0U) == 0xe0U) {
+                    count = 3;
+                } else if ((byte & 0xf8U) == 0xf0U) {
+                    count = 4;
+                } else if (byte >= 0x80U) {
+                    return false;
+                }
+                if (cursor - 1U + count > value.end || written + count >= capacity) {
+                    return false;
+                }
+                std::memcpy(output + written, text_ + cursor - 1U, count);
+                written += count;
+                cursor += count - 1U;
+                continue;
+            }
+            if (cursor == value.end) {
+                return false;
+            }
+            const char escaped = text_[cursor++];
+            if (escaped == '"' || escaped == '\\' || escaped == '/') {
+                if (!append_codepoint(static_cast<uint8_t>(escaped))) {
+                    return false;
+                }
+                continue;
+            }
+            if (escaped != 'u') {
+                return false;
+            }
+            uint32_t codepoint = 0;
+            if (!hex_quad(&cursor, &codepoint)) {
+                return false;
+            }
+            if (codepoint >= 0xd800U && codepoint <= 0xdbffU) {
+                if (cursor + 2U > value.end || text_[cursor] != '\\' ||
+                    text_[cursor + 1U] != 'u') {
+                    return false;
+                }
+                cursor += 2U;
+                uint32_t low = 0;
+                if (!hex_quad(&cursor, &low) || low < 0xdc00U || low > 0xdfffU) {
+                    return false;
+                }
+                codepoint = 0x10000U + ((codepoint - 0xd800U) << 10U) +
+                            (low - 0xdc00U);
+            } else if (codepoint >= 0xdc00U && codepoint <= 0xdfffU) {
+                return false;
+            }
+            if (!append_codepoint(codepoint)) {
+                return false;
+            }
+        }
+        output[written] = '\0';
+        return true;
+    }
+
     bool string_equals(size_t index, const char *expected) const
     {
         char decoded[96]{};
@@ -1501,6 +1622,356 @@ deck_ai_snapshot_result_t validate_snapshot(
     return DECK_AI_SNAPSHOT_ACCEPTED;
 }
 
+bool project_confidence(
+    const Document &document,
+    size_t index,
+    deck_ai_snapshot_confidence_t *confidence
+)
+{
+    if (document.string_equals(index, "verified")) {
+        *confidence = DECK_AI_SNAPSHOT_CONFIDENCE_VERIFIED;
+        return true;
+    }
+    if (document.string_equals(index, "inferred")) {
+        *confidence = DECK_AI_SNAPSHOT_CONFIDENCE_INFERRED;
+        return true;
+    }
+    if (document.string_equals(index, "unavailable")) {
+        *confidence = DECK_AI_SNAPSHOT_CONFIDENCE_UNAVAILABLE;
+        return true;
+    }
+    return false;
+}
+
+bool project_provider_status(
+    const Document &document,
+    size_t index,
+    deck_ai_snapshot_provider_status_t *status
+)
+{
+    if (document.string_equals(index, "ok")) {
+        *status = DECK_AI_SNAPSHOT_PROVIDER_OK;
+        return true;
+    }
+    if (document.string_equals(index, "degraded")) {
+        *status = DECK_AI_SNAPSHOT_PROVIDER_DEGRADED;
+        return true;
+    }
+    if (document.string_equals(index, "unavailable")) {
+        *status = DECK_AI_SNAPSHOT_PROVIDER_UNAVAILABLE;
+        return true;
+    }
+    return false;
+}
+
+bool project_session_state(
+    const Document &document,
+    size_t index,
+    deck_ai_snapshot_session_state_t *state
+)
+{
+    struct StateName {
+        const char *name;
+        deck_ai_snapshot_session_state_t state;
+    };
+    constexpr StateName kStates[] = {
+        {"running", DECK_AI_SNAPSHOT_SESSION_RUNNING},
+        {"waiting_approval", DECK_AI_SNAPSHOT_SESSION_WAITING_APPROVAL},
+        {"waiting_input", DECK_AI_SNAPSHOT_SESSION_WAITING_INPUT},
+        {"completed", DECK_AI_SNAPSHOT_SESSION_COMPLETED},
+        {"failed", DECK_AI_SNAPSHOT_SESSION_FAILED},
+        {"recent", DECK_AI_SNAPSHOT_SESSION_RECENT},
+        {"ended", DECK_AI_SNAPSHOT_SESSION_ENDED},
+        {"unknown", DECK_AI_SNAPSHOT_SESSION_UNKNOWN},
+        {"unavailable", DECK_AI_SNAPSHOT_SESSION_UNAVAILABLE},
+    };
+    for (const StateName &candidate : kStates) {
+        if (document.string_equals(index, candidate.name)) {
+            *state = candidate.state;
+            return true;
+        }
+    }
+    return false;
+}
+
+int session_priority(deck_ai_snapshot_session_state_t state)
+{
+    switch (state) {
+        case DECK_AI_SNAPSHOT_SESSION_WAITING_APPROVAL: return 90;
+        case DECK_AI_SNAPSHOT_SESSION_WAITING_INPUT: return 80;
+        case DECK_AI_SNAPSHOT_SESSION_RUNNING: return 70;
+        case DECK_AI_SNAPSHOT_SESSION_RECENT: return 60;
+        case DECK_AI_SNAPSHOT_SESSION_UNKNOWN: return 50;
+        case DECK_AI_SNAPSHOT_SESSION_FAILED: return 40;
+        case DECK_AI_SNAPSHOT_SESSION_COMPLETED: return 30;
+        case DECK_AI_SNAPSHOT_SESSION_ENDED: return 20;
+        case DECK_AI_SNAPSHOT_SESSION_UNAVAILABLE:
+        default:
+            return 10;
+    }
+}
+
+bool project_window(
+    const Document &document,
+    size_t index,
+    deck_ai_snapshot_quota_projection_t *window
+)
+{
+    *window = deck_ai_snapshot_quota_projection_t{};
+    if (!document.decode_ascii(
+            document.field(index, "name"),
+            window->name,
+            sizeof(window->name)
+        )) {
+        return false;
+    }
+    uint64_t value = 0;
+    if (!nullable_unsigned(
+            document,
+            document.field(index, "used_basis_points"),
+            0,
+            10'000,
+            &value,
+            &window->has_used_basis_points
+        )) {
+        return false;
+    }
+    window->used_basis_points = static_cast<uint16_t>(value);
+    value = 0;
+    if (!nullable_unsigned(
+            document,
+            document.field(index, "remaining_basis_points"),
+            0,
+            10'000,
+            &value,
+            &window->has_remaining_basis_points
+        )) {
+        return false;
+    }
+    window->remaining_basis_points = static_cast<uint16_t>(value);
+    value = 0;
+    if (!nullable_unsigned(
+            document,
+            document.field(index, "window_minutes"),
+            1,
+            525'600,
+            &value,
+            &window->has_window_minutes
+        )) {
+        return false;
+    }
+    window->window_minutes = static_cast<uint32_t>(value);
+    return nullable_time(
+        document,
+        document.field(index, "resets_at"),
+        UINT64_MAX,
+        &window->resets_at_unix_ms,
+        &window->has_resets_at
+    );
+}
+
+bool project_session(
+    const Document &document,
+    size_t index,
+    deck_ai_snapshot_session_projection_t *session
+)
+{
+    *session = deck_ai_snapshot_session_projection_t{};
+    session->present = true;
+    if (!document.decode_ascii(
+            document.field(index, "session_id"),
+            session->session_id,
+            sizeof(session->session_id)
+        ) ||
+        !project_session_state(document, document.field(index, "state"), &session->state) ||
+        !project_confidence(
+            document,
+            document.field(index, "confidence"),
+            &session->confidence
+        )) {
+        return false;
+    }
+    const size_t display_name = document.field(index, "display_name");
+    if (!is_null(document, display_name)) {
+        if (!document.decode_utf8(
+                display_name,
+                session->display_name,
+                sizeof(session->display_name)
+            )) {
+            return false;
+        }
+        session->has_display_name = true;
+    }
+    if (!nullable_time(
+            document,
+            document.field(index, "last_activity_at"),
+            UINT64_MAX,
+            &session->last_activity_at_unix_ms,
+            &session->has_last_activity_at
+        )) {
+        return false;
+    }
+    uint64_t value = 0;
+    if (!nullable_unsigned(
+            document,
+            document.field(index, "duration_seconds"),
+            0,
+            31'536'000,
+            &value,
+            &session->has_duration_seconds
+        )) {
+        return false;
+    }
+    session->duration_seconds = static_cast<uint32_t>(value);
+    value = 0;
+    if (!nullable_unsigned(
+            document,
+            document.field(index, "turn_tokens"),
+            0,
+            kMaximumSafeInteger,
+            &value,
+            &session->has_turn_tokens
+        )) {
+        return false;
+    }
+    session->turn_tokens = value;
+    value = 0;
+    if (!nullable_unsigned(
+            document,
+            document.field(index, "context_used_basis_points"),
+            0,
+            10'000,
+            &value,
+            &session->has_context_used_basis_points
+        )) {
+        return false;
+    }
+    session->context_used_basis_points = static_cast<uint16_t>(value);
+    return true;
+}
+
+bool session_is_better(
+    const deck_ai_snapshot_session_projection_t &candidate,
+    const deck_ai_snapshot_session_projection_t &current
+)
+{
+    if (!current.present) {
+        return true;
+    }
+    const int candidate_priority = session_priority(candidate.state);
+    const int current_priority = session_priority(current.state);
+    if (candidate_priority != current_priority) {
+        return candidate_priority > current_priority;
+    }
+    if (candidate.has_last_activity_at != current.has_last_activity_at) {
+        return candidate.has_last_activity_at;
+    }
+    if (candidate.last_activity_at_unix_ms != current.last_activity_at_unix_ms) {
+        return candidate.last_activity_at_unix_ms > current.last_activity_at_unix_ms;
+    }
+    return std::strcmp(candidate.session_id, current.session_id) < 0;
+}
+
+bool project_codex(
+    const Document &document,
+    size_t root,
+    deck_ai_snapshot_codex_projection_t *projection
+)
+{
+    deck_ai_snapshot_codex_projection_t candidate{};
+    const size_t timezone = document.field(root, "timezone");
+    if (!is_null(document, timezone)) {
+        if (!document.decode_utf8(timezone, candidate.timezone, sizeof(candidate.timezone))) {
+            return false;
+        }
+        candidate.has_timezone = true;
+    }
+    const size_t providers = document.field(root, "providers");
+    for (size_t provider = document.node(providers).first_child;
+         provider != static_cast<size_t>(kNoNode);
+         provider = document.node(provider).next_sibling) {
+        if (!document.string_equals(document.field(provider, "provider_id"), "codex")) {
+            continue;
+        }
+        candidate.provider_present = true;
+        if (!document.decode_utf8(
+                document.field(provider, "display_name"),
+                candidate.provider_display_name,
+                sizeof(candidate.provider_display_name)
+            ) ||
+            !project_provider_status(
+                document,
+                document.field(provider, "status"),
+                &candidate.provider_status
+            ) ||
+            !project_confidence(
+                document,
+                document.field(provider, "confidence"),
+                &candidate.provider_confidence
+            ) ||
+            !nullable_time(
+                document,
+                document.field(provider, "updated_at"),
+                UINT64_MAX,
+                &candidate.provider_updated_at_unix_ms,
+                &candidate.has_provider_updated_at
+            )) {
+            return false;
+        }
+        const size_t windows = document.field(provider, "windows");
+        candidate.window_count = static_cast<uint8_t>(document.array_count(windows));
+        for (uint8_t index = 0; index < candidate.window_count; ++index) {
+            if (!project_window(
+                    document,
+                    document.array_at(windows, index),
+                    &candidate.windows[index]
+                )) {
+                return false;
+            }
+        }
+        const size_t tokens = document.field(provider, "tokens");
+        if (!is_null(document, tokens)) {
+            uint64_t total = 0;
+            if (!nullable_unsigned(
+                    document,
+                    document.field(tokens, "total"),
+                    0,
+                    kMaximumSafeInteger,
+                    &total,
+                    &candidate.has_total_tokens
+                )) {
+                return false;
+            }
+            candidate.total_tokens = total;
+        }
+        break;
+    }
+
+    if (candidate.provider_present) {
+        const size_t sessions = document.field(root, "sessions");
+        for (size_t session = document.node(sessions).first_child;
+             session != static_cast<size_t>(kNoNode);
+             session = document.node(session).next_sibling) {
+            if (!document.string_equals(document.field(session, "provider_id"), "codex")) {
+                continue;
+            }
+            if (candidate.session_count == UINT8_MAX) {
+                return false;
+            }
+            ++candidate.session_count;
+            deck_ai_snapshot_session_projection_t projected{};
+            if (!project_session(document, session, &projected)) {
+                return false;
+            }
+            if (session_is_better(projected, candidate.featured_session)) {
+                candidate.featured_session = projected;
+            }
+        }
+    }
+    *projection = candidate;
+    return true;
+}
+
 }  // namespace
 
 deck_ai_snapshot_result_t deck_ai_snapshot_validate(
@@ -1531,6 +2002,38 @@ deck_ai_snapshot_result_t deck_ai_snapshot_validate(
     }
     delete[] nodes;
     return result;
+}
+
+bool deck_ai_snapshot_project_codex(
+    const char *document,
+    size_t document_size,
+    deck_ai_snapshot_codex_projection_t *projection
+)
+{
+    if (projection == nullptr) {
+        return false;
+    }
+    *projection = deck_ai_snapshot_codex_projection_t{};
+    if (deck_ai_snapshot_validate(document, document_size, nullptr) !=
+        DECK_AI_SNAPSHOT_ACCEPTED) {
+        return false;
+    }
+    Node *nodes = new (std::nothrow) Node[kMaximumNodes];
+    if (nodes == nullptr) {
+        return false;
+    }
+    Parser parser(document, document_size, nodes, kMaximumNodes);
+    size_t root = 0;
+    bool projected = false;
+    if (parser.parse(&root) && parser.count() != 0U) {
+        const Document parsed(document, nodes);
+        projected = project_codex(parsed, root, projection);
+    }
+    delete[] nodes;
+    if (!projected) {
+        *projection = deck_ai_snapshot_codex_projection_t{};
+    }
+    return projected;
 }
 
 bool deck_ai_snapshot_retained_init(

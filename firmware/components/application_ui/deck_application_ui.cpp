@@ -27,13 +27,19 @@ constexpr size_t kDrawBufferBytes = DECK_DISPLAY_WIDTH * kDrawRows * sizeof(uint
 constexpr uint32_t kUiPollMs = 10;
 constexpr uint32_t kUiStackBytes = 8192;
 constexpr UBaseType_t kUiPriority = 5;
+static_assert(
+    DECK_AI_PAGE_TOP_OFFSET +
+        DECK_AI_PAGE_MAX_LINES * DECK_AI_PAGE_FONT_LINE_HEIGHT +
+        (DECK_AI_PAGE_MAX_LINES - 1U) * DECK_AI_PAGE_LINE_SPACING <=
+    DECK_DISPLAY_HEIGHT
+);
 
 struct UiContext {
     deck_display_service_t *display_service;
     deck_m0_view_model_t model;
     deck_m0_view_model_t presented_model;
     char firmware_version[32];
-    char page_text[768];
+    char page_text[1024];
     lv_display_t *lv_display;
     lv_obj_t *page_label;
     uint8_t *draw_buffer_a;
@@ -176,9 +182,21 @@ bool present_model(UiContext *context)
         deck_m0_view_model_equal(&context->model, &context->presented_model)) {
         return true;
     }
-    if (!deck_m0_view_model_format(&context->model, context->page_text, sizeof(context->page_text))) {
+    bool show_ai_page = false;
+    const bool formatted = deck_m0_view_model_format_active_page(
+        &context->model,
+        context->page_text,
+        sizeof(context->page_text),
+        &show_ai_page
+    );
+    if (!formatted) {
         return false;
     }
+    lv_obj_set_style_text_line_space(
+        context->page_label,
+        show_ai_page ? DECK_AI_PAGE_LINE_SPACING : 5,
+        LV_PART_MAIN
+    );
     lv_label_set_text(context->page_label, context->page_text);
     context->presented_model = context->model;
     context->presented_model.firmware_version = context->firmware_version;
@@ -239,7 +257,7 @@ bool initialize_lvgl(UiContext *context)
     lv_obj_set_style_text_font(context->page_label, &lv_font_deck_m0_16, LV_PART_MAIN);
     lv_obj_set_style_text_color(context->page_label, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_style_text_line_space(context->page_label, 5, LV_PART_MAIN);
-    lv_obj_align(context->page_label, LV_ALIGN_TOP_LEFT, 8, 6);
+    lv_obj_align(context->page_label, LV_ALIGN_TOP_LEFT, 8, DECK_AI_PAGE_TOP_OFFSET);
     return present_model(context);
 }
 
