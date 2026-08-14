@@ -7,9 +7,12 @@ package secretstore
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"io"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -75,11 +78,44 @@ type Store struct {
 // Open creates the production Store for the current user's macOS Keychain or
 // Windows Credential Manager.
 func Open() (*Store, error) {
-	adapter, err := platformVault(providerSecretService)
+	return openService(providerSecretService)
+}
+
+// OpenForDataDirectory scopes the native vault namespace to one canonical
+// Companion data-directory owner. Multiple valid --data-directory instances
+// therefore cannot enumerate, reconcile, or delete each other's credentials.
+func OpenForDataDirectory(dataDirectory string) (*Store, error) {
+	service, err := providerSecretServiceForDataDirectory(dataDirectory)
+	if err != nil {
+		return nil, err
+	}
+	return openService(service)
+}
+
+func openService(service string) (*Store, error) {
+	adapter, err := platformVault(service)
 	if err != nil {
 		return nil, err
 	}
 	return newStore(adapter, rand.Reader)
+}
+
+func providerSecretServiceForDataDirectory(dataDirectory string) (string, error) {
+	if dataDirectory == "" {
+		return "", ErrInvalid
+	}
+	canonical, err := filepath.Abs(filepath.Clean(dataDirectory))
+	if err != nil {
+		return "", ErrInvalid
+	}
+	if resolved, resolveErr := filepath.EvalSymlinks(canonical); resolveErr == nil {
+		canonical = resolved
+	}
+	if runtime.GOOS == "windows" {
+		canonical = strings.ToLower(canonical)
+	}
+	digest := sha256.Sum256([]byte(canonical))
+	return providerSecretService + "/owner-" + hex.EncodeToString(digest[:16]), nil
 }
 
 func newStore(adapter vault, random io.Reader) (*Store, error) {

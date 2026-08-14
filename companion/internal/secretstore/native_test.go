@@ -81,8 +81,12 @@ func TestNativeSecretStore(t *testing.T) {
 		}
 	}
 
+	scopedStore, err := OpenForDataDirectory(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	var staged Reference
-	transactionReference, err := store.PutNew(ctx, first, func(reference Reference) error {
+	transactionReference, err := scopedStore.PutNew(ctx, first, func(reference Reference) error {
 		staged = reference
 		return nil
 	})
@@ -90,17 +94,17 @@ func TestNativeSecretStore(t *testing.T) {
 		t.Fatalf("native PutNew() = %q staged=%q error=%v", transactionReference, staged, err)
 	}
 	t.Cleanup(func() {
-		if cleanupErr := store.Delete(context.Background(), transactionReference); cleanupErr != nil {
+		if cleanupErr := scopedStore.Delete(context.Background(), transactionReference); cleanupErr != nil {
 			t.Errorf("native transactional secret cleanup: %v", cleanupErr)
 		}
 	})
-	read, err = store.Get(ctx, transactionReference)
+	read, err = scopedStore.Get(ctx, transactionReference)
 	if err != nil || !bytes.Equal(read, first) {
 		overwrite(read)
 		t.Fatalf("native Get(PutNew) mismatch: %v", err)
 	}
 	overwrite(read)
-	if err = store.Delete(ctx, transactionReference); err != nil {
+	if err = scopedStore.Delete(ctx, transactionReference); err != nil {
 		t.Fatal(err)
 	}
 }

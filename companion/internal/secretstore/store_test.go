@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -119,6 +121,34 @@ func TestPutGetUpdateDeleteAndListMetadata(t *testing.T) {
 	}
 	if _, err = store.Get(context.Background(), reference); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Get(deleted) error = %v", err)
+	}
+}
+
+func TestDataDirectoryVaultServicesAreStableAndIsolated(t *testing.T) {
+	root := t.TempDir()
+	first := filepath.Join(root, "first")
+	second := filepath.Join(root, "second")
+	if err := os.MkdirAll(first, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(second, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	firstService, err := providerSecretServiceForDataDirectory(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repeated, err := providerSecretServiceForDataDirectory(filepath.Join(first, "."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondService, err := providerSecretServiceForDataDirectory(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstService != repeated || firstService == secondService ||
+		!strings.HasPrefix(firstService, providerSecretService+"/owner-") {
+		t.Fatalf("scoped services first=%q repeated=%q second=%q", firstService, repeated, secondService)
 	}
 }
 

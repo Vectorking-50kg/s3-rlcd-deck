@@ -30,6 +30,56 @@ type transactionDefinitionOwner struct {
 	completeErr error
 }
 
+type sharedScopedSecretStore struct {
+	scope   string
+	backend map[string][]byte
+	next    int
+}
+
+func (store *sharedScopedSecretStore) key(reference secretstore.Reference) string {
+	return store.scope + ":" + reference.String()
+}
+
+func (store *sharedScopedSecretStore) PutNew(
+	_ context.Context,
+	value []byte,
+	beforeSecret func(secretstore.Reference) error,
+) (secretstore.Reference, error) {
+	store.next++
+	reference := secretstore.Reference(fmt.Sprintf("secret-%032x", store.next))
+	if err := beforeSecret(reference); err != nil {
+		return "", err
+	}
+	store.backend[store.key(reference)] = append([]byte(nil), value...)
+	return reference, nil
+}
+
+func (store *sharedScopedSecretStore) Delete(
+	_ context.Context,
+	reference secretstore.Reference,
+) error {
+	delete(store.backend, store.key(reference))
+	return nil
+}
+
+func (store *sharedScopedSecretStore) ListMetadata(
+	context.Context,
+) ([]secretstore.Metadata, error) {
+	prefix := store.scope + ":"
+	var metadata []secretstore.Metadata
+	for key := range store.backend {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		reference, err := secretstore.ParseReference(strings.TrimPrefix(key, prefix))
+		if err != nil {
+			return nil, err
+		}
+		metadata = append(metadata, secretstore.Metadata{Reference: reference})
+	}
+	return metadata, nil
+}
+
 func newTransactionDefinitionOwner() *transactionDefinitionOwner {
 	return &transactionDefinitionOwner{pending: make(map[secretstore.Reference]struct{})}
 }
@@ -402,6 +452,50 @@ func TestDefinitionStoreReconcilesUnjournaledReserveAfterReopen(t *testing.T) {
 	}
 	if len(secrets.values) != 0 || len(owner.state.PendingSecretDeletes) != 0 {
 		t.Fatalf("orphan reconciliation values=%d pending=%v", len(secrets.values), owner.state.PendingSecretDeletes)
+	}
+}
+
+func TestDefinitionStoreReconcileCannotDeleteAnotherDataDirectorySecrets(t *testing.T) {
+	backend := make(map[string][]byte)
+	secretsA := &sharedScopedSecretStore{scope: "owner-a", backend: backend}
+	secretsB := &sharedScopedSecretStore{scope: "owner-b", backend: backend}
+	ownerA, err := OpenDefinitionStore(filepath.Join(t.TempDir(), "structured-providers.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ownerA.Close()
+	ownerB, err := OpenDefinitionStore(filepath.Join(t.TempDir(), "structured-providers.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ownerB.Close()
+	committedA, err := CommitDefinition(
+		context.Background(), nil, Templates()[0].Definition,
+		[]SecretBinding{{HeaderIndex: 0, Value: []byte("owner-a-secret")}}, secretsA, ownerA,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	committedB, err := CommitDefinition(
+		context.Background(), nil, Templates()[0].Definition,
+		[]SecretBinding{{HeaderIndex: 0, Value: []byte("owner-b-secret")}}, secretsB, ownerB,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orphanB := secretstore.Reference("secret-99999999999999999999999999999999")
+	backend[secretsB.key(orphanB)] = []byte{0}
+	if err = ownerB.ReconcileCleanup(context.Background(), secretsB); err != nil {
+		t.Fatal(err)
+	}
+	if string(backend[secretsA.key(committedA.Request.Headers[0].SecretReference)]) != "owner-a-secret" {
+		t.Fatal("owner B reconciliation deleted owner A credential")
+	}
+	if string(backend[secretsB.key(committedB.Request.Headers[0].SecretReference)]) != "owner-b-secret" {
+		t.Fatal("owner B reconciliation deleted its active credential")
+	}
+	if _, exists := backend[secretsB.key(orphanB)]; exists {
+		t.Fatal("owner B reconciliation retained its own orphan")
 	}
 }
 

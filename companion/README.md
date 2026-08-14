@@ -73,8 +73,10 @@ Secret Reference for put/get/delete/list-metadata operations. A new put generate
 reference; an update replaces the value at the same reference in one platform-vault operation, so
 a failed update preserves the previous value and cannot orphan a replacement reference. Delete is
 idempotent, and list-metadata returns only references. macOS uses Security.framework Keychain
-items and Windows uses Credential Manager entries in a fixed Companion Provider namespace. The
-namespace and generated-reference grammar prevent this module from discovering or modifying
+items and Windows uses Credential Manager entries in a fixed Companion Provider namespace family,
+with an owner sub-namespace derived from the canonical `--data-directory`. The owner scope prevents
+one valid data directory from enumerating or cleaning another's credentials. The namespace and
+generated-reference grammar prevent this module from discovering or modifying
 Codex/Cursor-owned authentication. Authentication UI is disabled for background access: locked,
 denied, and canceled operations return fixed errors without including credential bytes.
 Credential Manager lacks a metadata-only enumeration API, so its adapter never copies or returns

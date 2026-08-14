@@ -9,7 +9,9 @@ enumeration call; that private adapter never copies or returns the blobs materia
 `CredEnumerateW` and overwrites them before freeing the native result block.
 
 The production adapters use macOS Security.framework Keychain items and Windows Credential Manager
-entries under one fixed Companion Provider namespace. macOS queries explicitly forbid
+entries under one fixed Companion Provider namespace family. A canonical data-directory owner hash
+selects a disjoint service sub-namespace, so reconciliation or uninstall from one valid data
+directory cannot enumerate or delete another's entries. macOS queries explicitly forbid
 authentication UI so a background collector cannot raise an unexpected password prompt. Platform
 lock, permission denial, cancellation, absence, and corruption are reduced to fixed errors that do
 not contain native messages or credential bytes. The namespace and strict random-reference grammar

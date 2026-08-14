@@ -252,7 +252,7 @@ func loadStructuredCollectors(
 	stderr io.Writer,
 ) ([]companionruntime.StructuredCollector, func()) {
 	closeStore := func() {}
-	providerSecrets, err := secretstore.Open()
+	providerSecrets, err := secretstore.OpenForDataDirectory(dataDirectory)
 	if err != nil {
 		fmt.Fprintln(stderr, "structured Providers are unavailable")
 		return nil, closeStore
