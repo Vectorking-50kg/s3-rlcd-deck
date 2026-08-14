@@ -12,8 +12,10 @@ idf_component_register(
         esp_psram
         esp_system
         esp_timer
+        esp_wifi
         freertos
         health
+        heap
         setup_mode
 )
 

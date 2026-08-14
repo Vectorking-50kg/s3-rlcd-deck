@@ -108,6 +108,12 @@ bool deck_m0_view_model_equal(const deck_m0_view_model_t *left, const deck_m0_vi
     if (left == nullptr || right == nullptr) {
         return left == right;
     }
+    const bool left_ai_visible = left->ai_page.active && left->setup_state != DECK_SETUP_ACTIVE;
+    const bool right_ai_visible = right->ai_page.active && right->setup_state != DECK_SETUP_ACTIVE;
+    if (left_ai_visible || right_ai_visible) {
+        return left_ai_visible == right_ai_visible &&
+               deck_ai_page_view_model_equal(&left->ai_page, &right->ai_page);
+    }
     return same_text(left->firmware_version, right->firmware_version) &&
            left->data_source == right->data_source && left->rtc_available == right->rtc_available &&
            left->rtc_hour == right->rtc_hour &&
@@ -271,6 +277,22 @@ bool deck_m0_view_model_format(const deck_m0_view_model_t *model, char *buffer, 
         model->minimum_free_heap_bytes / 1024U
     );
     return size >= 0 && static_cast<size_t>(size) < buffer_size;
+}
+
+bool deck_m0_view_model_format_active_page(
+    const deck_m0_view_model_t *model,
+    char *buffer,
+    size_t buffer_size,
+    bool *ai_page_visible
+)
+{
+    if (model == nullptr || ai_page_visible == nullptr) {
+        return false;
+    }
+    *ai_page_visible = model->ai_page.active && model->setup_state != DECK_SETUP_ACTIVE;
+    return *ai_page_visible
+               ? deck_ai_page_view_model_format(&model->ai_page, buffer, buffer_size)
+               : deck_m0_view_model_format(model, buffer, buffer_size);
 }
 
 const char *deck_m0_required_glyphs(void)

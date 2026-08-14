@@ -46,6 +46,31 @@ void retry_delay_is_exponential_and_bounded()
     assert(deck_companion_link_retry_delay_ms(UINT32_MAX) == 30'000);
 }
 
+void trusted_utc_never_moves_backward_and_latches_real_rollback()
+{
+    deck_companion_trusted_clock_t clock{};
+    assert(deck_companion_trusted_clock_accept(&clock, 1'000'000, 100));
+    uint64_t utc = 0;
+    assert(deck_companion_trusted_clock_current(&clock, 200, &utc));
+    assert(utc == 1'000'100U);
+
+    // Network jitter may make a later sample trail the extrapolated clock,
+    // but a non-decreasing server sample is clamped without moving backward.
+    assert(deck_companion_trusted_clock_accept(&clock, 1'000'090, 200));
+    assert(deck_companion_trusted_clock_current(&clock, 200, &utc));
+    assert(utc == 1'000'100U);
+
+    assert(!deck_companion_trusted_clock_accept(&clock, 999'000, 300));
+    assert(!deck_companion_trusted_clock_current(&clock, 300, &utc));
+    assert(clock.rollback_latched);
+
+    assert(!deck_companion_trusted_clock_accept(&clock, 1'000'199, 400));
+    assert(deck_companion_trusted_clock_accept(&clock, 1'000'200, 500));
+    assert(deck_companion_trusted_clock_current(&clock, 500, &utc));
+    assert(utc == 1'000'200U);
+    assert(!clock.rollback_latched);
+}
+
 }  // namespace
 
 int main()
@@ -54,5 +79,6 @@ int main()
     first_server_heartbeat_has_the_same_liveness_deadline();
     accepted_heartbeat_schedules_client_heartbeat_and_bounds_server_liveness();
     retry_delay_is_exponential_and_bounded();
+    trusted_utc_never_moves_backward_and_latches_real_rollback();
     return 0;
 }

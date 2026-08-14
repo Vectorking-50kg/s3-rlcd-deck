@@ -1,0 +1,8 @@
+20:36  +24.8C  WIFI 3/4  AGENT ON
+----------------------------------------
+CODEX  DEGRADED / VERIFIED
+PRIMARY [######----] R62% @2h30m
+WEEKLY  [##--------] U22% 7d
+----------------------------------------
+NO CODEX SESSION
+TX DISARMED

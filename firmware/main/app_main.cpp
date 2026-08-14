@@ -1,6 +1,8 @@
 #include "sdkconfig.h"
 
+#include <atomic>
 #include <cstring>
+#include <new>
 
 #include "deck_application_ui.h"
 #include "deck_peripherals.h"
@@ -13,10 +15,14 @@
 #include "deck_setup_service.h"
 
 #include "esp_app_desc.h"
+#include "esp_heap_caps.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 
 namespace {
 
@@ -29,6 +35,14 @@ deck_display_service_t *application_display = nullptr;
 deck_peripherals_t *application_peripherals = nullptr;
 deck_setup_service_t *application_setup = nullptr;
 deck_companion_link_t *application_companion_link = nullptr;
+struct AiPageTaskContext {
+    deck_companion_link_t *link;
+    char *document;
+    EventGroupHandle_t lifecycle;
+    TaskHandle_t task;
+    std::atomic<bool> stop_requested;
+};
+AiPageTaskContext *application_ai_page_task = nullptr;
 deck_m0_view_model_t application_model{};
 SemaphoreHandle_t application_model_mutex = nullptr;
 uint32_t handled_boot_long_press_count = 0;
@@ -155,6 +169,24 @@ void display_start_error(const char *stage)
 
 namespace {
 
+constexpr EventBits_t kAiPageTaskStoppedBit = BIT0;
+
+bool stop_ai_page_task();
+
+bool release_companion_resources()
+{
+    if (!stop_ai_page_task()) {
+        return false;
+    }
+    if (application_companion_link != nullptr) {
+        if (!deck_companion_link_stop(application_companion_link)) {
+            return false;
+        }
+        application_companion_link = nullptr;
+    }
+    return true;
+}
+
 struct ButtonEventMapping {
     deck_button_event_t view;
     deck_diagnostic_button_event_t diagnostic;
@@ -175,6 +207,9 @@ ButtonEventMapping map_button_event(deck_button_input_event_t event)
 
 bool release_display_resources()
 {
+    if (!release_companion_resources()) {
+        return false;
+    }
     if (application_display != nullptr) {
         if (!deck_display_service_destroy(application_display)) {
             return false;
@@ -223,6 +258,7 @@ deck_m0_view_model_t make_initial_model(
         0,
         uptime_seconds,
         minimum_free_heap_bytes,
+        {},
     };
     return model;
 }
@@ -260,6 +296,12 @@ void peripheral_snapshot(void *, const deck_peripheral_snapshot_t *snapshot)
             snapshot->calibrated_temperature_tenths_c;
         application_model.humidity_tenths_percent = snapshot->humidity_tenths_percent;
         application_model.sensor_error_count = snapshot->sensor_error_count;
+        application_model.ai_page.rtc_available = snapshot->rtc_available;
+        application_model.ai_page.rtc_hour = snapshot->rtc_hour;
+        application_model.ai_page.rtc_minute = snapshot->rtc_minute;
+        application_model.ai_page.temperature_available = snapshot->sensor_available;
+        application_model.ai_page.calibrated_temperature_tenths_c =
+            snapshot->calibrated_temperature_tenths_c;
         application_model.buttons_available = snapshot->buttons_available;
         application_model.key_event = key_event.view;
         application_model.key_event_count = snapshot->key_event_count;
@@ -357,6 +399,196 @@ deck_wifi_record_view_status_t wifi_record_view_status(deck_wifi_record_status_t
         default:
             return DECK_WIFI_RECORD_VIEW_EMPTY;
     }
+}
+
+deck_ai_page_companion_state_t ai_page_companion_state(deck_companion_link_state_t state)
+{
+    switch (state) {
+        case DECK_COMPANION_LINK_ONLINE:
+            return DECK_AI_PAGE_COMPANION_ONLINE;
+        case DECK_COMPANION_LINK_CONNECTING:
+            return DECK_AI_PAGE_COMPANION_CONNECTING;
+        case DECK_COMPANION_LINK_OFFLINE:
+            return DECK_AI_PAGE_COMPANION_OFFLINE;
+        case DECK_COMPANION_LINK_UNPAIRED:
+        default:
+            return DECK_AI_PAGE_COMPANION_UNPAIRED;
+    }
+}
+
+deck_ai_page_snapshot_state_t ai_page_snapshot_state(deck_ai_snapshot_store_state_t state)
+{
+    switch (state) {
+        case DECK_AI_SNAPSHOT_STORE_FRESH:
+            return DECK_AI_PAGE_SNAPSHOT_FRESH;
+        case DECK_AI_SNAPSHOT_STORE_STALE:
+            return DECK_AI_PAGE_SNAPSHOT_STALE;
+        case DECK_AI_SNAPSHOT_STORE_UNAVAILABLE:
+            return DECK_AI_PAGE_SNAPSHOT_UNAVAILABLE;
+        case DECK_AI_SNAPSHOT_STORE_EMPTY:
+        default:
+            return DECK_AI_PAGE_SNAPSHOT_EMPTY;
+    }
+}
+
+void ai_page_task(void *task_context)
+{
+    auto *context = static_cast<AiPageTaskContext *>(task_context);
+    if (context == nullptr || context->link == nullptr || context->document == nullptr ||
+        context->lifecycle == nullptr) {
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    uint64_t projected_generated_at = 0;
+    size_t projected_size = 0;
+    while (!context->stop_requested.load(std::memory_order_acquire)) {
+        deck_companion_link_snapshot_t link_snapshot{};
+        if (!deck_companion_link_snapshot(context->link, &link_snapshot)) {
+            (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1'000));
+            continue;
+        }
+
+        deck_ai_snapshot_store_snapshot_t stored{};
+        size_t document_size = 0;
+        bool copied = false;
+        if (link_snapshot.has_trusted_utc) {
+            copied = deck_companion_link_copy_ai_snapshot(
+                context->link,
+                link_snapshot.trusted_utc_ms,
+                context->document,
+                DECK_AI_SNAPSHOT_MAX_BYTES,
+                &document_size,
+                &stored
+            );
+        }
+
+        deck_ai_snapshot_codex_projection_t projection{};
+        bool projection_changed = false;
+        bool projection_valid = true;
+        wifi_ap_record_t access_point{};
+        const bool wifi_signal_available = esp_wifi_sta_get_ap_info(&access_point) == ESP_OK;
+        if (copied && stored.document_visible && document_size != 0U &&
+            (stored.metadata.generated_at_unix_ms != projected_generated_at ||
+             document_size != projected_size)) {
+            projection_valid = deck_ai_snapshot_project_codex(
+                context->document,
+                document_size,
+                &projection
+            );
+            projection_changed = projection_valid;
+        }
+
+        if (application_model_mutex != nullptr &&
+            xSemaphoreTake(application_model_mutex, portMAX_DELAY) == pdTRUE) {
+            application_model.ai_page.companion_state =
+                ai_page_companion_state(link_snapshot.state);
+            application_model.ai_page.wifi_signal_bars =
+                wifi_signal_available ? deck_ai_page_wifi_signal_bars(access_point.rssi) : 0;
+            if (link_snapshot.has_trusted_utc) {
+                application_model.ai_page.trusted_utc_ms = link_snapshot.trusted_utc_ms;
+            } else {
+                application_model.ai_page.trusted_utc_ms = 0;
+                if (application_model.ai_page.active) {
+                    application_model.ai_page.snapshot_state =
+                        DECK_AI_PAGE_SNAPSHOT_UNAVAILABLE;
+                }
+            }
+            if (copied) {
+                if (stored.has_snapshot) {
+                    application_model.ai_page.active = true;
+                }
+                application_model.ai_page.snapshot_state =
+                    projection_valid ? ai_page_snapshot_state(stored.state)
+                                     : DECK_AI_PAGE_SNAPSHOT_UNAVAILABLE;
+                if (projection_changed) {
+                    application_model.ai_page.codex = projection;
+                    projected_generated_at = stored.metadata.generated_at_unix_ms;
+                    projected_size = document_size;
+                }
+            }
+            xSemaphoreGive(application_model_mutex);
+        }
+        if (document_size != 0U) {
+            std::memset(context->document, 0, document_size);
+        }
+        deck_m0_view_model_t published{};
+        (void)publish_application_model(&published);
+        (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1'000));
+    }
+    xEventGroupSetBits(context->lifecycle, kAiPageTaskStoppedBit);
+    // The owner deletes this suspended task after observing the stopped bit.
+    // Keeping the handle alive makes a timed-out stop safely retryable.
+    vTaskSuspend(nullptr);
+}
+
+AiPageTaskContext *start_ai_page_task(deck_companion_link_t *link)
+{
+    if (link == nullptr) {
+        return nullptr;
+    }
+    auto *context = new (std::nothrow) AiPageTaskContext{};
+    if (context == nullptr) {
+        return nullptr;
+    }
+    context->link = link;
+    context->document = static_cast<char *>(heap_caps_malloc(
+        DECK_AI_SNAPSHOT_MAX_BYTES,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+    ));
+    context->lifecycle = xEventGroupCreate();
+    context->stop_requested.store(false, std::memory_order_release);
+    if (context->document == nullptr || context->lifecycle == nullptr ||
+        xTaskCreatePinnedToCore(
+            ai_page_task,
+            "ai_page_model",
+            4'096,
+            context,
+            2,
+            &context->task,
+            0
+        ) != pdPASS) {
+        if (context->lifecycle != nullptr) {
+            vEventGroupDelete(context->lifecycle);
+        }
+        if (context->document != nullptr) {
+            std::memset(context->document, 0, DECK_AI_SNAPSHOT_MAX_BYTES);
+            heap_caps_free(context->document);
+        }
+        delete context;
+        return nullptr;
+    }
+    return context;
+}
+
+bool stop_ai_page_task()
+{
+    if (application_ai_page_task == nullptr) {
+        return true;
+    }
+    AiPageTaskContext *context = application_ai_page_task;
+    const bool first_stop =
+        !context->stop_requested.exchange(true, std::memory_order_acq_rel);
+    if (first_stop) {
+        xTaskNotifyGive(context->task);
+    }
+    const EventBits_t stopped = xEventGroupWaitBits(
+        context->lifecycle,
+        kAiPageTaskStoppedBit,
+        pdFALSE,
+        pdTRUE,
+        pdMS_TO_TICKS(2'000)
+    );
+    if ((stopped & kAiPageTaskStoppedBit) == 0) {
+        return false;
+    }
+    vTaskDelete(context->task);
+    std::memset(context->document, 0, DECK_AI_SNAPSHOT_MAX_BYTES);
+    heap_caps_free(context->document);
+    vEventGroupDelete(context->lifecycle);
+    delete context;
+    application_ai_page_task = nullptr;
+    return true;
 }
 
 #ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
@@ -503,6 +735,12 @@ void setup_event(void *, const deck_setup_service_event_t *event)
                                            : event->wifi.state == DECK_WIFI_CONFIG_ACTIVE
                                                  ? DECK_WIFI_CONNECTED
                                                  : DECK_WIFI_DISCONNECTED;
+        application_model.ai_page.wifi_state =
+            application_model.wifi_state == DECK_WIFI_CONNECTED
+                ? DECK_AI_PAGE_WIFI_CONNECTED
+                : application_model.wifi_state == DECK_WIFI_DISCONNECTED
+                      ? DECK_AI_PAGE_WIFI_DISCONNECTED
+                      : DECK_AI_PAGE_WIFI_UNAVAILABLE;
         application_model.wifi_config_state = wifi_config_view_state(event->wifi.state);
         application_model.wifi_record_status = wifi_record_view_status(
             event->wifi.record_status
@@ -577,6 +815,9 @@ void start_setup_after_ui_ready()
             deck_setup_service_wait_companion_profiles(application_setup, 10'000),
             app->version
         );
+        if (application_companion_link != nullptr) {
+            application_ai_page_task = start_ai_page_task(application_companion_link);
+        }
     }
 #ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
     if (application_setup == nullptr) {
@@ -600,6 +841,10 @@ void start_setup_after_ui_ready()
             static constexpr char link_error[] =
                 "{\"type\":\"diagnostic_error\",\"stage\":\"companion_link\"}\n";
             write_stdout(nullptr, link_error, sizeof(link_error) - 1);
+        } else if (application_ai_page_task == nullptr) {
+            static constexpr char ai_page_error[] =
+                "{\"type\":\"diagnostic_error\",\"stage\":\"ai_page\"}\n";
+            write_stdout(nullptr, ai_page_error, sizeof(ai_page_error) - 1);
         }
         if (xTaskCreatePinnedToCore(
                 diagnostic_control_task,

@@ -240,6 +240,24 @@ retaining the last valid bytes internally. Any trusted wall-clock source moving 
 high-water mark also withholds the document until that source recovers. Snapshot documents and
 private fields are never written to diagnostics.
 
+## Codex AI Page
+
+The `application_ui` component owns the bounded Snapshot-to-ViewModel projection and the fixed
+400x300 monochrome formatter. The runtime copies the Snapshot Store without blocking Flash work,
+reprojects only when the retained document changes, and publishes through the existing single
+LVGL owner. Setup temporarily overrides the AI Page; otherwise the first readable Snapshot makes
+Codex the default page. Four dynamic quota windows, aggregate tokens, and one privacy-safe featured
+session fit within thirteen text lines. Quota rows use `R`/`U` for remaining/used and `@` for the
+reset countdown; both names and durations are pixel-bounded against the generated font. Unknown
+values are hidden or rendered as `--`, never as zero, and all confidence, stale, degraded, and
+unavailable states use explicit text instead of color. `tests/host/snapshots/ai-page-*.txt` are the
+exact layout contract. The final line remains
+`TX DISARMED`; rendering a Snapshot never grants serial transmit authority.
+Trusted UTC is converted with the validated Snapshot timezone for the bounded set of firmware
+rules; an unsupported zone falls back to the cached RTC and then to `--:--` rather than guessing
+an offset. The projection worker owns a cancellable task and PSRAM document buffer, joins within
+two seconds before Companion Link teardown, and retains its complete owner when a join times out.
+
 ## Long-duration HIL
 
 For fast development feedback, use the 90-second contract. It exercises the display and
