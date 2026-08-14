@@ -219,6 +219,27 @@ majors fail closed without changing that slot. Compatible higher minors may add 
 boolean, or bounded integer fields. Host and firmware builds run the same fixture manifest from
 `protocol/fixtures`.
 
+The `Snapshot Store` is the only stateful sink used by Companion Link for `snapshot.ai`.
+It replaces the in-memory document immediately after full validation, rejects future or
+regressing timestamps, and checkpoints through versioned candidate/two-slot records with
+length, CRC, readback verification, and an atomic active marker. The dedicated 128 KiB
+`snapshot_nvs` partition has room for three maximum 16 KiB records plus NVS replacement/GC
+overhead. A private worker owns Flash open, recovery reads, writes, and close, so Store creation
+returns a bounded volatile view while recovery completes. A versioned, CRC-protected attempt
+watermark keeps both successful and failed attempts limited to one per 30 minutes across restart;
+an existing transaction with a missing or corrupt watermark starts a conservative 30-minute
+window at the first trusted UTC observation. Asynchronous recovery keeps the newer of the live
+and committed timestamps and resolves a same-time byte conflict to the committed record. A storage
+failure remains visible as degraded state but does not block the live memory update or UI copy;
+after the interval, the transactional state is reopened from the last valid record so transient
+failures can recover. Shutdown drains queued work within two seconds and otherwise retains the
+complete owner for an idempotent retry instead of freeing storage under a stalled worker.
+Offline documents remain readable
+as `STALE` for less than 24 hours, then the Store withholds the document and quota values while
+retaining the last valid bytes internally. Any trusted wall-clock source moving below its
+high-water mark also withholds the document until that source recovers. Snapshot documents and
+private fields are never written to diagnostics.
+
 ## Long-duration HIL
 
 For fast development feedback, use the 90-second contract. It exercises the display and

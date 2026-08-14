@@ -1,5 +1,8 @@
 #include "deck_companion_link.h"
 
+#include "deck_ai_snapshot_store_nvs.h"
+#include "deck_companion_link_frame.h"
+#include "deck_companion_link_message.h"
 #include "deck_companion_link_timing.h"
 #include "deck_companion_pairing_esp.h"
 #include "deck_device_protocol.h"
@@ -26,12 +29,15 @@ constexpr uint32_t kTaskStackBytes = 8'192;
 constexpr UBaseType_t kTaskPriority = 2;
 constexpr TickType_t kPollTicks = pdMS_TO_TICKS(100);
 constexpr TickType_t kSendTimeoutTicks = pdMS_TO_TICKS(2'000);
+constexpr TickType_t kReceiveBackpressureTicks = pdMS_TO_TICKS(2'000);
 constexpr uint64_t kHeartbeatIntervalMs = 10'000;
 constexpr uint64_t kHeartbeatTimeoutMs = 30'000;
 constexpr uint64_t kProfilePollMs = 500;
 constexpr size_t kMaximumMessageBytes = 16 * 1'024;
 constexpr size_t kFrameChunkBytes = 1'024;
 constexpr EventBits_t kStoppedBit = BIT0;
+constexpr EventBits_t kStartBit = BIT1;
+constexpr EventBits_t kAbortBit = BIT2;
 constexpr char kSubprotocol[] = "s3-rlcd-deck.v1";
 constexpr char kBoard[] = "esp32-s3-rlcd-4.2";
 
@@ -129,9 +135,8 @@ struct deck_companion_link {
     esp_websocket_client_handle_t client = nullptr;
     std::unique_ptr<deck_companion_profile_secret_t> secret;
     std::unique_ptr<char[]> frame;
-    size_t frame_size = 0;
-    int frame_payload_length = 0;
-    uint8_t frame_opcode = 0;
+    deck_companion_link_frame_t frame_assembler{};
+    deck_ai_snapshot_store_t *snapshots = nullptr;
     uint32_t observed_profile_generation = 0;
     uint64_t next_profile_poll_ms = 0;
     uint64_t next_connect_ms = 0;
@@ -183,9 +188,10 @@ void disconnect_transport(deck_companion_link_t *link)
         (void)esp_websocket_client_stop(client);
         (void)esp_websocket_client_destroy(client);
     }
-    link->frame_size = 0;
-    link->frame_payload_length = 0;
-    link->frame_opcode = 0;
+    if (link->frame != nullptr && link->frame_assembler.message_size != 0) {
+        secure_clear(link->frame.get(), link->frame_assembler.message_size);
+    }
+    deck_companion_link_frame_reset(&link->frame_assembler);
     link->has_server_monotonic = false;
     link->timing = {};
 }
@@ -228,6 +234,9 @@ void websocket_event(
         event.type = TransportEventType::disconnected;
     } else if (event_id == WEBSOCKET_EVENT_DATA && event_data != nullptr) {
         const auto *data = static_cast<const esp_websocket_event_data_t *>(event_data);
+        if (data->op_code >= 8U) {
+            return;
+        }
         if (data->data_len < 0 || static_cast<size_t>(data->data_len) > sizeof(event.data)) {
             link->queue_overflow.store(true, std::memory_order_release);
             return;
@@ -244,7 +253,10 @@ void websocket_event(
     } else {
         return;
     }
-    if (xQueueSend(link->events, &event, 0) != pdPASS) {
+    const TickType_t queue_wait = event.type == TransportEventType::data
+                                      ? kReceiveBackpressureTicks
+                                      : 0;
+    if (xQueueSend(link->events, &event, queue_wait) != pdPASS) {
         link->queue_overflow.store(true, std::memory_order_release);
     }
 }
@@ -452,49 +464,60 @@ bool refresh_profile(deck_companion_link_t *link, uint64_t now)
 
 bool accept_data(deck_companion_link_t *link, const TransportEvent &event)
 {
-    if (event.payload_length <= 0 ||
-        event.payload_length > static_cast<int>(kMaximumMessageBytes) ||
-        event.payload_offset < 0 || event.data_size > kFrameChunkBytes ||
-        static_cast<size_t>(event.payload_offset) + event.data_size >
-            static_cast<size_t>(event.payload_length)) {
+    if (event.payload_length > static_cast<int>(kMaximumMessageBytes) ||
+        event.data_size > kFrameChunkBytes) {
         return false;
     }
-    if (event.payload_offset == 0) {
-        link->frame_size = 0;
-        link->frame_payload_length = event.payload_length;
-        link->frame_opcode = event.opcode;
-    } else if (link->frame_payload_length != event.payload_length ||
-               static_cast<size_t>(event.payload_offset) != link->frame_size ||
-               (event.opcode != 0 && event.opcode != link->frame_opcode)) {
+    const deck_companion_link_frame_result_t assembled =
+        deck_companion_link_frame_accept(
+            &link->frame_assembler,
+            event.payload_length,
+            event.payload_offset,
+            event.opcode,
+            event.final,
+            event.data,
+            event.data_size
+        );
+    if (assembled == DECK_COMPANION_LINK_FRAME_INVALID) {
         return false;
     }
-    if (link->frame_opcode != 1 || link->frame == nullptr) {
-        return false;
-    }
-    std::memcpy(link->frame.get() + link->frame_size, event.data, event.data_size);
-    link->frame_size += event.data_size;
-    if (!event.final) {
+    if (assembled == DECK_COMPANION_LINK_FRAME_PARTIAL) {
         return true;
     }
-    if (link->frame_size != static_cast<size_t>(link->frame_payload_length)) {
-        return false;
-    }
-    link->frame[link->frame_size] = '\0';
+    const size_t message_size = link->frame_assembler.message_size;
+    link->frame[message_size] = '\0';
     deck_device_heartbeat_t heartbeat{};
-    if (!deck_device_protocol_parse_heartbeat(
+    const uint64_t now = monotonic_ms();
+    uint64_t trusted_utc_ms = 0;
+    if (link->has_server_monotonic &&
+        now >= link->timing.last_server_heartbeat_ms &&
+        UINT64_MAX - link->server_utc_ms >=
+            now - link->timing.last_server_heartbeat_ms) {
+        trusted_utc_ms = link->server_utc_ms +
+                         (now - link->timing.last_server_heartbeat_ms);
+    }
+    const deck_companion_server_message_result_t message_result =
+        deck_companion_link_accept_server_message(
+            link->snapshots,
             link->frame.get(),
-            link->frame_size,
+            message_size,
+            trusted_utc_ms,
             link->server_monotonic_ms,
             link->has_server_monotonic,
             &heartbeat
-        )) {
-        secure_clear(link->frame.get(), link->frame_size + 1);
-        link->frame_size = 0;
-        return false;
+        );
+    if (message_result != DECK_COMPANION_SERVER_HEARTBEAT) {
+        secure_clear(link->frame.get(), message_size + 1);
+        deck_companion_link_frame_reset(&link->frame_assembler);
+        if (message_result ==
+            DECK_COMPANION_SERVER_AI_SNAPSHOT_STORAGE_DEGRADED) {
+            increment_error(link);
+            return true;
+        }
+        return message_result == DECK_COMPANION_SERVER_AI_SNAPSHOT;
     }
-    secure_clear(link->frame.get(), link->frame_size + 1);
-    link->frame_size = 0;
-    const uint64_t now = monotonic_ms();
+    secure_clear(link->frame.get(), message_size + 1);
+    deck_companion_link_frame_reset(&link->frame_assembler);
     const bool first_valid_heartbeat =
         link->timing.last_server_heartbeat_ms == 0 || !state_is_online(link);
     deck_companion_link_timing_server_heartbeat(
@@ -530,6 +553,18 @@ bool accept_data(deck_companion_link_t *link, const TransportEvent &event)
 void link_task(void *argument)
 {
     auto *link = static_cast<deck_companion_link_t *>(argument);
+    const EventBits_t startup = xEventGroupWaitBits(
+        link->lifecycle,
+        kStartBit | kAbortBit,
+        pdTRUE,
+        pdFALSE,
+        portMAX_DELAY
+    );
+    if ((startup & kAbortBit) != 0) {
+        xEventGroupSetBits(link->lifecycle, kStoppedBit);
+        vTaskDelete(nullptr);
+        return;
+    }
     link->next_profile_poll_ms = 0;
     while (!link->stop_requested.load(std::memory_order_acquire)) {
         const uint64_t now = monotonic_ms();
@@ -562,6 +597,9 @@ void link_task(void *argument)
         }
         if (link->queue_overflow.exchange(false, std::memory_order_acq_rel)) {
             schedule_retry(link, now, true);
+        }
+        if (deck_ai_snapshot_store_take_storage_failure(link->snapshots)) {
+            increment_error(link);
         }
 
         TransportEvent event{};
@@ -615,10 +653,16 @@ deck_companion_link_t *deck_companion_link_start(
     link->profiles = profiles;
     std::memcpy(link->firmware_version, firmware_version, version_size + 1);
     link->frame.reset(new (std::nothrow) char[kMaximumMessageBytes + 1]);
+    deck_companion_link_frame_init(
+        &link->frame_assembler,
+        link->frame.get(),
+        kMaximumMessageBytes
+    );
     link->events = xQueueCreate(4, sizeof(TransportEvent));
     link->lifecycle = xEventGroupCreate();
     link->snapshot.state = DECK_COMPANION_LINK_UNPAIRED;
-    if (link->frame == nullptr || link->events == nullptr || link->lifecycle == nullptr ||
+    if (link->frame == nullptr || link->events == nullptr ||
+        link->lifecycle == nullptr ||
         !deck_companion_device_identity(
             link->device_id,
             sizeof(link->device_id),
@@ -643,6 +687,32 @@ deck_companion_link_t *deck_companion_link_start(
         delete link;
         return nullptr;
     }
+
+    deck_ai_snapshot_store_options_t snapshot_options{};
+    const deck_ai_snapshot_store_options_t *snapshot_options_pointer = nullptr;
+    if (deck_ai_snapshot_store_nvs_options(&snapshot_options)) {
+        snapshot_options_pointer = &snapshot_options;
+    }
+    link->snapshots = deck_ai_snapshot_store_create(snapshot_options_pointer);
+    if (link->snapshots == nullptr) {
+        xEventGroupSetBits(link->lifecycle, kAbortBit);
+        const EventBits_t stopped = xEventGroupWaitBits(
+            link->lifecycle,
+            kStoppedBit,
+            pdFALSE,
+            pdTRUE,
+            pdMS_TO_TICKS(2'000)
+        );
+        if ((stopped & kStoppedBit) == 0) {
+            vTaskDelete(link->task);
+        }
+        vQueueDelete(link->events);
+        vEventGroupDelete(link->lifecycle);
+        secure_clear(link->device_identity, sizeof(link->device_identity));
+        delete link;
+        return nullptr;
+    }
+    xEventGroupSetBits(link->lifecycle, kStartBit);
     return link;
 }
 
@@ -659,10 +729,38 @@ bool deck_companion_link_snapshot(
     return true;
 }
 
-void deck_companion_link_stop(deck_companion_link_t *link)
+bool deck_companion_link_copy_ai_snapshot(
+    const deck_companion_link_t *link,
+    uint64_t now_utc_ms,
+    char *document,
+    size_t document_capacity,
+    size_t *document_size,
+    deck_ai_snapshot_store_snapshot_t *snapshot
+)
 {
     if (link == nullptr) {
-        return;
+        return false;
+    }
+    bool online = false;
+    {
+        const std::lock_guard<std::mutex> lock(link->mutex);
+        online = link->snapshot.state == DECK_COMPANION_LINK_ONLINE;
+    }
+    return deck_ai_snapshot_store_copy(
+        link->snapshots,
+        now_utc_ms,
+        online,
+        document,
+        document_capacity,
+        document_size,
+        snapshot
+    );
+}
+
+bool deck_companion_link_stop(deck_companion_link_t *link)
+{
+    if (link == nullptr) {
+        return true;
     }
     link->stop_requested.store(true, std::memory_order_release);
     TransportEvent wake{};
@@ -676,7 +774,10 @@ void deck_companion_link_stop(deck_companion_link_t *link)
         pdMS_TO_TICKS(8'000)
     );
     if ((stopped & kStoppedBit) == 0) {
-        return;
+        return false;
+    }
+    if (!deck_ai_snapshot_store_destroy(link->snapshots)) {
+        return false;
     }
     vQueueDelete(link->events);
     vEventGroupDelete(link->lifecycle);
@@ -685,4 +786,5 @@ void deck_companion_link_stop(deck_companion_link_t *link)
         secure_clear(link->frame.get(), kMaximumMessageBytes + 1);
     }
     delete link;
+    return true;
 }
