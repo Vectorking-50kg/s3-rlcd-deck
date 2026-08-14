@@ -1,0 +1,7 @@
+{
+  "type":"snapshot.ai","protocol_version":1,"schema_version":{"major":1,"minor":0},
+  "generated_at":"2026-08-13T12:34:56Z","timezone":null,"provider_order":["cursor"],
+  "providers":[{"schema_version":{"major":1,"minor":0},"provider_id":"cursor","display_name":"Cursor","status":"unavailable","source":"none","confidence":"unavailable","experimental":true,"updated_at":null,"stale_after_seconds":null,"balance":null,"windows":[],"tokens":null,"error":{"code":"unavailable","retryable":true}}],
+  "sessions":[{"schema_version":{"major":1,"minor":0},"session_id":"ses_unavailable","provider_id":"cursor","display_name":null,"state":"unavailable","source":"none","confidence":"unavailable","started_at":null,"last_activity_at":null,"duration_seconds":null,"turn_tokens":null,"context_used_basis_points":null}],
+  "next_refresh_seconds":60
+}

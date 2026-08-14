@@ -1,0 +1,26 @@
+{
+  "cases": [
+    {"file": "valid-minimal.json", "result": "accepted"},
+    {"file": "valid-full.json", "result": "accepted"},
+    {"file": "valid-enumerations.json", "result": "accepted"},
+    {"file": "valid-null.json", "result": "accepted"},
+    {"file": "valid-forward-minor.json", "result": "accepted"},
+    {"file": "invalid-missing-providers.json", "result": "malformed"},
+    {"file": "invalid-null-provider-id.json", "result": "malformed"},
+    {"file": "invalid-missing-provider-version.json", "result": "malformed"},
+    {"file": "invalid-major-version.json", "result": "unsupported_version"},
+    {"file": "invalid-session-state.json", "result": "malformed"},
+    {"file": "invalid-provider-source.json", "result": "malformed"},
+    {"file": "invalid-basis-points.json", "result": "malformed"},
+    {"file": "invalid-window-total.json", "result": "malformed"},
+    {"file": "invalid-time.json", "result": "malformed"},
+    {"file": "invalid-time-order.json", "result": "malformed"},
+    {"file": "invalid-provider-order.json", "result": "malformed"},
+    {"file": "invalid-unknown-field-v0.json", "result": "malformed"},
+    {"file": "invalid-forward-string.json", "result": "private_data"},
+    {"file": "invalid-privacy-prompt.json", "result": "private_data"},
+    {"file": "invalid-privacy-camel.json", "result": "private_data"},
+    {"file": "invalid-privacy-path.json", "result": "private_data"},
+    {"file": "invalid-oversized.json", "result": "malformed"}
+  ]
+}

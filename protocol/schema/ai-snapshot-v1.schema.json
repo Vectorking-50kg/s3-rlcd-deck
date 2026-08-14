@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://s3-rlcd-deck.local/schema/ai-snapshot-v1.schema.json",
+  "title": "S3 RLCD Deck normalized AI Snapshot v1",
+  "$ref": "#/$defs/snapshot",
+  "$defs": {
+    "schema_version": {
+      "type": "object",
+      "required": ["major", "minor"],
+      "properties": {
+        "major": {"const": 1},
+        "minor": {"type": "integer", "minimum": 0, "maximum": 65535}
+      },
+      "additionalProperties": false
+    },
+    "utc": {
+      "type": "string",
+      "minLength": 20,
+      "maxLength": 30,
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?Z$"
+    },
+    "nullable_utc": {"oneOf": [{"$ref": "#/$defs/utc"}, {"type": "null"}]},
+    "safe_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "nullable_safe_count": {"oneOf": [{"$ref": "#/$defs/safe_count"}, {"type": "null"}]},
+    "basis_points": {"type": "integer", "minimum": 0, "maximum": 10000},
+    "nullable_basis_points": {"oneOf": [{"$ref": "#/$defs/basis_points"}, {"type": "null"}]},
+    "forward_scalar": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991}
+      ]
+    },
+    "provider_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32,
+      "pattern": "^[a-z][a-z0-9_-]{0,31}$"
+    },
+    "money": {
+      "type": "object",
+      "required": ["amount_micros", "currency"],
+      "properties": {
+        "amount_micros": {"$ref": "#/$defs/safe_count"},
+        "currency": {"type": "string", "pattern": "^[A-Z]{3}$"}
+      },
+      "additionalProperties": {"$ref": "#/$defs/forward_scalar"}
+    },
+    "quota_window": {
+      "type": "object",
+      "required": ["name", "used_basis_points", "remaining_basis_points", "window_minutes", "resets_at"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "maxLength": 24, "pattern": "^[a-z][a-z0-9_-]{0,23}$"},
+        "used_basis_points": {"$ref": "#/$defs/nullable_basis_points"},
+        "remaining_basis_points": {"$ref": "#/$defs/nullable_basis_points"},
+        "window_minutes": {"oneOf": [{"type": "integer", "minimum": 1, "maximum": 525600}, {"type": "null"}]},
+        "resets_at": {"$ref": "#/$defs/nullable_utc"}
+      },
+      "additionalProperties": {"$ref": "#/$defs/forward_scalar"}
+    },
+    "token_usage": {
+      "type": "object",
+      "required": ["input", "cached_input", "output", "reasoning", "total"],
+      "properties": {
+        "input": {"$ref": "#/$defs/nullable_safe_count"},
+        "cached_input": {"$ref": "#/$defs/nullable_safe_count"},
+        "output": {"$ref": "#/$defs/nullable_safe_count"},
+        "reasoning": {"$ref": "#/$defs/nullable_safe_count"},
+        "total": {"$ref": "#/$defs/nullable_safe_count"}
+      },
+      "additionalProperties": {"$ref": "#/$defs/forward_scalar"}
+    },
+    "provider_error": {
+      "type": "object",
+      "required": ["code", "retryable"],
+      "properties": {
+        "code": {"enum": ["auth_stale", "permission_denied", "timeout", "process_exited", "schema_changed", "unavailable"]},
+        "retryable": {"type": "boolean"}
+      },
+      "additionalProperties": {"$ref": "#/$defs/forward_scalar"}
+    },
+    "provider": {
+      "type": "object",
+      "required": ["schema_version", "provider_id", "display_name", "status", "source", "confidence", "experimental", "updated_at", "stale_after_seconds", "balance", "windows", "tokens", "error"],
+      "properties": {
+        "schema_version": {"$ref": "#/$defs/schema_version"},
+        "provider_id": {"$ref": "#/$defs/provider_id"},
+        "display_name": {"type": "string", "minLength": 1, "maxLength": 48},
+        "status": {"enum": ["ok", "degraded", "unavailable"]},
+        "source": {"enum": ["codex_app_server", "cursor_local", "structured_http", "none"]},
+        "confidence": {"enum": ["verified", "inferred", "unavailable"]},
+        "experimental": {"type": "boolean"},
+        "updated_at": {"$ref": "#/$defs/nullable_utc"},
+        "stale_after_seconds": {"oneOf": [{"type": "integer", "minimum": 1, "maximum": 86400}, {"type": "null"}]},
+        "balance": {"oneOf": [{"$ref": "#/$defs/money"}, {"type": "null"}]},
+        "windows": {"type": "array", "maxItems": 4, "items": {"$ref": "#/$defs/quota_window"}},
+        "tokens": {"oneOf": [{"$ref": "#/$defs/token_usage"}, {"type": "null"}]},
+        "error": {"oneOf": [{"$ref": "#/$defs/provider_error"}, {"type": "null"}]}
+      },
+      "additionalProperties": {"$ref": "#/$defs/forward_scalar"}
+    },
+    "session": {
+      "type": "object",
+      "required": ["schema_version", "session_id", "provider_id", "display_name", "state", "source", "confidence", "started_at", "last_activity_at", "duration_seconds", "turn_tokens", "context_used_basis_points"],
+      "properties": {
+        "schema_version": {"$ref": "#/$defs/schema_version"},
+        "session_id": {"type": "string", "minLength": 8, "maxLength": 64, "pattern": "^[A-Za-z0-9_-]{8,64}$"},
+        "provider_id": {"$ref": "#/$defs/provider_id"},
+        "display_name": {"oneOf": [{"type": "string", "minLength": 1, "maxLength": 48}, {"type": "null"}]},
+        "state": {"enum": ["running", "waiting_approval", "waiting_input", "completed", "failed", "recent", "ended", "unknown", "unavailable"]},
+        "source": {"enum": ["codex_app_server_owned", "process_jsonl_observer", "none"]},
+        "confidence": {"enum": ["verified", "inferred", "unavailable"]},
+        "started_at": {"$ref": "#/$defs/nullable_utc"},
+        "last_activity_at": {"$ref": "#/$defs/nullable_utc"},
+        "duration_seconds": {"oneOf": [{"type": "integer", "minimum": 0, "maximum": 31536000}, {"type": "null"}]},
+        "turn_tokens": {"$ref": "#/$defs/nullable_safe_count"},
+        "context_used_basis_points": {"$ref": "#/$defs/nullable_basis_points"}
+      },
+      "additionalProperties": {"$ref": "#/$defs/forward_scalar"}
+    },
+    "snapshot": {
+      "type": "object",
+      "required": ["type", "protocol_version", "schema_version", "generated_at", "timezone", "provider_order", "providers", "sessions", "next_refresh_seconds"],
+      "properties": {
+        "type": {"const": "snapshot.ai"},
+        "protocol_version": {"const": 1},
+        "schema_version": {"$ref": "#/$defs/schema_version"},
+        "generated_at": {"$ref": "#/$defs/utc"},
+        "timezone": {"oneOf": [{"type": "string", "minLength": 1, "maxLength": 64}, {"type": "null"}]},
+        "provider_order": {"type": "array", "maxItems": 8, "uniqueItems": true, "items": {"$ref": "#/$defs/provider_id"}},
+        "providers": {"type": "array", "maxItems": 8, "items": {"$ref": "#/$defs/provider"}},
+        "sessions": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/session"}},
+        "next_refresh_seconds": {"type": "integer", "minimum": 1, "maximum": 3600}
+      },
+      "additionalProperties": {"$ref": "#/$defs/forward_scalar"}
+    }
+  }
+}
