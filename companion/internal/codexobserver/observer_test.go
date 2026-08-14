@@ -161,8 +161,16 @@ func TestObserverDoesNotInheritRunningWhenFileIsReplacedAtSamePath(t *testing.T)
 	if err := os.WriteFile(path, sessionLine("same-path"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	oldInfo, err := os.Stat(path)
+	oldFile, err := os.Open(path)
 	if err != nil {
+		t.Fatal(err)
+	}
+	oldInfo, err := oldFile.Stat()
+	if err != nil {
+		_ = oldFile.Close()
+		t.Fatal(err)
+	}
+	if err = oldFile.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if err = os.Rename(path, filepath.Join(directory, "old.jsonl")); err != nil {
@@ -171,8 +179,16 @@ func TestObserverDoesNotInheritRunningWhenFileIsReplacedAtSamePath(t *testing.T)
 	if err = os.WriteFile(path, sessionLine("same-path"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	newInfo, err := os.Stat(path)
+	newFile, err := os.Open(path)
 	if err != nil {
+		t.Fatal(err)
+	}
+	newInfo, err := newFile.Stat()
+	if err != nil {
+		_ = newFile.Close()
+		t.Fatal(err)
+	}
+	if err = newFile.Close(); err != nil {
 		t.Fatal(err)
 	}
 	started := observerNow.Add(-time.Hour)
