@@ -18,6 +18,9 @@ import urllib.error
 import urllib.request
 
 
+CREDENTIAL_CLEANUP_TIMEOUT_SECONDS = 30
+
+
 def reserve_loopback_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.bind(("127.0.0.1", 0))
@@ -91,7 +94,10 @@ def delete_smoke_credential(data_directory: str) -> None:
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            timeout=10,
+            # Windows Defender can make the one-time Add-Type compilation
+            # exceed ten seconds on a cold hosted runner. Keep cleanup bounded
+            # while leaving enough time for compilation plus vault I/O.
+            timeout=CREDENTIAL_CLEANUP_TIMEOUT_SECONDS,
         )
     elif sys.platform == "darwin":
         subprocess.run(
@@ -102,7 +108,7 @@ def delete_smoke_credential(data_directory: str) -> None:
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            timeout=10,
+            timeout=CREDENTIAL_CLEANUP_TIMEOUT_SECONDS,
         )
         probe = subprocess.run(
             [
@@ -112,7 +118,7 @@ def delete_smoke_credential(data_directory: str) -> None:
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            timeout=10,
+            timeout=CREDENTIAL_CLEANUP_TIMEOUT_SECONDS,
         )
         if probe.returncode == 0:
             raise RuntimeError("native smoke credential still exists after cleanup")

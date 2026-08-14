@@ -248,3 +248,7 @@ add_test(
     NAME hil_app_flash_contract
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_hil_app_flash.py
 )
+add_test(
+    NAME companion_native_smoke_contract
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_smoke_companion_artifact.py
+)
