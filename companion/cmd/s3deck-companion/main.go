@@ -22,6 +22,8 @@ import (
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/managementtoken"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
 	companionruntime "github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/runtime"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/secretstore"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/structuredprovider"
 )
 
 var (
@@ -133,6 +135,44 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "cannot configure pairing: %v\n", err)
 		return 2
 	}
+	providerSecrets, err := secretstore.Open()
+	if err != nil {
+		fmt.Fprintln(stderr, "cannot open the Provider secret store")
+		return 2
+	}
+	providerDefinitions, err := structuredprovider.OpenDefinitionStore(
+		filepath.Join(resolvedDataDirectory, "structured-providers.json"),
+	)
+	if err != nil {
+		fmt.Fprintln(stderr, "cannot open structured Provider configuration")
+		return 2
+	}
+	defer providerDefinitions.Close()
+	cleanupContext, cancelCleanup := context.WithTimeout(context.Background(), 5*time.Second)
+	cleanupErr := providerDefinitions.RetryCleanup(cleanupContext, providerSecrets)
+	cancelCleanup()
+	if cleanupErr != nil {
+		// References are non-secret, but even they do not belong in logs. The
+		// protected journal remains authoritative for the next startup retry.
+		fmt.Fprintln(stderr, "structured Provider secret cleanup remains pending")
+	}
+	storedDefinitions, err := providerDefinitions.Definitions(context.Background())
+	if err != nil {
+		fmt.Fprintln(stderr, "cannot load structured Provider configuration")
+		return 2
+	}
+	structuredCollectors := make([]companionruntime.StructuredCollector, 0, len(storedDefinitions))
+	for _, definition := range storedDefinitions {
+		collector, collectorErr := structuredprovider.New(structuredprovider.Config{
+			Definition: definition,
+			Secrets:    providerSecrets,
+		})
+		if collectorErr != nil {
+			fmt.Fprintln(stderr, "structured Provider configuration is invalid")
+			return 2
+		}
+		structuredCollectors = append(structuredCollectors, collector)
+	}
 	codexCollector, err := codexappserver.New(codexappserver.Config{
 		AdapterVersion: codexappserver.AdapterVersion,
 		ClientVersion:  version,
@@ -157,10 +197,11 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		cursorCollector = nil
 	}
 	config := companionruntime.Config{
-		Version:         version,
-		CodexCollector:  codexCollector,
-		CodexObserver:   codexObserver,
-		CursorCollector: cursorCollector,
+		Version:              version,
+		CodexCollector:       codexCollector,
+		CodexObserver:        codexObserver,
+		CursorCollector:      cursorCollector,
+		StructuredCollectors: structuredCollectors,
 		Management: companionruntime.ManagementConfig{
 			Address:       *managementAddress,
 			AllowLAN:      *allowLANManagement,

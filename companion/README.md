@@ -82,9 +82,11 @@ enumerated blobs and explicitly overwrites them before releasing the native resu
 Structured Provider headers use the `secretstore.Reference` domain type, and collectors resolve it
 through `Store.Get` for each request. Template and curl-import drafts contain empty header slots,
 not persistable aliases such as `api_key`. `CommitDefinition`/`CommitCurlImport` create the vault
-entries first, replace every slot with its generated reference, validate the final definition, and
-then call an atomic non-secret configuration commit. Validation/config failures compensate created
-entries; a failed compensation returns only the pending non-secret references for durable retry.
+entries first, replace every slot with its generated reference, and publish through the protected
+`structured-providers.json` owner. New references are journaled before publication; one atomic file
+replacement activates them and journals references retired by an update or delete. Successful vault
+deletes clear the journal, while failed cleanup remains durable and is retried at every Companion
+startup. The file contains definitions and opaque references only—never credential bytes.
 
 ## Run
 

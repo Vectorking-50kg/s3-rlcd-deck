@@ -142,15 +142,21 @@ func (vault *windowsVault) List(ctx context.Context) ([]string, error) {
 		return nil, mapped
 	}
 	defer credentialFree.Call(uintptr(unsafe.Pointer(credentials)))
+	if count == 0 {
+		return []string{}, nil
+	}
+	if credentials == nil {
+		return nil, ErrCorrupt
+	}
+	items := unsafe.Slice(credentials, int(count))
+	// CredEnumerateW has no metadata-only mode and materializes each matching
+	// blob in its native result block. Register the wipe before validating the
+	// count so even an oversized/corrupt native result is cleared before free.
+	defer overwriteCredentialBlobs(items)
 	if count > maximumMetadata {
 		return nil, ErrCorrupt
 	}
 	prefix := vault.service + ":"
-	items := unsafe.Slice(credentials, int(count))
-	// CredEnumerateW has no metadata-only mode and materializes each matching
-	// blob in its native result block. Never copy or return those bytes, and
-	// overwrite them before CredFree releases the block.
-	defer overwriteCredentialBlobs(items)
 	accounts := make([]string, 0, len(items))
 	for _, credential := range items {
 		if credential == nil || credential.Type != credentialTypeGeneric || credential.TargetName == nil {

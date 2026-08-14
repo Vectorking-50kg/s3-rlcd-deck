@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -17,6 +20,63 @@ type transactionSecretStore struct {
 	putCalls   int
 	putErrorAt int
 	deleteErr  error
+}
+
+type transactionDefinitionOwner struct {
+	definition  *Definition
+	pending     map[secretstore.Reference]struct{}
+	publishErr  error
+	completeErr error
+}
+
+func newTransactionDefinitionOwner() *transactionDefinitionOwner {
+	return &transactionDefinitionOwner{pending: make(map[secretstore.Reference]struct{})}
+}
+
+func (owner *transactionDefinitionOwner) StageCleanup(
+	_ context.Context,
+	references []secretstore.Reference,
+) error {
+	for _, reference := range references {
+		owner.pending[reference] = struct{}{}
+	}
+	return nil
+}
+
+func (owner *transactionDefinitionOwner) Publish(
+	_ context.Context,
+	current *Definition,
+	replacement Definition,
+	activated []secretstore.Reference,
+) (bool, error) {
+	if owner.publishErr != nil {
+		return false, owner.publishErr
+	}
+	if current != nil && (owner.definition == nil || !reflect.DeepEqual(*owner.definition, *current)) {
+		return false, ErrDefinitionCommit
+	}
+	for _, reference := range activated {
+		delete(owner.pending, reference)
+	}
+	for _, reference := range retiredReferences(current, replacement) {
+		owner.pending[reference] = struct{}{}
+	}
+	copy := cloneDefinition(replacement)
+	owner.definition = &copy
+	return true, nil
+}
+
+func (owner *transactionDefinitionOwner) CompleteCleanup(
+	_ context.Context,
+	references []secretstore.Reference,
+) error {
+	if owner.completeErr != nil {
+		return owner.completeErr
+	}
+	for _, reference := range references {
+		delete(owner.pending, reference)
+	}
+	return nil
 }
 
 func newTransactionSecretStore() *transactionSecretStore {
@@ -40,6 +100,23 @@ func (store *transactionSecretStore) Put(
 		return current, nil
 	}
 	reference := secretstore.Reference(fmt.Sprintf("secret-%032x", store.putCalls))
+	store.values[reference] = append([]byte(nil), value...)
+	return reference, nil
+}
+
+func (store *transactionSecretStore) PutNew(
+	ctx context.Context,
+	value []byte,
+	beforeCreate func(secretstore.Reference) error,
+) (secretstore.Reference, error) {
+	store.putCalls++
+	if store.putErrorAt == store.putCalls {
+		return "", secretstore.ErrPermission
+	}
+	reference := secretstore.Reference(fmt.Sprintf("secret-%032x", store.putCalls))
+	if err := beforeCreate(reference); err != nil {
+		return "", err
+	}
 	store.values[reference] = append([]byte(nil), value...)
 	return reference, nil
 }
@@ -73,15 +150,16 @@ func TestCommitDefinitionPersistsOnlyOpaqueReferenceAndResolvesForRequest(t *tes
 	var persisted []byte
 	committed, err := CommitDefinition(
 		context.Background(),
+		nil,
 		template.Definition,
 		[]SecretBinding{{HeaderIndex: 0, Value: []byte(canary)}},
 		secrets,
-		func(_ context.Context, definition Definition) error {
-			var marshalErr error
-			persisted, marshalErr = json.Marshal(definition)
-			return marshalErr
-		},
+		newTransactionDefinitionOwner(),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted, err = json.Marshal(committed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,10 +188,14 @@ func TestCommitDefinitionRollsBackConfigAndPartialSecretFailures(t *testing.T) {
 	secrets := newTransactionSecretStore()
 	_, err := CommitDefinition(
 		context.Background(),
+		nil,
 		template.Definition,
 		[]SecretBinding{{HeaderIndex: 0, Value: []byte(canary)}},
 		secrets,
-		func(context.Context, Definition) error { return errors.New(canary) },
+		&transactionDefinitionOwner{
+			pending:    make(map[secretstore.Reference]struct{}),
+			publishErr: errors.New(canary),
+		},
 	)
 	if !errors.Is(err, ErrDefinitionCommit) || strings.Contains(err.Error(), canary) ||
 		len(secrets.values) != 0 {
@@ -126,13 +208,14 @@ func TestCommitDefinitionRollsBackConfigAndPartialSecretFailures(t *testing.T) {
 	secrets.putErrorAt = 2
 	_, err = CommitDefinition(
 		context.Background(),
+		nil,
 		definition,
 		[]SecretBinding{
 			{HeaderIndex: 0, Value: []byte("first")},
 			{HeaderIndex: 1, Value: []byte("second")},
 		},
 		secrets,
-		func(context.Context, Definition) error { return nil },
+		newTransactionDefinitionOwner(),
 	)
 	if !errors.Is(err, secretstore.ErrPermission) || len(secrets.values) != 0 {
 		t.Fatalf("partial secret failure = %v, remaining secrets = %d", err, len(secrets.values))
@@ -152,14 +235,16 @@ func TestCommitCurlImportTransfersAndClearsSecretBuffers(t *testing.T) {
 	var persisted []byte
 	committed, err := CommitCurlImport(
 		context.Background(),
+		nil,
 		validDefinition(),
 		&imported,
 		secrets,
-		func(_ context.Context, definition Definition) error {
-			persisted, err = json.Marshal(definition)
-			return err
-		},
+		newTransactionDefinitionOwner(),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted, err = json.Marshal(committed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,10 +264,14 @@ func TestCommitDefinitionReportsCompensationFailureWithoutLeakingSecret(t *testi
 	secrets.deleteErr = errors.New(canary)
 	_, err := CommitDefinition(
 		context.Background(),
+		nil,
 		Templates()[0].Definition,
 		[]SecretBinding{{HeaderIndex: 0, Value: []byte(canary)}},
 		secrets,
-		func(context.Context, Definition) error { return errors.New(canary) },
+		&transactionDefinitionOwner{
+			pending:    make(map[secretstore.Reference]struct{}),
+			publishErr: errors.New(canary),
+		},
 	)
 	if !errors.Is(err, ErrSecretRollback) || strings.Contains(err.Error(), canary) {
 		t.Fatalf("compensation error = %v", err)
@@ -191,4 +280,129 @@ func TestCommitDefinitionReportsCompensationFailureWithoutLeakingSecret(t *testi
 	if !errors.As(err, &rollback) || len(rollback.PendingReferences()) != 1 {
 		t.Fatalf("compensation did not preserve cleanup metadata: %#v", err)
 	}
+}
+
+func TestDefinitionStoreUpdateRetiresOldSecretWithoutOrphan(t *testing.T) {
+	const firstCanary = "PRIVATE_PROVIDER_OLD_CANARY"
+	const secondCanary = "PRIVATE_PROVIDER_NEW_CANARY"
+	path := filepath.Join(t.TempDir(), "structured-providers.json")
+	owner, err := OpenDefinitionStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+	secrets := newTransactionSecretStore()
+	first, err := CommitDefinition(
+		context.Background(), nil, Templates()[0].Definition,
+		[]SecretBinding{{HeaderIndex: 0, Value: []byte(firstCanary)}}, secrets, owner,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldReference := first.Request.Headers[0].SecretReference
+	draft := cloneDefinition(first)
+	draft.Request.Headers[0].SecretReference = ""
+	updated, err := CommitDefinition(
+		context.Background(), &first, draft,
+		[]SecretBinding{{HeaderIndex: 0, Value: []byte(secondCanary)}}, secrets, owner,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := secrets.values[oldReference]; exists {
+		t.Fatal("retired secret was not deleted")
+	}
+	newReference := updated.Request.Headers[0].SecretReference
+	if string(secrets.values[newReference]) != secondCanary {
+		t.Fatal("replacement secret was not retained")
+	}
+	definitions, err := owner.Definitions(context.Background())
+	if err != nil || len(definitions) != 1 || !reflect.DeepEqual(definitions[0], updated) {
+		t.Fatalf("persisted definitions = %#v, %v", definitions, err)
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil || bytes.Contains(contents, []byte(firstCanary)) ||
+		bytes.Contains(contents, []byte(secondCanary)) {
+		t.Fatalf("definition file crossed secret boundary: %s, %v", contents, err)
+	}
+}
+
+func TestDefinitionStoreDeleteFailureIsDurableAndRetryable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "structured-providers.json")
+	owner, err := OpenDefinitionStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secrets := newTransactionSecretStore()
+	committed, err := CommitDefinition(
+		context.Background(), nil, Templates()[0].Definition,
+		[]SecretBinding{{HeaderIndex: 0, Value: []byte("delete-me")}}, secrets, owner,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secrets.deleteErr = secretstore.ErrLocked
+	err = owner.DeleteDefinition(context.Background(), committed.ID, secrets)
+	if !errors.Is(err, ErrSecretRollback) {
+		t.Fatalf("delete failure = %v", err)
+	}
+	if definitions, loadErr := owner.Definitions(context.Background()); loadErr != nil || len(definitions) != 0 {
+		t.Fatalf("definition remained after committed delete: %#v, %v", definitions, loadErr)
+	}
+	if err = owner.Close(); err != nil {
+		t.Fatal(err)
+	}
+	owner, err = OpenDefinitionStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+	secrets.deleteErr = nil
+	if err = owner.RetryCleanup(context.Background(), secrets); err != nil {
+		t.Fatal(err)
+	}
+	if len(secrets.values) != 0 || len(owner.state.PendingSecretDeletes) != 0 {
+		t.Fatalf("durable cleanup did not converge: values=%d pending=%d", len(secrets.values), len(owner.state.PendingSecretDeletes))
+	}
+}
+
+func TestDefinitionStorePersistsFailedCreateCompensation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "structured-providers.json")
+	owner, err := OpenDefinitionStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secrets := newTransactionSecretStore()
+	secrets.deleteErr = secretstore.ErrPermission
+	_, err = CommitDefinition(
+		context.Background(), nil, Templates()[0].Definition,
+		[]SecretBinding{{HeaderIndex: 0, Value: []byte("pending-cleanup")}}, secrets,
+		&failingPublishOwner{DefinitionStore: owner},
+	)
+	if !errors.Is(err, ErrSecretRollback) || len(owner.state.PendingSecretDeletes) != 1 {
+		t.Fatalf("failed compensation = %v, pending=%v", err, owner.state.PendingSecretDeletes)
+	}
+	if err = owner.Close(); err != nil {
+		t.Fatal(err)
+	}
+	owner, err = OpenDefinitionStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+	secrets.deleteErr = nil
+	if err = owner.RetryCleanup(context.Background(), secrets); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type failingPublishOwner struct{ *DefinitionStore }
+
+func (owner *failingPublishOwner) Publish(
+	context.Context,
+	*Definition,
+	Definition,
+	[]secretstore.Reference,
+) (bool, error) {
+	return false, ErrDefinitionCommit
 }

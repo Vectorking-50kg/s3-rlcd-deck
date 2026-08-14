@@ -24,11 +24,13 @@ native mutation does not turn that commit into a reported failure. Uninstall cle
 only this namespace's metadata and idempotently deletes each reference.
 
 Structured Provider definitions use the Secret Reference type directly. Template/curl drafts keep
-credential slots outside their JSON representation; the binding transaction creates credentials,
-substitutes their opaque references, validates the final definition, and invokes an atomic
-non-secret config commit. Failure compensates every new entry. If the platform also refuses that
-compensation, the fixed error carries only pending non-secret references so the configuration owner
-can journal and retry cleanup rather than silently orphaning them.
+credential slots outside their JSON representation. The protected definition owner journals each
+new opaque reference before publication. Its atomic file replacement then activates those
+references and journals the old references retired by an update or delete. Vault deletion is
+idempotent; successful cleanup removes journal entries and failed cleanup remains persisted for the
+next startup retry. Thus a failed config write retains the old definition and secret, while a
+committed replacement cannot silently orphan its retired reference. The unavoidable OS-vault/file
+boundary is ordered conservatively: reference creation, durable cleanup intent, then publication.
 
 Tests use an in-memory adapter to cover duplicate IDs, concurrent updates, lock/permission/cancel
 failures, rollback, redaction, and cleanup. Desktop CI additionally performs create, read, update,

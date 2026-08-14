@@ -119,6 +119,39 @@ func TestPutGetUpdateDeleteAndListMetadata(t *testing.T) {
 	}
 }
 
+func TestPutNewPersistsReferenceIntentBeforeVaultMutation(t *testing.T) {
+	vault := newMemoryVault()
+	store, err := newStore(vault, bytes.NewReader(bytes.Repeat([]byte{0x52}, 64)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var staged Reference
+	reference, err := store.PutNew(
+		context.Background(),
+		[]byte("transactional-secret"),
+		func(reference Reference) error {
+			if len(vault.values) != 0 {
+				t.Fatal("vault mutation happened before cleanup intent")
+			}
+			staged = reference
+			return nil
+		},
+	)
+	if err != nil || reference != staged || len(vault.values) != 1 {
+		t.Fatalf("PutNew() = %q staged=%q values=%d err=%v", reference, staged, len(vault.values), err)
+	}
+
+	vault = newMemoryVault()
+	store, _ = newStore(vault, bytes.NewReader(bytes.Repeat([]byte{0x53}, 64)))
+	if _, err = store.PutNew(
+		context.Background(),
+		[]byte("must-not-exist"),
+		func(Reference) error { return context.Canceled },
+	); !errors.Is(err, context.Canceled) || len(vault.values) != 0 {
+		t.Fatalf("PutNew(failed intent) error=%v values=%d", err, len(vault.values))
+	}
+}
+
 func TestFailedUpdateAndDeletePreserveOldSecret(t *testing.T) {
 	vault := newMemoryVault()
 	store, _ := newStore(vault, bytes.NewReader(bytes.Repeat([]byte{0x43}, 64)))

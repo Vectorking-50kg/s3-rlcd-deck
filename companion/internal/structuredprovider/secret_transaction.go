@@ -26,17 +26,34 @@ type SecretBinding struct {
 // credentials to a persistable Definition. The production *secretstore.Store
 // satisfies it directly.
 type DefinitionSecretStore interface {
-	Put(context.Context, secretstore.Reference, []byte) (secretstore.Reference, error)
+	PutNew(
+		context.Context,
+		[]byte,
+		func(secretstore.Reference) error,
+	) (secretstore.Reference, error)
 	Delete(context.Context, secretstore.Reference) error
 }
 
-// DefinitionCommit must atomically replace the non-secret configuration or
-// return an error without publishing a partial definition.
-type DefinitionCommit func(context.Context, Definition) error
+// DefinitionOwner is the durable configuration side of the cross-store
+// transaction. StageCleanup persists newly-created references before they can
+// be published. Publish atomically replaces the non-secret definition, removes
+// activated references from the cleanup journal, and journals references
+// retired by the replacement. CompleteCleanup removes idempotently-deleted
+// references from that journal.
+type DefinitionOwner interface {
+	StageCleanup(context.Context, []secretstore.Reference) error
+	Publish(
+		context.Context,
+		*Definition,
+		Definition,
+		[]secretstore.Reference,
+	) (bool, error)
+	CompleteCleanup(context.Context, []secretstore.Reference) error
+}
 
 // SecretRollbackError keeps failed-compensation references observable without
-// exposing credential bytes. A config owner must persist/retry these references
-// until Delete succeeds; they are never silently orphaned.
+// exposing credential bytes. Pending references have already been persisted by
+// DefinitionOwner and are retried on the next startup.
 type SecretRollbackError struct {
 	pending []secretstore.Reference
 }
@@ -62,30 +79,39 @@ func (failure *SecretRollbackError) PendingReferences() []secretstore.Reference 
 // requires no configuration rewrite.
 func CommitDefinition(
 	ctx context.Context,
+	current *Definition,
 	definition Definition,
 	bindings []SecretBinding,
 	secrets DefinitionSecretStore,
-	commit DefinitionCommit,
+	owner DefinitionOwner,
 ) (Definition, error) {
-	if ctx == nil || secrets == nil || commit == nil {
+	if ctx == nil || secrets == nil || owner == nil {
 		return Definition{}, ErrInvalidConfig
 	}
 	candidate := cloneDefinition(definition)
 	seen := make(map[int]struct{}, len(bindings))
 	created := make([]secretstore.Reference, 0, len(bindings))
-	rollback := func() []secretstore.Reference {
+	rollback := func(references []secretstore.Reference) []secretstore.Reference {
 		rollbackContext, cancel := context.WithTimeout(context.Background(), secretRollbackTimeout)
 		defer cancel()
 		var pending []secretstore.Reference
-		for index := len(created) - 1; index >= 0; index-- {
-			if err := secrets.Delete(rollbackContext, created[index]); err != nil {
-				pending = append(pending, created[index])
+		var deleted []secretstore.Reference
+		for index := len(references) - 1; index >= 0; index-- {
+			if err := secrets.Delete(rollbackContext, references[index]); err != nil {
+				pending = append(pending, references[index])
+			} else {
+				deleted = append(deleted, references[index])
 			}
+		}
+		if len(deleted) != 0 && owner.CompleteCleanup(rollbackContext, deleted) != nil {
+			// A stale journal entry is safe: retry cleanup is idempotent. Keep it
+			// observable so the caller does not mistake cleanup for complete.
+			pending = append(pending, deleted...)
 		}
 		return pending
 	}
 	fail := func(reason error) (Definition, error) {
-		if pending := rollback(); len(pending) != 0 {
+		if pending := rollback(created); len(pending) != 0 {
 			return Definition{}, &SecretRollbackError{pending: pending}
 		}
 		return Definition{}, reason
@@ -103,8 +129,18 @@ func CommitDefinition(
 		if header.SecretReference != "" {
 			return fail(ErrInvalidConfig)
 		}
-		reference, err := secrets.Put(ctx, "", binding.Value)
+		stageFailed := false
+		reference, err := secrets.PutNew(ctx, binding.Value, func(reference secretstore.Reference) error {
+			if stageErr := owner.StageCleanup(ctx, []secretstore.Reference{reference}); stageErr != nil {
+				stageFailed = !errors.Is(stageErr, secretstore.ErrDuplicate)
+				return stageErr
+			}
+			return nil
+		})
 		if err != nil {
+			if stageFailed {
+				return fail(ErrDefinitionCommit)
+			}
 			return fail(normalizeSecretStoreError(err))
 		}
 		created = append(created, reference)
@@ -115,8 +151,19 @@ func CommitDefinition(
 		return fail(err)
 	}
 	persistable := cloneDefinition(normalized.Definition)
-	if err = commit(ctx, cloneDefinition(persistable)); err != nil {
+	committed, publishErr := owner.Publish(ctx, current, cloneDefinition(persistable), created)
+	if !committed {
 		return fail(ErrDefinitionCommit)
+	}
+	if publishErr != nil {
+		// The protected-file adapter can report a post-commit durability or
+		// permission verification error. The new definition is authoritative;
+		// never roll back references that it now owns.
+		return persistable, ErrDefinitionCommit
+	}
+	retired := retiredReferences(current, persistable)
+	if pending := rollback(retired); len(pending) != 0 {
+		return persistable, &SecretRollbackError{pending: pending}
 	}
 	return persistable, nil
 }
@@ -126,10 +173,11 @@ func CommitDefinition(
 // commits a Definition whose Request contains only opaque references.
 func CommitCurlImport(
 	ctx context.Context,
+	current *Definition,
 	definition Definition,
 	imported *CurlImport,
 	secrets DefinitionSecretStore,
-	commit DefinitionCommit,
+	owner DefinitionOwner,
 ) (Definition, error) {
 	if imported == nil {
 		return Definition{}, ErrInvalidCurl
@@ -142,13 +190,42 @@ func CommitCurlImport(
 		}
 	}
 	definition.Request = imported.Request
-	committed, err := CommitDefinition(ctx, definition, bindings, secrets, commit)
+	committed, err := CommitDefinition(ctx, current, definition, bindings, secrets, owner)
 	for index := range imported.Secrets {
 		overwrite(imported.Secrets[index].Value)
 		imported.Secrets[index].Value = nil
 	}
 	imported.Secrets = nil
 	return committed, err
+}
+
+func retiredReferences(current *Definition, replacement Definition) []secretstore.Reference {
+	if current == nil {
+		return nil
+	}
+	retained := make(map[secretstore.Reference]struct{}, len(replacement.Request.Headers))
+	for _, header := range replacement.Request.Headers {
+		if header.SecretReference != "" {
+			retained[header.SecretReference] = struct{}{}
+		}
+	}
+	seen := make(map[secretstore.Reference]struct{}, len(current.Request.Headers))
+	var retired []secretstore.Reference
+	for _, header := range current.Request.Headers {
+		reference := header.SecretReference
+		if reference == "" {
+			continue
+		}
+		if _, keep := retained[reference]; keep {
+			continue
+		}
+		if _, duplicate := seen[reference]; duplicate {
+			continue
+		}
+		seen[reference] = struct{}{}
+		retired = append(retired, reference)
+	}
+	return retired
 }
 
 func cloneDefinition(source Definition) Definition {

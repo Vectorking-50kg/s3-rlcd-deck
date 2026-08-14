@@ -115,12 +115,49 @@ func (store *Store) Put(
 		}
 		return current, nil
 	}
+	return store.createLocked(ctx, owned, func(Reference) error { return nil })
+}
+
+// PutNew creates a new secret after beforeCreate has durably recorded the
+// generated reference. The callback runs before any vault mutation and must
+// not call back into Store. It lets a cross-store transaction establish a
+// cleanup intent before the secret can exist, closing the crash window between
+// OS-vault creation and configuration journaling.
+func (store *Store) PutNew(
+	ctx context.Context,
+	secret []byte,
+	beforeCreate func(Reference) error,
+) (Reference, error) {
+	if store == nil || ctx == nil || beforeCreate == nil || len(secret) == 0 ||
+		len(secret) > maximumSecretBytes {
+		return "", ErrInvalid
+	}
+	owned := append([]byte(nil), secret...)
+	defer overwrite(owned)
+	store.mutex.Lock()
+	defer store.mutex.Unlock()
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	return store.createLocked(ctx, owned, beforeCreate)
+}
+
+func (store *Store) createLocked(
+	ctx context.Context,
+	secret []byte,
+	beforeCreate func(Reference) error,
+) (Reference, error) {
 	for range maximumCreateAttempts {
 		reference, err := store.newReference()
 		if err != nil {
 			return "", ErrUnavailable
 		}
-		err = store.vault.Create(ctx, accountName(reference), owned)
+		if err = beforeCreate(reference); errors.Is(err, ErrDuplicate) {
+			continue
+		} else if err != nil {
+			return "", err
+		}
+		err = store.vault.Create(ctx, accountName(reference), secret)
 		if errors.Is(err, ErrDuplicate) {
 			continue
 		}
