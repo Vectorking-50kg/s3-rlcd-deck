@@ -167,6 +167,24 @@ func (store *DefinitionStore) Publish(
 				return ErrDefinitionCommit
 			}
 		}
+		currentReferences := make(map[secretstore.Reference]struct{})
+		if current != nil {
+			currentReferences = definitionReferences([]Definition{*current})
+		}
+		addedReferences := definitionReferences([]Definition{replacement})
+		for reference := range currentReferences {
+			delete(addedReferences, reference)
+		}
+		activatedReferences := make(map[secretstore.Reference]struct{}, len(activated))
+		for _, reference := range activated {
+			if _, duplicate := activatedReferences[reference]; duplicate {
+				return ErrDefinitionCommit
+			}
+			activatedReferences[reference] = struct{}{}
+		}
+		if !reflect.DeepEqual(addedReferences, activatedReferences) {
+			return ErrDefinitionCommit
+		}
 		pending := referenceSet(next.PendingSecretDeletes)
 		for _, reference := range activated {
 			if _, staged := pending[reference]; !staged {

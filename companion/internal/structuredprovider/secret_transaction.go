@@ -91,6 +91,7 @@ func CommitDefinition(
 	candidate := cloneDefinition(definition)
 	seen := make(map[int]struct{}, len(bindings))
 	created := make([]secretstore.Reference, 0, len(bindings))
+	staged := make([]secretstore.Reference, 0, len(bindings))
 	rollback := func(references []secretstore.Reference) []secretstore.Reference {
 		rollbackContext, cancel := context.WithTimeout(context.Background(), secretRollbackTimeout)
 		defer cancel()
@@ -111,7 +112,7 @@ func CommitDefinition(
 		return pending
 	}
 	fail := func(reason error) (Definition, error) {
-		if pending := rollback(created); len(pending) != 0 {
+		if pending := rollback(staged); len(pending) != 0 {
 			return Definition{}, &SecretRollbackError{pending: pending}
 		}
 		return Definition{}, reason
@@ -135,6 +136,7 @@ func CommitDefinition(
 				stageFailed = !errors.Is(stageErr, secretstore.ErrDuplicate)
 				return stageErr
 			}
+			staged = append(staged, reference)
 			return nil
 		})
 		if err != nil {
@@ -162,10 +164,28 @@ func CommitDefinition(
 		return persistable, ErrDefinitionCommit
 	}
 	retired := retiredReferences(current, persistable)
-	if pending := rollback(retired); len(pending) != 0 {
+	cleanup := append(retired, unactivatedReferences(staged, created)...)
+	if pending := rollback(cleanup); len(pending) != 0 {
 		return persistable, &SecretRollbackError{pending: pending}
 	}
 	return persistable, nil
+}
+
+func unactivatedReferences(
+	staged []secretstore.Reference,
+	activated []secretstore.Reference,
+) []secretstore.Reference {
+	active := make(map[secretstore.Reference]struct{}, len(activated))
+	for _, reference := range activated {
+		active[reference] = struct{}{}
+	}
+	var pending []secretstore.Reference
+	for _, reference := range staged {
+		if _, used := active[reference]; !used {
+			pending = append(pending, reference)
+		}
+	}
+	return pending
 }
 
 // CommitCurlImport transfers every parsed header credential into the Secret

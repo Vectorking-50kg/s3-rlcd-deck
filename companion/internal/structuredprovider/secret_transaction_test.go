@@ -16,10 +16,11 @@ import (
 )
 
 type transactionSecretStore struct {
-	values     map[secretstore.Reference][]byte
-	putCalls   int
-	putErrorAt int
-	deleteErr  error
+	values               map[secretstore.Reference][]byte
+	putCalls             int
+	putErrorAt           int
+	putErrorAfterStageAt int
+	deleteErr            error
 }
 
 type transactionDefinitionOwner struct {
@@ -116,6 +117,9 @@ func (store *transactionSecretStore) PutNew(
 	reference := secretstore.Reference(fmt.Sprintf("secret-%032x", store.putCalls))
 	if err := beforeCreate(reference); err != nil {
 		return "", err
+	}
+	if store.putErrorAfterStageAt == store.putCalls {
+		return "", secretstore.ErrPermission
 	}
 	store.values[reference] = append([]byte(nil), value...)
 	return reference, nil
@@ -393,6 +397,58 @@ func TestDefinitionStorePersistsFailedCreateCompensation(t *testing.T) {
 	secrets.deleteErr = nil
 	if err = owner.RetryCleanup(context.Background(), secrets); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestFailedVaultCreateClearsDurableIntent(t *testing.T) {
+	owner, err := OpenDefinitionStore(filepath.Join(t.TempDir(), "structured-providers.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+	secrets := newTransactionSecretStore()
+	secrets.putErrorAfterStageAt = 1
+	_, err = CommitDefinition(
+		context.Background(), nil, Templates()[0].Definition,
+		[]SecretBinding{{HeaderIndex: 0, Value: []byte("never-created")}}, secrets, owner,
+	)
+	if !errors.Is(err, secretstore.ErrPermission) || len(owner.state.PendingSecretDeletes) != 0 ||
+		len(secrets.values) != 0 {
+		t.Fatalf("failed create error=%v pending=%v values=%d", err, owner.state.PendingSecretDeletes, len(secrets.values))
+	}
+}
+
+func TestDefinitionStoreRejectsUnstagedOrUnusedActivatedReferences(t *testing.T) {
+	owner, err := OpenDefinitionStore(filepath.Join(t.TempDir(), "structured-providers.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+	unstaged := secretstore.Reference("secret-11111111111111111111111111111111")
+	draft := Templates()[0].Definition
+	draft.Request.Headers[0].SecretReference = unstaged
+	if _, err = CommitDefinition(
+		context.Background(), nil, draft, nil, newTransactionSecretStore(), owner,
+	); !errors.Is(err, ErrDefinitionCommit) {
+		t.Fatalf("unstaged definition commit = %v", err)
+	}
+
+	normalized, err := normalizeConfig(Config{Definition: validDefinition()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unused := secretstore.Reference("secret-22222222222222222222222222222222")
+	if err = owner.StageCleanup(context.Background(), []secretstore.Reference{unused}); err != nil {
+		t.Fatal(err)
+	}
+	if committed, publishErr := owner.Publish(
+		context.Background(), nil, normalized.Definition, []secretstore.Reference{unused},
+	); committed || !errors.Is(publishErr, ErrDefinitionCommit) {
+		t.Fatalf("unused activation committed=%v error=%v", committed, publishErr)
+	}
+	definitions, err := owner.Definitions(context.Background())
+	if err != nil || len(definitions) != 0 {
+		t.Fatalf("bypassed definitions = %#v, %v", definitions, err)
 	}
 }
 
