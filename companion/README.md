@@ -68,6 +68,16 @@ and a failure degrades only its own last valid Provider page.
 
 Provider credentials and raw private content must never be sent to a Deck.
 
+Provider credentials are owned by `internal/secretstore`. Its public seam accepts only an opaque
+Secret Reference for put/get/delete/list-metadata operations. A new put generates a random
+reference; an update replaces the value at the same reference in one platform-vault operation, so
+a failed update preserves the previous value and cannot orphan a replacement reference. Delete is
+idempotent, and list-metadata never reads secret bytes. macOS uses Security.framework Keychain
+items and Windows uses Credential Manager entries in a fixed Companion Provider namespace. The
+namespace and generated-reference grammar prevent this module from discovering or modifying
+Codex/Cursor-owned authentication. Authentication UI is disabled for background access: locked,
+denied, and canceled operations return fixed errors without including credential bytes.
+
 ## Run
 
 Go 1.26.x is the development baseline.

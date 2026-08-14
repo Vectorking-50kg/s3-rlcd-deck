@@ -534,7 +534,7 @@ companion/
 │   ├── sessions/          # App Server + passive observer
 │   ├── normalize/         # Provider / session DTO
 │   ├── history/           # SQLite, retention, CSV
-│   ├── secrets/           # Keychain / Credential Manager
+│   ├── secretstore/       # opaque refs → Keychain / Credential Manager
 │   ├── backup/            # age export/import
 │   ├── devices/           # pairing, WSS, profiles
 │   ├── serialhub/         # 8 MiB ring, browser fan-out

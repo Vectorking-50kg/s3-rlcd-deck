@@ -21,6 +21,12 @@ A user-configured Provider whose balance or quota comes from one fixed GET/POST 
 explicit field mapping. It is data configuration, never executable code.
 _Avoid_: Script Provider, curl Provider, plugin
 
+**Secret Reference**:
+A non-secret, opaque identifier that maps one Companion-owned Provider credential to the current
+user's platform vault. Configuration may persist the identifier but never the credential value or
+a platform storage path.
+_Avoid_: API Key ID, Keychain path, credential filename
+
 **AI Snapshot**:
 A timestamped, display-safe view of normalized Provider data sent by a Companion to a Deck. It excludes upstream credentials and raw private content.
 _Avoid_: Raw snapshot, provider response

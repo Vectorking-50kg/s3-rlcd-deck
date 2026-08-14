@@ -4,6 +4,7 @@ go 1.26.0
 
 require (
 	github.com/coder/websocket v1.8.15
+	github.com/go-webgpu/goffi v0.6.3
 	github.com/gogpu/systray v0.2.9-0.20260812082930-a3901e26a164
 	golang.org/x/sys v0.47.0
 	modernc.org/sqlite v1.56.0
@@ -11,7 +12,6 @@ require (
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/go-webgpu/goffi v0.6.3 // indirect
 	github.com/godbus/dbus/v5 v5.2.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
