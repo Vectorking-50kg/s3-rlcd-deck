@@ -634,6 +634,9 @@ func validateObjectFields(object map[string]json.RawMessage, minor uint16, known
 		if minor == SchemaMinor {
 			return ErrMalformedSnapshot
 		}
+		if !safeIdentifier(name, 32) {
+			return ErrMalformedSnapshot
+		}
 		if !safeForwardScalar(value) {
 			return ErrPrivateData
 		}

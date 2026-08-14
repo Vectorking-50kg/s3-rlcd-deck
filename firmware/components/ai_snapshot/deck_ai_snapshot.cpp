@@ -462,46 +462,82 @@ public:
     bool safe_text(size_t index, size_t maximum) const
     {
         const Node &value = nodes_[index];
-        if (value.type != NodeType::string || value.end == value.start ||
-            value.end - value.start > maximum * 4U) {
+        if (value.type != NodeType::string || value.end == value.start) {
             return false;
         }
-        for (size_t cursor = value.start; cursor < value.end; ++cursor) {
-            if (text_[cursor] != '\\') {
+        size_t decoded_bytes = 0;
+        for (size_t cursor = value.start; cursor < value.end;) {
+            const uint8_t byte = static_cast<uint8_t>(text_[cursor++]);
+            if (byte != '\\') {
+                ++decoded_bytes;
                 continue;
             }
-            if (++cursor >= value.end) {
+            if (cursor >= value.end) {
                 return false;
             }
-            const char escaped = text_[cursor];
+            const char escaped = text_[cursor++];
             if (escaped == 'b' || escaped == 'f' || escaped == 'n' ||
                 escaped == 'r' || escaped == 't') {
                 return false;
             }
-            if (escaped == 'u') {
-                if (cursor + 4U >= value.end) {
+            if (escaped != 'u') {
+                ++decoded_bytes;
+                continue;
+            }
+            if (cursor + 4U > value.end) {
+                return false;
+            }
+            unsigned codepoint = 0;
+            for (unsigned digit = 0; digit < 4U; ++digit) {
+                const char character = text_[cursor++];
+                codepoint <<= 4U;
+                if (character >= '0' && character <= '9') {
+                    codepoint |= static_cast<unsigned>(character - '0');
+                } else if (character >= 'a' && character <= 'f') {
+                    codepoint |= static_cast<unsigned>(character - 'a' + 10);
+                } else if (character >= 'A' && character <= 'F') {
+                    codepoint |= static_cast<unsigned>(character - 'A' + 10);
+                } else {
                     return false;
                 }
-                unsigned codepoint = 0;
+            }
+            if (codepoint >= 0xd800U && codepoint <= 0xdbffU) {
+                if (cursor + 6U > value.end || text_[cursor] != '\\' ||
+                    text_[cursor + 1U] != 'u') {
+                    return false;
+                }
+                cursor += 2U;
+                unsigned low = 0;
                 for (unsigned digit = 0; digit < 4U; ++digit) {
-                    const char character = text_[++cursor];
-                    codepoint <<= 4U;
+                    const char character = text_[cursor++];
+                    low <<= 4U;
                     if (character >= '0' && character <= '9') {
-                        codepoint |= static_cast<unsigned>(character - '0');
+                        low |= static_cast<unsigned>(character - '0');
                     } else if (character >= 'a' && character <= 'f') {
-                        codepoint |= static_cast<unsigned>(character - 'a' + 10);
+                        low |= static_cast<unsigned>(character - 'a' + 10);
                     } else if (character >= 'A' && character <= 'F') {
-                        codepoint |= static_cast<unsigned>(character - 'A' + 10);
+                        low |= static_cast<unsigned>(character - 'A' + 10);
                     } else {
                         return false;
                     }
                 }
-                if (codepoint < 0x20U || codepoint == 0x7fU) {
+                if (low < 0xdc00U || low > 0xdfffU) {
                     return false;
                 }
+                decoded_bytes += 4U;
+            } else if (codepoint >= 0xdc00U && codepoint <= 0xdfffU) {
+                return false;
+            } else if (codepoint < 0x20U || codepoint == 0x7fU) {
+                return false;
+            } else if (codepoint <= 0x7fU) {
+                decoded_bytes += 1U;
+            } else if (codepoint <= 0x7ffU) {
+                decoded_bytes += 2U;
+            } else {
+                decoded_bytes += 3U;
             }
         }
-        return true;
+        return decoded_bytes > 0U && decoded_bytes <= maximum;
     }
 
     const char *text() const { return text_; }
@@ -859,6 +895,9 @@ deck_ai_snapshot_result_t object_fields(
             continue;
         }
         if (minor == DECK_AI_SNAPSHOT_SCHEMA_MINOR) {
+            return DECK_AI_SNAPSHOT_MALFORMED;
+        }
+        if (!safe_identifier(document, key, 32)) {
             return DECK_AI_SNAPSHOT_MALFORMED;
         }
         if (!safe_forward_scalar(document, document.node(key).first_child)) {
