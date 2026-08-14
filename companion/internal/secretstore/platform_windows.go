@@ -185,7 +185,10 @@ func acquireWindowsMutationLock(ctx context.Context) (*windowsMutationLock, erro
 	}
 	handle, err := windows.CreateMutex(nil, false, name)
 	runtime.KeepAlive(name)
-	if err != nil {
+	// x/sys/windows intentionally returns ERROR_ALREADY_EXISTS together with
+	// the valid handle for CreateMutexW. That is the normal contended path, not
+	// a creation failure; the caller must wait on and later close that handle.
+	if err != nil && !errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
 		return nil, windowsVaultError(err)
 	}
 	runtime.LockOSThread()
