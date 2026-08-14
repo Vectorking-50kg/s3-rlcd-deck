@@ -96,12 +96,12 @@ type SecretResolver interface {
 type Publisher func(context.Context, aisnapshot.Provider) error
 
 type Diagnostic struct {
-	ProviderID       string
-	HTTPStatus       int
-	LatencyMillis    int64
-	AdapterVersion   int
-	ResponseAccepted bool
-	ErrorCode        string
+	ProviderID       string `json:"provider_id"`
+	HTTPStatus       int    `json:"http_status"`
+	LatencyMillis    int64  `json:"latency_millis"`
+	AdapterVersion   int    `json:"adapter_version"`
+	ResponseAccepted bool   `json:"response_accepted"`
+	ErrorCode        string `json:"error_code,omitempty"`
 }
 
 type DiagnosticSink func(Diagnostic)
@@ -109,9 +109,9 @@ type DiagnosticSink func(Diagnostic)
 // Preview contains normalized, display-safe state only. It never contains raw
 // headers, credentials, URLs, response bodies, or upstream account fields.
 type Preview struct {
-	Provider   aisnapshot.Provider
-	Diagnostic Diagnostic
-	Warning    string
+	Provider   aisnapshot.Provider `json:"provider"`
+	Diagnostic Diagnostic          `json:"diagnostic"`
+	Warning    string              `json:"warning,omitempty"`
 }
 
 type Config struct {

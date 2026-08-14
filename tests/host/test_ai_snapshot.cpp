@@ -204,6 +204,32 @@ void projects_only_bounded_codex_display_fields()
     assert(projection.featured_session.context_used_basis_points == 4'100U);
 }
 
+void projects_all_provider_pages_in_configured_order()
+{
+    const std::string document = read_file(
+        std::string(DECK_REPOSITORY_ROOT) +
+        "/protocol/fixtures/ai-snapshot-v1/valid-multi-provider.json"
+    );
+    deck_ai_snapshot_pages_projection_t projection{};
+    assert(deck_ai_snapshot_project_pages(document.data(), document.size(), &projection));
+    assert(projection.has_timezone);
+    assert(std::strcmp(projection.timezone, "Asia/Shanghai") == 0);
+    assert(projection.provider_count == 3U);
+    assert(std::strcmp(projection.providers[0].provider_id, "codex") == 0);
+    assert(std::strcmp(projection.providers[1].provider_id, "cursor") == 0);
+    assert(projection.providers[1].experimental);
+    assert(projection.providers[1].status == DECK_AI_SNAPSHOT_PROVIDER_DEGRADED);
+    assert(projection.providers[1].has_balance);
+    assert(projection.providers[1].balance_amount_micros == 18'420'000ULL);
+    assert(std::strcmp(projection.providers[1].balance_currency, "USD") == 0);
+    assert(projection.providers[1].window_count == 1U);
+    assert(projection.providers[1].has_error);
+    assert(std::strcmp(projection.providers[1].error_code, "schema_changed") == 0);
+    assert(std::strcmp(projection.providers[2].provider_id, "deepseek") == 0);
+    assert(projection.providers[2].has_total_tokens);
+    assert(projection.providers[2].total_tokens == 42'000ULL);
+}
+
 void projection_decodes_unicode_and_prioritizes_actionable_sessions()
 {
     const std::string root = DECK_REPOSITORY_ROOT;
@@ -245,6 +271,7 @@ int main()
     shared_fixtures_match_the_firmware_contract();
     retained_snapshot_survives_an_unsupported_major();
     projects_only_bounded_codex_display_fields();
+    projects_all_provider_pages_in_configured_order();
     projection_decodes_unicode_and_prioritizes_actionable_sessions();
     projection_fails_closed_without_mutating_output();
     return 0;

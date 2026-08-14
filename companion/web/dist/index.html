@@ -1,19 +1,133 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark light">
     <title>S3 RLCD Deck</title>
-    <link rel="stylesheet" href="/app.css">
+    <link rel="stylesheet" href="/app.css?v=m3">
   </head>
   <body>
-    <main>
-      <p class="eyebrow">S3 RLCD Deck</p>
-      <h1>Companion</h1>
-      <p id="runtime-status" role="status">Starting…</p>
-      <p class="boundary">Provider credentials remain on this computer.</p>
-      <p><a href="/third-party-licenses.txt">Third-party licenses</a></p>
-    </main>
-    <script src="/app.js" defer></script>
+    <section id="login" class="login-shell" aria-labelledby="login-title">
+      <form id="login-form" class="login-card">
+        <p class="kicker">S3 RLCD DECK / LOCAL COMPANION</p>
+        <h1 id="login-title">连接本地控制台</h1>
+        <p class="muted">管理 Token 只发送到本机 Companion，不会保存到页面。</p>
+        <label for="management-token">Management Token</label>
+        <input id="management-token" name="token" type="password" autocomplete="current-password" required>
+        <button class="primary" type="submit">进入控制台</button>
+        <p id="login-message" class="message" role="status"></p>
+      </form>
+    </section>
+
+    <div id="application" class="app-shell" hidden>
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">S3</span>
+          <div><strong>RLCD Deck</strong><small>Companion</small></div>
+        </div>
+        <nav aria-label="主导航">
+          <button class="nav-item active" data-page="overview" type="button">概览</button>
+          <button class="nav-item" data-page="providers" type="button">AI Providers</button>
+          <button class="nav-item" data-page="history" type="button">历史记录</button>
+          <button class="nav-item" data-page="backups" type="button">备份与恢复</button>
+        </nav>
+        <div class="sidebar-foot">
+          <span id="connection-dot" class="status-dot" aria-hidden="true"></span>
+          <span id="runtime-version">Companion</span>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="kicker">DEVICE OPERATIONS</p>
+            <h1 id="page-title">概览</h1>
+          </div>
+          <div class="top-actions">
+            <span id="exposure-badge" class="badge">LOOPBACK</span>
+            <button id="logout" class="ghost" type="button">退出</button>
+          </div>
+        </header>
+
+        <p id="global-message" class="message global-message" role="status"></p>
+
+        <section id="page-overview" class="page active" aria-labelledby="page-title">
+          <div class="metric-grid">
+            <article class="metric"><span>Companion</span><strong id="runtime-state">—</strong><small>本地服务状态</small></article>
+            <article class="metric"><span>Deck</span><strong id="deck-count">—</strong><small>已连接设备</small></article>
+            <article class="metric"><span>Providers</span><strong id="provider-count">—</strong><small>已配置数据源</small></article>
+            <article class="metric"><span>History</span><strong id="history-state">—</strong><small>本地历史记录</small></article>
+          </div>
+          <article class="panel boundary-panel">
+            <div>
+              <p class="kicker">SECURITY BOUNDARY</p>
+              <h2>凭据留在这台电脑</h2>
+              <p class="muted">API Key 存入系统凭据保险库。Deck 只接收归一化的余额、额度、Token 和状态快照。</p>
+            </div>
+            <span class="boundary-code">VAULT → COMPANION → SNAPSHOT → DECK</span>
+          </article>
+        </section>
+
+        <section id="page-providers" class="page" aria-labelledby="page-title">
+          <div class="section-head">
+            <div><h2>Provider 页面</h2><p class="muted">顺序会同步为 Deck 上 KEY 短按的循环顺序。</p></div>
+            <button id="new-provider" class="primary" type="button">新增 Provider</button>
+          </div>
+          <div id="provider-list" class="provider-list" aria-live="polite"></div>
+          <article id="provider-editor" class="panel editor" hidden>
+            <div class="section-head">
+              <div><p class="kicker">STRUCTURED HTTP</p><h2 id="editor-title">新增 Provider</h2></div>
+              <button id="close-editor" class="ghost" type="button">关闭</button>
+            </div>
+            <div id="template-list" class="template-list" aria-label="Provider 模板"></div>
+            <form id="provider-form">
+              <div class="form-grid">
+                <label>Provider ID<input id="provider-id" required pattern="[a-z0-9][a-z0-9_-]{0,31}"></label>
+                <label>显示名称<input id="provider-name" required maxlength="48"></label>
+                <label>请求方法<select id="provider-method"><option>GET</option><option>POST</option></select></label>
+                <label>刷新周期（分钟）<select id="provider-refresh"><option>1</option><option selected>5</option><option>15</option><option>30</option><option>60</option></select></label>
+                <label class="wide">Endpoint URL（不允许 query 中携带密钥）<input id="provider-url" type="url" required></label>
+                <fieldset class="wide credential-editor">
+                  <legend>凭据 Headers</legend>
+                  <p class="muted">每个值独立写入系统保险库；编辑时留空可保留对应凭据。</p>
+                  <div id="provider-headers" class="header-list"></div>
+                  <button id="add-provider-header" class="ghost" type="button">添加 Header</button>
+                </fieldset>
+                <label>Balance JSONPath<input id="map-balance" placeholder="$.data.balance"></label>
+                <label>Currency JSONPath<input id="map-currency" placeholder="$.data.currency"></label>
+                <label>Used JSONPath<input id="map-used" placeholder="$.usage.used"></label>
+                <label>Total JSONPath<input id="map-total" placeholder="$.usage.total"></label>
+                <label>Reset JSONPath<input id="map-reset" placeholder="$.usage.reset_at"></label>
+                <label>Reset 格式<select id="map-reset-format"><option value="">未配置</option><option value="rfc3339">RFC 3339</option><option value="unix_seconds">Unix 秒</option><option value="unix_milliseconds">Unix 毫秒</option></select></label>
+                <label>窗口名称<input id="map-window" placeholder="account"></label>
+                <label>固定货币<input id="map-fixed-currency" maxlength="3" placeholder="USD"></label>
+                <label>余额除数<input id="map-divisor" type="number" min="1" value="1"></label>
+                <label class="wide">POST JSON Body<textarea id="provider-body" rows="4" spellcheck="false" placeholder='{"query":"usage"}'></textarea></label>
+                <label class="check"><input id="provider-experimental" type="checkbox"> 在 Deck 上标记为 EXPERIMENTAL</label>
+              </div>
+              <div class="form-actions"><button id="save-provider" class="primary" type="submit">保存 Provider</button></div>
+            </form>
+          </article>
+        </section>
+
+        <section id="page-history" class="page" aria-labelledby="page-title">
+          <div class="section-head"><div><h2>Provider 历史</h2><p class="muted">仅保存归一化数值，不保存上游响应或凭据。</p></div><button id="refresh-history" class="ghost" type="button">刷新</button></div>
+          <article class="panel toolbar"><label class="check"><input id="history-enabled" type="checkbox"> 启用本地历史</label><button id="save-history" class="ghost" type="button">保存设置</button><a class="button-link" href="/api/v1/history/export.csv" download>导出 CSV</a><button id="clear-history" class="danger" type="button">清空历史</button></article>
+          <div class="table-wrap"><table><thead><tr><th>时间</th><th>Provider</th><th>状态</th><th>余额</th><th>Token</th></tr></thead><tbody id="history-table"></tbody></table></div>
+        </section>
+
+        <section id="page-backups" class="page" aria-labelledby="page-title">
+          <div class="section-head"><div><h2>加密备份</h2><p class="muted">归档采用口令加密；口令不会持久化。</p></div></div>
+          <div class="backup-grid">
+            <article class="panel"><h3>导出</h3><label>备份口令<input id="export-passphrase" type="password" autocomplete="new-password"></label><button id="export-backup" class="primary" type="button">下载加密归档</button></article>
+            <article class="panel"><h3>恢复</h3><label>加密归档<input id="import-file" type="file" accept=".age,application/vnd.age"></label><label>备份口令<input id="import-passphrase" type="password" autocomplete="new-password"></label><label>导入模式<select id="backup-mode"><option value="merge" selected>合并（逐项决定冲突）</option><option value="providers_only">仅 Provider</option><option value="replace">完整替换</option></select></label><button id="preview-backup" class="ghost" type="button">预览恢复</button><div id="backup-conflicts" class="conflict-list" aria-live="polite"></div><button id="apply-backup" class="primary" type="button" disabled>确认导入</button><pre id="backup-preview">等待预览</pre></article>
+          </div>
+        </section>
+
+        <footer><span>Local-first control plane</span><a href="/third-party-licenses.txt">第三方许可</a></footer>
+      </main>
+    </div>
+    <script src="/app.js?v=m3" defer></script>
   </body>
 </html>

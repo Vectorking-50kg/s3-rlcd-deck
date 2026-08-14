@@ -39,6 +39,7 @@ type Config struct {
 	CodexObserver        CodexObserver
 	CursorCollector      CursorCollector
 	StructuredCollectors []StructuredCollector
+	StructuredProviders  *structuredprovider.Service
 	History              *history.Store
 	Backup               BackupService
 	Configuration        ConfigurationOwner
@@ -185,6 +186,9 @@ func normalizeConfig(config Config) (Config, error) {
 	config.Management.Limits = normalizeManagementLimits(config.Management.Limits)
 	if len(config.StructuredCollectors) > 6 {
 		return Config{}, errors.New("at most six structured Provider collectors are supported")
+	}
+	if config.StructuredProviders != nil && len(config.StructuredCollectors) != 0 {
+		return Config{}, errors.New("dynamic and fixed structured Provider collectors are mutually exclusive")
 	}
 	structuredIDs := make(map[string]struct{}, len(config.StructuredCollectors))
 	for _, collector := range config.StructuredCollectors {

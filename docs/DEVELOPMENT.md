@@ -737,6 +737,12 @@ Companion 验证 Token、证书连接、device ID 和协议版本后返回配置
 
 SPA 静态资源构建后嵌入 Go 二进制，不引用公网字体、脚本或 CDN。
 
+AI Providers 页面通过受认证的 `/api/v1/providers`、`/api/v1/providers/order` 与
+`/api/v1/providers/{id}/test` 管理模板和自定义 Structured HTTP Provider。写操作必须满足
+精确 Origin、CSRF 与敏感请求限流；浏览器只得到 `secret_configured`，不能得到 Secret
+Reference。配置先完成 Vault/受保护文件事务，再由单一动态 supervisor 协调 collector；
+每次状态变化由 Runtime 生成完整 `snapshot.ai`，Device Hub 对每台 Deck 只合并最新快照。
+
 ### 11.2 串口终端开源组件
 
 - 使用 `xterm.js` 作为文本/ANSI、Unicode、滚动、搜索和终端渲染核心。

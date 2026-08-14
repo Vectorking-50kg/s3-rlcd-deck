@@ -14,8 +14,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/aisnapshot"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/configmodel"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/protocol"
 	"github.com/coder/websocket"
 )
 
@@ -151,6 +153,72 @@ func TestHubAuthenticatesThenRequiresDeviceHelloBeforeHeartbeat(t *testing.T) {
 	if heartbeat.Type != MessageHeartbeat || heartbeat.ProtocolVersion != ProtocolVersion ||
 		heartbeat.UTC == "" || heartbeat.RXQueueCapacity == 0 || heartbeat.TXQueueCapacity == 0 {
 		t.Fatalf("heartbeat = %#v", heartbeat)
+	}
+}
+
+func TestHubBroadcastsTheLatestBoundedSnapshotWithoutBlockingPublishers(t *testing.T) {
+	hub, _, server := newTestHub(t)
+	connection, _, err := dialTestDeck(t, server, testDeviceID, testDeviceToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.CloseNow()
+	if err = connection.Write(context.Background(), websocket.MessageText, validHello()); err != nil {
+		t.Fatal(err)
+	}
+	_ = readText(t, connection, time.Second)
+
+	first := validSnapshot(t, "first")
+	second := validSnapshot(t, "second")
+	started := time.Now()
+	if err = hub.PublishSnapshot(first); err != nil {
+		t.Fatal(err)
+	}
+	if err = hub.PublishSnapshot(second); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed > 50*time.Millisecond {
+		t.Fatalf("PublishSnapshot blocked for %v", elapsed)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		message := readText(t, connection, time.Second)
+		if bytes.Equal(message, second) {
+			return
+		}
+	}
+	t.Fatal("latest snapshot was not delivered")
+}
+
+func validSnapshot(t *testing.T, displayName string) []byte {
+	t.Helper()
+	now := time.Now().UTC()
+	document, err := aisnapshot.Encode(aisnapshot.Snapshot{
+		Type: "snapshot.ai", ProtocolVersion: protocol.CurrentVersion,
+		SchemaVersion: aisnapshot.SchemaVersion{Major: 1, Minor: 0},
+		GeneratedAt:   now.Format(time.RFC3339Nano), GeneratedAtUnixMS: now.UnixMilli(),
+		ProviderOrder: []string{"codex"},
+		Providers: []aisnapshot.Provider{{
+			SchemaVersion: aisnapshot.SchemaVersion{Major: 1, Minor: 0},
+			ID:            "codex", DisplayName: displayName, Status: aisnapshot.ProviderOK,
+			Source:     aisnapshot.ProviderSourceCodexAppServer,
+			Confidence: aisnapshot.ConfidenceVerified, Windows: []aisnapshot.QuotaWindow{},
+		}},
+		Sessions: []aisnapshot.Session{}, NextRefresh: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return document
+}
+
+func TestHubRejectsMalformedOrOversizedSnapshotBeforePublication(t *testing.T) {
+	hub, _, _ := newTestHub(t)
+	for _, document := range [][]byte{nil, []byte("{}"), make([]byte, MaxSnapshotMessageBytes+1)} {
+		if err := hub.PublishSnapshot(document); err == nil {
+			t.Fatalf("PublishSnapshot(%d bytes) succeeded", len(document))
+		}
 	}
 }
 

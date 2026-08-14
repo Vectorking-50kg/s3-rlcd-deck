@@ -1,0 +1,10 @@
+20:36  +24.8C  WIFI 3/4  AGENT ON
+----------------------------------------
+CURSOR EXPERIMENTAL
+DEGRADED / INFERRED / EXPERIMENTAL
+UPDATED 1m AGO
+BAL 18.42 USD
+BILLING [#######---] U71%
+ERROR SCHEMA_CHANGED
+----------------------------------------
+KEY: NEXT  TX DISARMED

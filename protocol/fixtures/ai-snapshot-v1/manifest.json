@@ -2,6 +2,7 @@
   "cases": [
     {"file": "valid-minimal.json", "result": "accepted"},
     {"file": "valid-full.json", "result": "accepted"},
+    {"file": "valid-multi-provider.json", "result": "accepted"},
     {"file": "valid-enumerations.json", "result": "accepted"},
     {"file": "valid-null.json", "result": "accepted"},
     {"file": "valid-forward-minor.json", "result": "accepted"},

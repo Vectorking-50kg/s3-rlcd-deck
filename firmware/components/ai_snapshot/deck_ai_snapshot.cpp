@@ -1850,6 +1850,136 @@ bool project_session(
     return true;
 }
 
+bool project_provider_page(
+    const Document &document,
+    size_t index,
+    deck_ai_snapshot_provider_projection_t *provider
+)
+{
+    *provider = deck_ai_snapshot_provider_projection_t{};
+    if (!document.decode_ascii(
+            document.field(index, "provider_id"),
+            provider->provider_id,
+            sizeof(provider->provider_id)
+        ) ||
+        !document.decode_utf8(
+            document.field(index, "display_name"),
+            provider->display_name,
+            sizeof(provider->display_name)
+        ) ||
+        !project_provider_status(
+            document,
+            document.field(index, "status"),
+            &provider->status
+        ) ||
+        !project_confidence(
+            document,
+            document.field(index, "confidence"),
+            &provider->confidence
+        ) ||
+        !boolean_value(
+            document,
+            document.field(index, "experimental"),
+            &provider->experimental
+        ) ||
+        !nullable_time(
+            document,
+            document.field(index, "updated_at"),
+            UINT64_MAX,
+            &provider->updated_at_unix_ms,
+            &provider->has_updated_at
+        )) {
+        return false;
+    }
+
+    const size_t balance = document.field(index, "balance");
+    if (!is_null(document, balance)) {
+        if (!unsigned_between(
+                document,
+                document.field(balance, "amount_micros"),
+                0,
+                kMaximumSafeInteger,
+                &provider->balance_amount_micros
+            ) ||
+            !document.decode_ascii(
+                document.field(balance, "currency"),
+                provider->balance_currency,
+                sizeof(provider->balance_currency)
+            )) {
+            return false;
+        }
+        provider->has_balance = true;
+    }
+
+    const size_t windows = document.field(index, "windows");
+    provider->window_count = static_cast<uint8_t>(document.array_count(windows));
+    for (uint8_t window = 0; window < provider->window_count; ++window) {
+        if (!project_window(
+                document,
+                document.array_at(windows, window),
+                &provider->windows[window]
+            )) {
+            return false;
+        }
+    }
+
+    const size_t tokens = document.field(index, "tokens");
+    if (!is_null(document, tokens)) {
+        if (!nullable_unsigned(
+                document,
+                document.field(tokens, "total"),
+                0,
+                kMaximumSafeInteger,
+                &provider->total_tokens,
+                &provider->has_total_tokens
+            )) {
+            return false;
+        }
+    }
+
+    const size_t problem = document.field(index, "error");
+    if (!is_null(document, problem)) {
+        if (!document.decode_ascii(
+                document.field(problem, "code"),
+                provider->error_code,
+                sizeof(provider->error_code)
+            )) {
+            return false;
+        }
+        provider->has_error = true;
+    }
+    return true;
+}
+
+bool project_pages(
+    const Document &document,
+    size_t root,
+    deck_ai_snapshot_pages_projection_t *projection
+)
+{
+    deck_ai_snapshot_pages_projection_t candidate{};
+    const size_t timezone = document.field(root, "timezone");
+    if (!is_null(document, timezone)) {
+        if (!document.decode_utf8(timezone, candidate.timezone, sizeof(candidate.timezone))) {
+            return false;
+        }
+        candidate.has_timezone = true;
+    }
+    const size_t providers = document.field(root, "providers");
+    candidate.provider_count = static_cast<uint8_t>(document.array_count(providers));
+    for (uint8_t index = 0; index < candidate.provider_count; ++index) {
+        if (!project_provider_page(
+                document,
+                document.array_at(providers, index),
+                &candidate.providers[index]
+            )) {
+            return false;
+        }
+    }
+    *projection = candidate;
+    return true;
+}
+
 bool session_is_better(
     const deck_ai_snapshot_session_projection_t &candidate,
     const deck_ai_snapshot_session_projection_t &current
@@ -2032,6 +2162,38 @@ bool deck_ai_snapshot_project_codex(
     delete[] nodes;
     if (!projected) {
         *projection = deck_ai_snapshot_codex_projection_t{};
+    }
+    return projected;
+}
+
+bool deck_ai_snapshot_project_pages(
+    const char *document,
+    size_t document_size,
+    deck_ai_snapshot_pages_projection_t *projection
+)
+{
+    if (projection == nullptr) {
+        return false;
+    }
+    *projection = deck_ai_snapshot_pages_projection_t{};
+    if (deck_ai_snapshot_validate(document, document_size, nullptr) !=
+        DECK_AI_SNAPSHOT_ACCEPTED) {
+        return false;
+    }
+    Node *nodes = new (std::nothrow) Node[kMaximumNodes];
+    if (nodes == nullptr) {
+        return false;
+    }
+    Parser parser(document, document_size, nodes, kMaximumNodes);
+    size_t root = 0;
+    bool projected = false;
+    if (parser.parse(&root) && parser.count() != 0U) {
+        const Document parsed(document, nodes);
+        projected = project_pages(parsed, root, projection);
+    }
+    delete[] nodes;
+    if (!projected) {
+        *projection = deck_ai_snapshot_pages_projection_t{};
     }
     return projected;
 }

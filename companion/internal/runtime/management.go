@@ -66,6 +66,32 @@ func (application *Runtime) managementRoutes() http.Handler {
 		application.handleLogin,
 	))
 	mux.HandleFunc("GET /api/v1/status", application.requireManagementSession(application.handleStatus))
+	mux.HandleFunc("GET /api/v1/providers", application.requireManagementSession(application.handleProviders))
+	mux.HandleFunc("POST /api/v1/providers", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.requireManagementWrite(application.handleProviderCreate),
+	))
+	mux.HandleFunc("PUT /api/v1/providers/order", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.requireManagementWrite(application.handleProviderOrder),
+	))
+	mux.HandleFunc("PUT /api/v1/providers/{providerID}", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.requireManagementWrite(application.handleProviderUpdate),
+	))
+	mux.HandleFunc("DELETE /api/v1/providers/{providerID}", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.requireManagementWrite(application.handleProviderDelete),
+	))
+	mux.HandleFunc("POST /api/v1/providers/{providerID}/test", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.requireManagementWrite(application.handleProviderTest),
+	))
 	mux.HandleFunc("GET /api/v1/history", application.requireManagementSession(application.handleHistoryQuery))
 	mux.HandleFunc("GET /api/v1/history/export.csv", application.requireManagementSession(application.handleHistoryExport))
 	mux.HandleFunc("GET /api/v1/history/settings", application.requireManagementSession(application.handleHistorySettings))
@@ -353,8 +379,13 @@ func decodeManagementJSONLimit(
 }
 
 func writeManagementJSON(response http.ResponseWriter, document any) {
+	writeManagementJSONStatus(response, http.StatusOK, document)
+}
+
+func writeManagementJSONStatus(response http.ResponseWriter, status int, document any) {
 	response.Header().Set("Content-Type", "application/json")
 	response.Header().Set("Cache-Control", "no-store")
+	response.WriteHeader(status)
 	_ = json.NewEncoder(response).Encode(document)
 }
 

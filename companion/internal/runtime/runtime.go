@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/devicelink"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/history"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/protocol"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/structuredprovider"
 )
 
@@ -63,6 +65,7 @@ type Runtime struct {
 	codexObserver           CodexObserver
 	cursorCollector         CursorCollector
 	structuredCollectors    []StructuredCollector
+	structuredService       *structuredprovider.Service
 	structuredProviderOrder []string
 	history                 *history.Store
 	backup                  BackupService
@@ -70,6 +73,7 @@ type Runtime struct {
 	deviceProfileUpdates    chan configmodel.DeviceProfile
 
 	mu                  sync.RWMutex
+	snapshotMu          sync.Mutex
 	status              Status
 	started             bool
 	codexUpdate         codexappserver.Update
@@ -126,6 +130,7 @@ func New(config Config) (*Runtime, error) {
 		codexObserver:        normalized.CodexObserver,
 		cursorCollector:      normalized.CursorCollector,
 		structuredCollectors: normalized.StructuredCollectors,
+		structuredService:    normalized.StructuredProviders,
 		structuredProviderOrder: func() []string {
 			order := make([]string, len(normalized.StructuredCollectors))
 			for index, collector := range normalized.StructuredCollectors {
@@ -289,7 +294,7 @@ func (application *Runtime) Run(ctx context.Context) error {
 		serveResults <- serveResult{name: "Device Hub", err: deviceHubServer.Serve(deviceHubListener)}
 	}()
 	collectorContext, stopCollector := context.WithCancel(ctx)
-	collectorDone := make([]chan error, 0, 3+len(application.structuredCollectors))
+	collectorDone := make([]chan error, 0, 4+len(application.structuredCollectors))
 	if application.deviceProfileUpdates != nil {
 		done := make(chan error, 1)
 		collectorDone = append(collectorDone, done)
@@ -334,6 +339,16 @@ func (application *Runtime) Run(ctx context.Context) error {
 			done <- application.cursorCollector.Run(
 				collectorContext,
 				application.publishCursorProvider,
+			)
+		}()
+	}
+	if application.structuredService != nil {
+		done := make(chan error, 1)
+		collectorDone = append(collectorDone, done)
+		go func() {
+			done <- application.structuredService.Run(
+				collectorContext,
+				application.publishStructuredState,
 			)
 		}()
 	}
@@ -393,6 +408,7 @@ func (application *Runtime) publishCodexUpdate(
 	application.hasCodexUpdate = true
 	application.mu.Unlock()
 	application.captureHistory(ctx, update.Provider)
+	application.publishCurrentSnapshot()
 	return nil
 }
 
@@ -408,6 +424,7 @@ func (application *Runtime) publishCursorProvider(
 	application.hasCursorProvider = true
 	application.mu.Unlock()
 	application.captureHistory(ctx, provider)
+	application.publishCurrentSnapshot()
 	return nil
 }
 
@@ -415,6 +432,64 @@ func (application *Runtime) publishStructuredProvider(
 	ctx context.Context,
 	provider aisnapshot.Provider,
 ) error {
+	if err := validateStructuredProvider(provider); err != nil {
+		return err
+	}
+	application.mu.Lock()
+	application.structuredProviders[provider.ID] = provider.Clone()
+	application.mu.Unlock()
+	application.captureHistory(ctx, provider)
+	application.publishCurrentSnapshot()
+	return nil
+}
+
+func (application *Runtime) publishStructuredState(
+	ctx context.Context,
+	order []string,
+	providers []aisnapshot.Provider,
+) error {
+	if len(order) > 6 || len(providers) > len(order) {
+		return structuredprovider.ErrUnavailable
+	}
+	allowed := make(map[string]struct{}, len(order))
+	for _, providerID := range order {
+		if providerID == "" || providerID == "codex" || providerID == "cursor" {
+			return structuredprovider.ErrUnavailable
+		}
+		if _, duplicate := allowed[providerID]; duplicate {
+			return structuredprovider.ErrUnavailable
+		}
+		allowed[providerID] = struct{}{}
+	}
+	next := make(map[string]aisnapshot.Provider, len(providers))
+	for _, provider := range providers {
+		if _, configured := allowed[provider.ID]; !configured ||
+			validateStructuredProvider(provider) != nil {
+			return structuredprovider.ErrUnavailable
+		}
+		if _, duplicate := next[provider.ID]; duplicate {
+			return structuredprovider.ErrUnavailable
+		}
+		next[provider.ID] = provider.Clone()
+	}
+	var changed []aisnapshot.Provider
+	application.mu.Lock()
+	for id, provider := range next {
+		if previous, exists := application.structuredProviders[id]; !exists || !reflect.DeepEqual(previous, provider) {
+			changed = append(changed, provider.Clone())
+		}
+	}
+	application.structuredProviderOrder = append([]string(nil), order...)
+	application.structuredProviders = next
+	application.mu.Unlock()
+	for _, provider := range changed {
+		application.captureHistory(ctx, provider)
+	}
+	application.publishCurrentSnapshot()
+	return nil
+}
+
+func validateStructuredProvider(provider aisnapshot.Provider) error {
 	generatedAt := time.Now().UTC()
 	if provider.UpdatedAt != nil {
 		parsed, err := time.Parse(time.RFC3339Nano, *provider.UpdatedAt)
@@ -434,10 +509,6 @@ func (application *Runtime) publishStructuredProvider(
 		aisnapshot.ValidateProvider(provider, generatedAt) != nil {
 		return structuredprovider.ErrUnavailable
 	}
-	application.mu.Lock()
-	application.structuredProviders[provider.ID] = provider.Clone()
-	application.mu.Unlock()
-	application.captureHistory(ctx, provider)
 	return nil
 }
 
@@ -470,7 +541,72 @@ func (application *Runtime) publishCodexSessions(
 	application.mu.Lock()
 	application.codexSessions = cloned
 	application.mu.Unlock()
+	application.publishCurrentSnapshot()
 	return nil
+}
+
+func (application *Runtime) composeSnapshotDocument(now time.Time) ([]byte, error) {
+	now = now.UTC()
+	application.mu.RLock()
+	providers := make([]aisnapshot.Provider, 0, 2+len(application.structuredProviderOrder))
+	providerOrder := make([]string, 0, cap(providers))
+	sessions := make([]aisnapshot.Session, 0, 16)
+	if application.hasCodexUpdate {
+		providers = append(providers, application.codexUpdate.Provider.Clone())
+		providerOrder = append(providerOrder, application.codexUpdate.Provider.ID)
+		seen := make(map[string]struct{}, len(application.codexUpdate.Sessions)+len(application.codexSessions))
+		for _, session := range application.codexUpdate.Sessions {
+			seen[session.ID] = struct{}{}
+			sessions = append(sessions, cloneSession(session))
+		}
+		for _, session := range application.codexSessions {
+			if len(sessions) >= 16 {
+				break
+			}
+			if _, duplicate := seen[session.ID]; duplicate {
+				continue
+			}
+			seen[session.ID] = struct{}{}
+			sessions = append(sessions, cloneSession(session))
+		}
+	}
+	if application.hasCursorProvider {
+		providers = append(providers, application.cursorProvider.Clone())
+		providerOrder = append(providerOrder, application.cursorProvider.ID)
+	}
+	for _, providerID := range application.structuredProviderOrder {
+		if provider, exists := application.structuredProviders[providerID]; exists {
+			providers = append(providers, provider.Clone())
+			providerOrder = append(providerOrder, provider.ID)
+		}
+	}
+	application.mu.RUnlock()
+	if len(providers) == 0 {
+		return nil, nil
+	}
+	defaultTimezone := "Asia/Shanghai"
+	return aisnapshot.Encode(aisnapshot.Snapshot{
+		Type:              "snapshot.ai",
+		ProtocolVersion:   protocol.CurrentVersion,
+		SchemaVersion:     aisnapshot.SchemaVersion{Major: aisnapshot.SchemaMajor, Minor: aisnapshot.SchemaMinor},
+		GeneratedAt:       now.Format(time.RFC3339Nano),
+		GeneratedAtUnixMS: now.UnixMilli(),
+		Timezone:          &defaultTimezone,
+		ProviderOrder:     providerOrder,
+		Providers:         providers,
+		Sessions:          sessions,
+		NextRefresh:       5,
+	})
+}
+
+func (application *Runtime) publishCurrentSnapshot() {
+	application.snapshotMu.Lock()
+	defer application.snapshotMu.Unlock()
+	document, err := application.composeSnapshotDocument(time.Now())
+	if err != nil || len(document) == 0 {
+		return
+	}
+	_ = application.deviceLink.PublishSnapshot(document)
 }
 
 func validInferredCodexSession(session aisnapshot.Session) bool {

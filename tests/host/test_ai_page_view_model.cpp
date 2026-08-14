@@ -302,6 +302,82 @@ void widest_quota_row_is_compact_and_duration_is_bounded()
     assert(ends_with(page, "TX DISARMED"));
 }
 
+void formats_ordered_provider_and_configuration_hint_pages()
+{
+    deck_ai_page_view_model_t model = full_model();
+    model.pages.provider_count = 2U;
+    auto &codex = model.pages.providers[0];
+    std::strcpy(codex.provider_id, "codex");
+    std::strcpy(codex.display_name, "Codex");
+    codex.status = DECK_AI_SNAPSHOT_PROVIDER_OK;
+    auto &cursor = model.pages.providers[1];
+    std::strcpy(cursor.provider_id, "cursor");
+    std::strcpy(cursor.display_name, "Cursor Experimental");
+    cursor.status = DECK_AI_SNAPSHOT_PROVIDER_DEGRADED;
+    cursor.confidence = DECK_AI_SNAPSHOT_CONFIDENCE_INFERRED;
+    cursor.experimental = true;
+    cursor.has_updated_at = true;
+    cursor.updated_at_unix_ms = model.trusted_utc_ms - 60'000ULL;
+    cursor.has_balance = true;
+    cursor.balance_amount_micros = 18'420'000ULL;
+    std::strcpy(cursor.balance_currency, "USD");
+    cursor.window_count = 1U;
+    std::strcpy(cursor.windows[0].name, "billing");
+    cursor.windows[0].has_used_basis_points = true;
+    cursor.windows[0].used_basis_points = 7'100U;
+    cursor.has_error = true;
+    std::strcpy(cursor.error_code, "schema_changed");
+    model.selected_provider = 1U;
+
+    char text[1024]{};
+    assert(deck_ai_page_view_model_format(&model, text, sizeof(text)));
+    assert_snapshot("ai-page-provider-experimental", text);
+    const std::string provider_page(text);
+    assert(provider_page.find("CURSOR EXPERIMENTAL") != std::string::npos);
+    assert(provider_page.find("EXPERIMENTAL") != std::string::npos);
+    assert(provider_page.find("BAL 18.42 USD") != std::string::npos);
+    assert(provider_page.find("SCHEMA_CHANGED") != std::string::npos);
+
+    model.pages.provider_count = 1U;
+    model.selected_provider = 0U;
+    model.configuration_hint = true;
+    assert(deck_ai_page_view_model_format(&model, text, sizeof(text)));
+    assert_snapshot("ai-page-provider-config", text);
+    assert(std::string(text).find("ADD AI PROVIDER") != std::string::npos);
+}
+
+void selection_cycles_order_and_survives_dynamic_reconfiguration()
+{
+    deck_ai_page_view_model_t model = full_model();
+    deck_ai_snapshot_pages_projection_t pages{};
+    pages.provider_count = 3U;
+    std::strcpy(pages.providers[0].provider_id, "codex");
+    std::strcpy(pages.providers[1].provider_id, "deepseek");
+    std::strcpy(pages.providers[2].provider_id, "cursor");
+    assert(deck_ai_page_view_model_apply_pages(&model, &pages));
+    assert(model.selected_provider == 0U && !model.configuration_hint);
+    deck_ai_page_view_model_next(&model);
+    assert(model.selected_provider == 1U && !model.configuration_hint);
+    deck_ai_page_view_model_next(&model);
+    assert(model.selected_provider == 2U && !model.configuration_hint);
+
+    deck_ai_snapshot_pages_projection_t reordered = pages;
+    std::swap(reordered.providers[1], reordered.providers[2]);
+    assert(deck_ai_page_view_model_apply_pages(&model, &reordered));
+    assert(model.selected_provider == 1U);
+    assert(std::strcmp(model.pages.providers[model.selected_provider].provider_id, "cursor") == 0);
+
+    deck_ai_snapshot_pages_projection_t codex_only{};
+    codex_only.provider_count = 1U;
+    std::strcpy(codex_only.providers[0].provider_id, "codex");
+    assert(deck_ai_page_view_model_apply_pages(&model, &codex_only));
+    assert(model.selected_provider == 0U && !model.configuration_hint);
+    deck_ai_page_view_model_next(&model);
+    assert(model.configuration_hint);
+    deck_ai_page_view_model_next(&model);
+    assert(!model.configuration_hint && model.selected_provider == 0U);
+}
+
 }  // namespace
 
 int main()
@@ -317,5 +393,7 @@ int main()
     trusted_utc_uses_the_snapshot_timezone_before_rtc();
     widest_session_name_cannot_add_a_wrapped_fourteenth_line();
     widest_quota_row_is_compact_and_duration_is_bounded();
+    formats_ordered_provider_and_configuration_hint_pages();
+    selection_cycles_order_and_survives_dynamic_reconfiguration();
     return 0;
 }
