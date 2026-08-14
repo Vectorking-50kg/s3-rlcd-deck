@@ -1,0 +1,56 @@
+{
+  "type": "snapshot.ai",
+  "protocol_version": 1,
+  "schema_version": {"major": 1, "minor": 0},
+  "generated_at": "2026-08-13T12:34:56Z",
+  "timezone": "Asia/Shanghai",
+  "provider_order": ["codex"],
+  "providers": [
+    {
+      "schema_version": {"major": 1, "minor": 0},
+      "provider_id": "codex",
+      "display_name": "Codex",
+      "status": "ok",
+      "source": "codex_app_server",
+      "confidence": "verified",
+      "experimental": false,
+      "updated_at": "2026-08-13T12:34:55Z",
+      "stale_after_seconds": 120,
+      "balance": null,
+      "windows": [
+        {
+          "name": "primary",
+          "used_basis_points": 3800,
+          "remaining_basis_points": 6200,
+          "window_minutes": 300,
+          "resets_at": "2026-08-13T15:00:00Z"
+        }
+      ],
+      "tokens": {
+        "input": 120000,
+        "cached_input": 45000,
+        "output": 18000,
+        "reasoning": 8000,
+        "total": 146000
+      },
+      "error": null
+    }
+  ],
+  "sessions": [
+    {
+      "schema_version": {"major": 1, "minor": 0},
+      "session_id": "ses_7uYwPz0vQ9nJ4kLm",
+      "provider_id": "codex",
+      "display_name": "Deck development",
+      "state": "running",
+      "source": "codex_app_server_owned",
+      "confidence": "verified",
+      "started_at": "2026-08-13T12:20:00Z",
+      "last_activity_at": "2026-08-13T12:34:50Z",
+      "duration_seconds": 890,
+      "turn_tokens": 18420,
+      "context_used_basis_points": 4100
+    }
+  ],
+  "next_refresh_seconds": 5
+}

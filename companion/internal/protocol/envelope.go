@@ -86,6 +86,9 @@ func DecodeStrictDocumentLimit(message []byte, maximumBytes int, destination any
 }
 
 func validateJSONDocument(message []byte) error {
+	if !validJSONStringEscapes(message) {
+		return ErrMalformedEnvelope
+	}
 	decoder := json.NewDecoder(bytes.NewReader(message))
 	decoder.UseNumber()
 	if err := validateJSONValue(decoder); err != nil {
@@ -95,6 +98,77 @@ func validateJSONDocument(message []byte) error {
 		return ErrMalformedEnvelope
 	}
 	return nil
+}
+
+// encoding/json replaces unpaired UTF-16 surrogate escapes with U+FFFD.
+// Reject them at the wire boundary so every implementation sees the same
+// Unicode document instead of silently repairing malformed input.
+func validJSONStringEscapes(message []byte) bool {
+	inString := false
+	for index := 0; index < len(message); index++ {
+		character := message[index]
+		if !inString {
+			if character == '"' {
+				inString = true
+			}
+			continue
+		}
+		if character == '"' {
+			inString = false
+			continue
+		}
+		if character != '\\' {
+			continue
+		}
+		index++
+		if index >= len(message) {
+			return false
+		}
+		if message[index] != 'u' {
+			continue
+		}
+		codepoint, ok := jsonHexQuad(message, index+1)
+		if !ok {
+			return false
+		}
+		index += 4
+		if codepoint >= 0xdc00 && codepoint <= 0xdfff {
+			return false
+		}
+		if codepoint < 0xd800 || codepoint > 0xdbff {
+			continue
+		}
+		if index+6 >= len(message) || message[index+1] != '\\' || message[index+2] != 'u' {
+			return false
+		}
+		low, lowOK := jsonHexQuad(message, index+3)
+		if !lowOK || low < 0xdc00 || low > 0xdfff {
+			return false
+		}
+		index += 6
+	}
+	return !inString
+}
+
+func jsonHexQuad(message []byte, start int) (uint16, bool) {
+	if start+4 > len(message) {
+		return 0, false
+	}
+	var value uint16
+	for _, character := range message[start : start+4] {
+		value <<= 4
+		switch {
+		case character >= '0' && character <= '9':
+			value |= uint16(character - '0')
+		case character >= 'a' && character <= 'f':
+			value |= uint16(character-'a') + 10
+		case character >= 'A' && character <= 'F':
+			value |= uint16(character-'A') + 10
+		default:
+			return 0, false
+		}
+	}
+	return value, true
 }
 
 func validateJSONValue(decoder *json.Decoder) error {

@@ -411,7 +411,7 @@ Companion 提供内置模板，同时提供结构化 HTTP Provider：
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": {"major": 1, "minor": 0},
   "provider_id": "codex",
   "display_name": "Codex",
   "status": "ok",
@@ -421,12 +421,11 @@ Companion 提供内置模板，同时提供结构化 HTTP Provider：
   "updated_at": "2026-08-09T10:36:05Z",
   "stale_after_seconds": 120,
   "balance": null,
-  "currency": null,
   "windows": [
     {
       "name": "primary",
-      "used_percent": 38.0,
-      "remaining_percent": 62.0,
+      "used_basis_points": 3800,
+      "remaining_basis_points": 6200,
       "window_minutes": 300,
       "resets_at": "2026-08-09T13:20:00Z"
     }
@@ -442,25 +441,39 @@ Companion 提供内置模板，同时提供结构化 HTTP Provider：
 }
 ```
 
-未知值使用 `null`，不能使用零代替。ESP32 对未知字段前向兼容，对未知 schema major version 拒绝并保留最后有效快照。
+余额非空时使用 `{ "amount_micros": integer, "currency": "CNY" }`。百分比以
+`0..10000` 基点整数表达，计数不超过 JSON safe integer `2^53-1`。未知值使用
+`null`，不能使用零代替；两个百分比同时存在时合计必须为 10000。
+
+未知 schema major 被拒绝并保留最后有效快照。更高 minor 只能增加 null、布尔或
+有界整数字段；字符串、数组和对象必须经过新 major 的隐私审查。Provider 错误码固定为
+`auth_stale`、`permission_denied`、`timeout`、`process_exited`、
+`schema_changed`、`unavailable`。
+每个带 `schema_version` 的对象最多包含 16 个 forward 字段，完整文档最多包含 2048
+个 JSON syntax nodes；无独立版本的额度、Token、货币和错误子对象不接受扩展字段。
 
 ### 7.6 会话 DTO
 
 ```json
 {
+  "schema_version": {"major": 1, "minor": 0},
   "session_id": "anonymous-stable-id",
+  "provider_id": "codex",
   "display_name": "s3-rlcd-deck",
   "state": "running",
+  "source": "process_jsonl_observer",
   "confidence": "inferred",
   "started_at": "2026-08-09T10:24:00Z",
   "last_activity_at": "2026-08-09T10:36:01Z",
   "duration_seconds": 721,
   "turn_tokens": 18420,
-  "context_used_percent": 41.0
+  "context_used_basis_points": 4100
 }
 ```
 
-不得包含原始线程标题、Prompt、完整工程路径、文件名、命令或工具参数。
+会话 `source/confidence/state` 必须来自 7.2 的组合。匿名 ID 只用于同一 Provider 内的
+稳定关联；显示名是用户别名或工程目录最后一级。DTO 不得包含原始线程标题、Prompt、
+回复、完整工程路径、文件名、命令、工具参数、凭据或上游 raw/attributes。
 
 ## 8. Companion 设计
 
@@ -626,19 +639,22 @@ Companion 验证 Token、证书连接、device ID 和协议版本后返回配置
 {
   "type": "snapshot.ai",
   "protocol_version": 1,
+  "schema_version": {"major": 1, "minor": 0},
   "generated_at": "2026-08-09T10:36:18Z",
   "timezone": "Asia/Shanghai",
   "provider_order": ["codex", "cursor", "deepseek"],
   "providers": [],
-  "codex_sessions": [],
+  "sessions": [],
   "next_refresh_seconds": 5
 }
 ```
 
 - Provider 间错误隔离。
-- 未变化的快照可以只发送版本/摘要，避免无意义重绘。
-- ESP32 拒绝过大的快照和无效时间戳。
-- 所有时间在线路上使用 UTC。
+- 完整快照不超过 16 KiB；Provider 最多 8 个，每个额度窗口最多 4 个，会话最多 16 个。
+- `provider_order` 与 `providers` 的 ID 和顺序必须完全一致，会话必须引用本快照内的 Provider。
+- ESP32 拒绝未知 major、缺失/重复字段、越界数值、无效关联与无效时间戳，并保留最后有效快照。
+- 所有时间在线路上使用 canonical UTC RFC 3339（`Z`）；本地时区只用于显示。
+- canonical schema、错误目录与两端共享 fixtures 位于 `protocol/`。
 
 ## 11. Web 控制台
 

@@ -139,6 +139,17 @@ target_compile_definitions(
     PRIVATE DECK_REPOSITORY_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../.."
 )
 deck_add_host_test(
+    test_ai_snapshot
+    SOURCES
+        test_ai_snapshot.cpp
+        ../../firmware/components/ai_snapshot/deck_ai_snapshot.cpp
+    INCLUDE_DIRS ../../firmware/components/ai_snapshot/include
+)
+target_compile_definitions(
+    test_ai_snapshot
+    PRIVATE DECK_REPOSITORY_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../.."
+)
+deck_add_host_test(
     test_companion_link_timing
     SOURCES
         test_companion_link_timing.cpp

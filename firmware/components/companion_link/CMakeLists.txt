@@ -5,6 +5,7 @@ idf_component_register(
         "deck_device_protocol.cpp"
     INCLUDE_DIRS "include"
     REQUIRES
+        ai_snapshot
         companion_profiles
         esp_timer
         espressif__esp_websocket_client

@@ -20,6 +20,14 @@ _Avoid_: Account, collector
 A timestamped, display-safe view of normalized Provider data sent by a Companion to a Deck. It excludes upstream credentials and raw private content.
 _Avoid_: Raw snapshot, provider response
 
+**Quota Window**:
+A Provider-defined interval whose normalized usage, remaining allowance, duration, and reset time may be presented in an AI Snapshot. Unknown values remain null rather than becoming zero.
+_Avoid_: Limit bucket, rate-limit response
+
+**Session Observation**:
+A privacy-safe, anonymous description of one Provider session with an explicit source and confidence. It never contains prompts, replies, commands, tool arguments, or absolute paths.
+_Avoid_: Thread record, conversation log
+
 **Active Companion**:
 The single paired Companion to which a Deck is currently connected. Other paired Companions are connection candidates, not simultaneous data sources.
 _Avoid_: Primary server, current agent
