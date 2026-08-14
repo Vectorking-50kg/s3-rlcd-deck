@@ -42,7 +42,7 @@ jobs:
         working-directory: companion
         env:
           S3DECK_NATIVE_SECRET_STORE_TEST: "1"
-        run: go test -count=1 -run '^TestNativeSecretStore$' ./internal/secretstore
+        run: go test -count=1 -run '^TestNative' ./internal/secretstore
       - name: Run native menu-bar smoke
         run: |
           python3 tools/smoke_companion_artifact.py \
@@ -84,7 +84,7 @@ jobs:
         working-directory: companion
         env:
           S3DECK_NATIVE_SECRET_STORE_TEST: "1"
-        run: go test -count=1 -run '^TestNativeSecretStore$' ./internal/secretstore
+        run: go test -count=1 -run '^TestNative' ./internal/secretstore
       - name: Run native tray smoke
         shell: pwsh
         run: |

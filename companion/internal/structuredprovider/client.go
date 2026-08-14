@@ -130,7 +130,7 @@ func buildRequest(ctx context.Context, config normalizedConfig) (*http.Request, 
 		if config.Secrets == nil {
 			return nil, ErrAuthStale
 		}
-		secret, resolveErr := config.Secrets.Resolve(ctx, header.SecretReference)
+		secret, resolveErr := config.Secrets.Get(ctx, header.SecretReference)
 		if resolveErr != nil || len(secret) == 0 || len(secret) > maximumSecretBytes ||
 			!validSecret(secret) {
 			overwrite(secret)

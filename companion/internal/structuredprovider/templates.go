@@ -14,13 +14,9 @@ func Templates() []Template {
 				ID:          "aihubmix",
 				DisplayName: "AIHubMix",
 				Request: Request{
-					Method: MethodGET,
-					URL:    "https://aihubmix.com/api/user/self",
-					Headers: []Header{{
-						Name:            "Authorization",
-						SecretReference: templateSecretReference,
-						Prefix:          "Bearer ",
-					}},
+					Method:  MethodGET,
+					URL:     "https://aihubmix.com/api/user/self",
+					Headers: []Header{{Name: "Authorization", Prefix: "Bearer "}},
 				},
 				Mapping: Mapping{
 					BalancePath:    "$.data.quota",
@@ -39,13 +35,9 @@ func Templates() []Template {
 				ID:          "deepseek",
 				DisplayName: "DeepSeek",
 				Request: Request{
-					Method: MethodGET,
-					URL:    "https://api.deepseek.com/user/balance",
-					Headers: []Header{{
-						Name:            "Authorization",
-						SecretReference: templateSecretReference,
-						Prefix:          "Bearer ",
-					}},
+					Method:  MethodGET,
+					URL:     "https://api.deepseek.com/user/balance",
+					Headers: []Header{{Name: "Authorization", Prefix: "Bearer "}},
 				},
 				Mapping: Mapping{
 					BalancePath:  "$.balance_infos[0].total_balance",

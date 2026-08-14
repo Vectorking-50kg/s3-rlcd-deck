@@ -133,16 +133,16 @@ func ImportCurl(source string) (CurlImport, error) {
 		if secret == "" {
 			return CurlImport{}, ErrInvalidCurl
 		}
-		header.SecretReference = reference
 		header.Prefix = prefix
 		imported.Secrets = append(imported.Secrets, ImportedSecret{
-			Reference: reference,
-			Value:     append([]byte(nil), secret...),
+			Slot:        reference,
+			HeaderIndex: len(parsedHeaders),
+			Value:       append([]byte(nil), secret...),
 		})
 		parsedHeaders = append(parsedHeaders, header)
 	}
 	imported.Request.Headers = parsedHeaders
-	if _, err = normalizeHeaders(imported.Request.Headers); err != nil {
+	if _, err = normalizeDraftHeaders(imported.Request.Headers); err != nil {
 		return CurlImport{}, ErrInvalidCurl
 	}
 	completed = true

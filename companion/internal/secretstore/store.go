@@ -247,6 +247,12 @@ func normalizeVaultError(err error) error {
 	if err == nil {
 		return nil
 	}
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return context.DeadlineExceeded
+	}
 	for _, known := range []error{
 		ErrNotFound, ErrDuplicate, ErrLocked, ErrPermission, ErrCanceled,
 		ErrUnavailable, ErrInvalid, ErrCorrupt,

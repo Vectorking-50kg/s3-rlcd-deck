@@ -99,7 +99,7 @@ func (vault *darwinVault) Create(ctx context.Context, account string, secret []b
 	}
 	arena := newCFArena(vault.runtime)
 	defer arena.release()
-	keys, values, err := vault.baseAttributes(arena, account, false)
+	keys, values, err := vault.baseAttributes(arena, account, true)
 	if err != nil {
 		return err
 	}
@@ -590,7 +590,9 @@ func (runtime *darwinRuntime) stringValue(value unsafe.Pointer) (string, error) 
 	}
 	goruntime.KeepAlive(buffer)
 	terminator := bytes.IndexByte(buffer, 0)
-	if terminator <= 0 {
+	// Secret References are ASCII, so UTF-8 bytes and UTF-16 code units must
+	// match exactly. This also rejects embedded NUL and non-ASCII account names.
+	if terminator <= 0 || int64(terminator) != length {
 		return "", ErrCorrupt
 	}
 	return string(buffer[:terminator]), nil

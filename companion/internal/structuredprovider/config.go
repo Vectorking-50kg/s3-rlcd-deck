@@ -13,6 +13,7 @@ import (
 
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/aisnapshot"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/protocol"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/secretstore"
 )
 
 const (
@@ -261,6 +262,27 @@ func normalizeHeaders(source []Header) ([]Header, error) {
 	return result, nil
 }
 
+func normalizeDraftHeaders(source []Header) ([]Header, error) {
+	draft := append([]Header(nil), source...)
+	placeholder := secretstore.Reference("secret-00000000000000000000000000000000")
+	for index := range draft {
+		if draft[index].SecretReference != "" {
+			return nil, ErrInvalidConfig
+		}
+		draft[index].SecretReference = placeholder
+	}
+	normalized, err := normalizeHeaders(draft)
+	if err != nil {
+		return nil, err
+	}
+	for index := range normalized {
+		if normalized[index].SecretReference == placeholder {
+			normalized[index].SecretReference = ""
+		}
+	}
+	return normalized, nil
+}
+
 func allowedSecretPrefix(name, prefix string) bool {
 	if prefix == "" {
 		return true
@@ -308,16 +330,9 @@ func validHeaderText(value string) bool {
 		!strings.ContainsRune(value, 0)
 }
 
-func validReference(value string) bool {
-	if len(value) == 0 || len(value) > 128 {
-		return false
-	}
-	for _, character := range value {
-		if character < 0x21 || character > 0x7e {
-			return false
-		}
-	}
-	return true
+func validReference(value secretstore.Reference) bool {
+	_, err := secretstore.ParseReference(value.String())
+	return err == nil
 }
 
 func allowedRefresh(value uint16) bool {

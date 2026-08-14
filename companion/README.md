@@ -72,11 +72,19 @@ Provider credentials are owned by `internal/secretstore`. Its public seam accept
 Secret Reference for put/get/delete/list-metadata operations. A new put generates a random
 reference; an update replaces the value at the same reference in one platform-vault operation, so
 a failed update preserves the previous value and cannot orphan a replacement reference. Delete is
-idempotent, and list-metadata never reads secret bytes. macOS uses Security.framework Keychain
+idempotent, and list-metadata returns only references. macOS uses Security.framework Keychain
 items and Windows uses Credential Manager entries in a fixed Companion Provider namespace. The
 namespace and generated-reference grammar prevent this module from discovering or modifying
 Codex/Cursor-owned authentication. Authentication UI is disabled for background access: locked,
 denied, and canceled operations return fixed errors without including credential bytes.
+Credential Manager lacks a metadata-only enumeration API, so its adapter never copies or returns
+enumerated blobs and explicitly overwrites them before releasing the native result buffer.
+Structured Provider headers use the `secretstore.Reference` domain type, and collectors resolve it
+through `Store.Get` for each request. Template and curl-import drafts contain empty header slots,
+not persistable aliases such as `api_key`. `CommitDefinition`/`CommitCurlImport` create the vault
+entries first, replace every slot with its generated reference, validate the final definition, and
+then call an atomic non-secret configuration commit. Validation/config failures compensate created
+entries; a failed compensation returns only the pending non-secret references for durable retry.
 
 ## Run
 
