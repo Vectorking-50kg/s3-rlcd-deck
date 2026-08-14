@@ -1,0 +1,65 @@
+{
+  "type": "snapshot.ai",
+  "protocol_version": 1,
+  "schema_version": {"major": 1, "minor": 0},
+  "generated_at": "2026-08-15T12:00:00Z",
+  "timezone": "Asia/Shanghai",
+  "provider_order": ["codex", "cursor", "deepseek"],
+  "providers": [
+    {
+      "schema_version": {"major": 1, "minor": 0},
+      "provider_id": "codex",
+      "display_name": "Codex",
+      "status": "ok",
+      "source": "codex_app_server",
+      "confidence": "verified",
+      "experimental": false,
+      "updated_at": "2026-08-15T11:59:58Z",
+      "stale_after_seconds": 120,
+      "balance": null,
+      "windows": [],
+      "tokens": null,
+      "error": null
+    },
+    {
+      "schema_version": {"major": 1, "minor": 0},
+      "provider_id": "cursor",
+      "display_name": "Cursor Experimental",
+      "status": "degraded",
+      "source": "cursor_local",
+      "confidence": "inferred",
+      "experimental": true,
+      "updated_at": "2026-08-15T11:58:00Z",
+      "stale_after_seconds": 300,
+      "balance": {"amount_micros": 18420000, "currency": "USD"},
+      "windows": [
+        {
+          "name": "billing",
+          "used_basis_points": 7100,
+          "remaining_basis_points": 2900,
+          "window_minutes": null,
+          "resets_at": "2026-08-16T00:00:00Z"
+        }
+      ],
+      "tokens": null,
+      "error": {"code": "schema_changed", "retryable": false}
+    },
+    {
+      "schema_version": {"major": 1, "minor": 0},
+      "provider_id": "deepseek",
+      "display_name": "DeepSeek",
+      "status": "ok",
+      "source": "structured_http",
+      "confidence": "verified",
+      "experimental": false,
+      "updated_at": "2026-08-15T11:59:30Z",
+      "stale_after_seconds": 900,
+      "balance": {"amount_micros": 9876500, "currency": "CNY"},
+      "windows": [],
+      "tokens": {"input": null, "cached_input": null, "output": null, "reasoning": null, "total": 42000},
+      "error": null
+    }
+  ],
+  "sessions": [],
+  "next_refresh_seconds": 5
+}

@@ -3,10 +3,12 @@ package runtime
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/aisnapshot"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/codexappserver"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/structuredprovider"
 )
 
@@ -14,6 +16,63 @@ type fakeStructuredCollector struct {
 	provider aisnapshot.Provider
 	started  chan struct{}
 	terminal error
+}
+
+func TestRuntimeComposesOneOrderedSnapshotAcrossIsolatedProviders(t *testing.T) {
+	provider := func(id string, source aisnapshot.ProviderSource, confidence aisnapshot.Confidence) aisnapshot.Provider {
+		return aisnapshot.Provider{
+			SchemaVersion: aisnapshot.SchemaVersion{Major: 1, Minor: 0},
+			ID:            id, DisplayName: id, Status: aisnapshot.ProviderOK,
+			Source: source, Confidence: confidence, Windows: []aisnapshot.QuotaWindow{},
+		}
+	}
+	first := &fakeStructuredCollector{provider: provider(
+		"zeta", aisnapshot.ProviderSourceStructuredHTTP, aisnapshot.ConfidenceVerified,
+	)}
+	second := &fakeStructuredCollector{provider: provider(
+		"alpha", aisnapshot.ProviderSourceStructuredHTTP, aisnapshot.ConfidenceVerified,
+	)}
+	application, err := New(Config{
+		Version: "1.2.3-test",
+		Management: ManagementConfig{
+			Address: "127.0.0.1:0", AdminToken: "management-test-token-000000000001",
+		},
+		DeviceHub: DeviceHubConfig{Address: "127.0.0.1:0"}, Pairing: testPairingService(t),
+		StructuredCollectors: []StructuredCollector{first, second},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = application.publishCodexUpdate(context.Background(), codexappserver.Update{
+		Provider: provider("codex", aisnapshot.ProviderSourceCodexAppServer, aisnapshot.ConfidenceVerified),
+		Sessions: []aisnapshot.Session{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cursor := provider("cursor", aisnapshot.ProviderSourceCursorLocal, aisnapshot.ConfidenceInferred)
+	cursor.Experimental = true
+	if err = application.publishCursorProvider(context.Background(), cursor); err != nil {
+		t.Fatal(err)
+	}
+	if err = application.publishStructuredProvider(context.Background(), second.provider); err != nil {
+		t.Fatal(err)
+	}
+	if err = application.publishStructuredProvider(context.Background(), first.provider); err != nil {
+		t.Fatal(err)
+	}
+	document, err := application.composeSnapshotDocument(
+		time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := aisnapshot.Decode(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(snapshot.ProviderOrder, []string{"codex", "cursor", "zeta", "alpha"}) {
+		t.Fatalf("Provider order = %#v", snapshot.ProviderOrder)
+	}
 }
 
 func (collector *fakeStructuredCollector) ProviderID() string {

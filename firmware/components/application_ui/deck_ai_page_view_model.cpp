@@ -254,6 +254,19 @@ const char *confidence_name(deck_ai_snapshot_confidence_t confidence)
     }
 }
 
+const char *provider_status_name(deck_ai_snapshot_provider_status_t status)
+{
+    switch (status) {
+        case DECK_AI_SNAPSHOT_PROVIDER_OK:
+            return "OK";
+        case DECK_AI_SNAPSHOT_PROVIDER_DEGRADED:
+            return "DEGRADED";
+        case DECK_AI_SNAPSHOT_PROVIDER_UNAVAILABLE:
+        default:
+            return "UNAVAILABLE";
+    }
+}
+
 const char *session_state_name(deck_ai_snapshot_session_state_t state)
 {
     switch (state) {
@@ -322,10 +335,13 @@ bool append_status(Writer *writer, const deck_ai_page_view_model_t *model)
     char time[8] = "--:--";
     uint8_t local_hour = 0;
     uint8_t local_minute = 0;
-    const bool snapshot_time = model->codex.has_timezone &&
+    const char *timezone = model->pages.has_timezone
+                               ? model->pages.timezone
+                               : model->codex.has_timezone ? model->codex.timezone : nullptr;
+    const bool snapshot_time = timezone != nullptr &&
                                deck_ai_page_local_time_from_utc(
                                    model->trusted_utc_ms,
-                                   model->codex.timezone,
+                                   timezone,
                                    &local_hour,
                                    &local_minute
                                );
@@ -382,6 +398,118 @@ bool append_window(
     Writer *writer,
     const deck_ai_snapshot_quota_projection_t *window,
     uint64_t now_utc_ms
+);
+
+bool append_provider_page(
+    Writer *writer,
+    const deck_ai_page_view_model_t *model,
+    const deck_ai_snapshot_provider_projection_t *provider
+)
+{
+    char name[128]{};
+    if (!display_text(provider->display_name, name, sizeof(name), 24U, true) ||
+        !append(writer, "%s\n", name)) {
+        return false;
+    }
+    const char *status = model->snapshot_state == DECK_AI_PAGE_SNAPSHOT_STALE
+                             ? "STALE"
+                             : model->snapshot_state == DECK_AI_PAGE_SNAPSHOT_UNAVAILABLE
+                                   ? "UNAVAILABLE"
+                                   : provider_status_name(provider->status);
+    if (!append(
+            writer,
+            "%s / %s%s\n",
+            status,
+            confidence_name(provider->confidence),
+            provider->experimental ? " / EXPERIMENTAL" : ""
+        )) {
+        return false;
+    }
+    if (model->snapshot_state == DECK_AI_PAGE_SNAPSHOT_UNAVAILABLE) {
+        if (model->companion_state == DECK_AI_PAGE_COMPANION_OFFLINE &&
+            !append(writer, "AGENT OFFLINE\n")) {
+            return false;
+        }
+        return append(writer, "NO CURRENT AI DATA\n%s\nKEY: NEXT  TX DISARMED", kDivider);
+    }
+    if (provider->has_updated_at) {
+        if (provider->updated_at_unix_ms <= model->trusted_utc_ms) {
+            char age[16]{};
+            duration_text(
+                (model->trusted_utc_ms - provider->updated_at_unix_ms) / 1'000ULL,
+                age,
+                sizeof(age)
+            );
+            if (!append(writer, "UPDATED %s AGO\n", age)) {
+                return false;
+            }
+        } else if (!append(writer, "UPDATED --\n")) {
+            return false;
+        }
+    } else if (!append(writer, "UPDATED --\n")) {
+        return false;
+    }
+    const size_t metric_line_limit = DECK_AI_PAGE_MAX_LINES - 2U -
+                                     (provider->has_error ? 1U : 0U);
+    if (provider->has_balance && writer->lines < metric_line_limit) {
+        const uint64_t cents = (provider->balance_amount_micros + 5'000ULL) / 10'000ULL;
+        if (!append(
+                writer,
+                "BAL %llu.%02llu %s\n",
+                static_cast<unsigned long long>(cents / 100ULL),
+                static_cast<unsigned long long>(cents % 100ULL),
+                provider->balance_currency
+            )) {
+            return false;
+        }
+    }
+    for (uint8_t index = 0;
+         index < provider->window_count && writer->lines < metric_line_limit;
+         ++index) {
+        if (!append_window(writer, &provider->windows[index], model->trusted_utc_ms)) {
+            return false;
+        }
+    }
+    if (provider->has_total_tokens && writer->lines < metric_line_limit) {
+        char tokens[24]{};
+        compact_count(provider->total_tokens, tokens, sizeof(tokens));
+        if (!append(writer, "TOKEN %s\n", tokens)) {
+            return false;
+        }
+    }
+    if (provider->has_error && writer->lines < DECK_AI_PAGE_MAX_LINES - 2U) {
+        char problem[DECK_AI_SNAPSHOT_ERROR_CODE_CAPACITY]{};
+        if (!display_text(
+                provider->error_code,
+                problem,
+                sizeof(problem),
+                DECK_AI_SNAPSHOT_ERROR_CODE_CAPACITY - 1U,
+                true
+            ) ||
+            !append(writer, "ERROR %s\n", problem)) {
+            return false;
+        }
+    }
+    return append(writer, "%s\nKEY: NEXT  TX DISARMED", kDivider);
+}
+
+bool append_configuration_hint(Writer *writer)
+{
+    return append(
+        writer,
+        "ADD AI PROVIDER\n"
+        "OPEN COMPANION WEB\n"
+        "WEB ON COMPUTER\n"
+        "NO EXTRA PROVIDERS\n"
+        "KEY: CODEX\n"
+        "TX DISARMED"
+    );
+}
+
+bool append_window(
+    Writer *writer,
+    const deck_ai_snapshot_quota_projection_t *window,
+    uint64_t now_utc_ms
 )
 {
     if (!window->has_remaining_basis_points && !window->has_used_basis_points) {
@@ -428,8 +556,11 @@ bool append_window(
             (void)std::snprintf(timing, sizeof(timing), "%s", duration);
         }
     }
-    return append(writer, "%-8s[%s] %s%u%% %s\n", name, bar, qualifier,
-                  static_cast<unsigned>(basis_points / 100U), timing);
+    return timing[0] == '\0'
+               ? append(writer, "%-8s[%s] %s%u%%\n", name, bar, qualifier,
+                        static_cast<unsigned>(basis_points / 100U))
+               : append(writer, "%-8s[%s] %s%u%% %s\n", name, bar, qualifier,
+                        static_cast<unsigned>(basis_points / 100U), timing);
 }
 
 bool append_session(Writer *writer, const deck_ai_snapshot_codex_projection_t *codex)
@@ -514,6 +645,66 @@ uint8_t deck_ai_page_wifi_signal_bars(int8_t rssi)
     return 1;
 }
 
+bool deck_ai_page_view_model_apply_pages(
+    deck_ai_page_view_model_t *model,
+    const deck_ai_snapshot_pages_projection_t *pages
+)
+{
+    if (model == nullptr || pages == nullptr ||
+        pages->provider_count > DECK_AI_SNAPSHOT_MAX_PROVIDERS) {
+        return false;
+    }
+    char selected_id[DECK_AI_SNAPSHOT_PROVIDER_ID_CAPACITY]{};
+    if (!model->configuration_hint && model->selected_provider < model->pages.provider_count) {
+        std::memcpy(
+            selected_id,
+            model->pages.providers[model->selected_provider].provider_id,
+            sizeof(selected_id)
+        );
+    }
+    model->pages = *pages;
+    model->selected_provider = 0U;
+    if (pages->provider_count == 0U) {
+        model->configuration_hint = true;
+        return true;
+    }
+    if (model->configuration_hint && pages->provider_count == 1U) {
+        return true;
+    }
+    model->configuration_hint = false;
+    for (uint8_t index = 0; index < pages->provider_count; ++index) {
+        if (selected_id[0] != '\0' &&
+            std::strcmp(selected_id, pages->providers[index].provider_id) == 0) {
+            model->selected_provider = index;
+            return true;
+        }
+    }
+    for (uint8_t index = 0; index < pages->provider_count; ++index) {
+        if (std::strcmp(pages->providers[index].provider_id, "codex") == 0) {
+            model->selected_provider = index;
+            return true;
+        }
+    }
+    return true;
+}
+
+void deck_ai_page_view_model_next(deck_ai_page_view_model_t *model)
+{
+    if (model == nullptr) {
+        return;
+    }
+    if (model->pages.provider_count <= 1U) {
+        model->selected_provider = 0U;
+        model->configuration_hint = !model->configuration_hint;
+        return;
+    }
+    model->configuration_hint = false;
+    model->selected_provider = static_cast<uint8_t>(
+        (static_cast<unsigned>(model->selected_provider) + 1U) %
+        model->pages.provider_count
+    );
+}
+
 bool deck_ai_page_local_time_from_utc(
     uint64_t utc_ms,
     const char *timezone,
@@ -576,6 +767,21 @@ bool deck_ai_page_view_model_format(
     Writer writer{buffer, buffer_size, 0, 1};
     if (!append_status(&writer, model)) {
         return false;
+    }
+    if (model->configuration_hint) {
+        return append_configuration_hint(&writer);
+    }
+    if (model->pages.provider_count > DECK_AI_SNAPSHOT_MAX_PROVIDERS ||
+        model->selected_provider >= model->pages.provider_count) {
+        if (model->pages.provider_count != 0U) {
+            return false;
+        }
+    } else {
+        const deck_ai_snapshot_provider_projection_t *provider =
+            &model->pages.providers[model->selected_provider];
+        if (std::strcmp(provider->provider_id, "codex") != 0) {
+            return append_provider_page(&writer, model, provider);
+        }
     }
     const char *confidence = confidence_name(model->codex.provider_confidence);
     if (model->snapshot_state == DECK_AI_PAGE_SNAPSHOT_UNAVAILABLE ||

@@ -38,6 +38,9 @@ deck_companion_link_t *application_companion_link = nullptr;
 struct AiPageTaskContext {
     deck_companion_link_t *link;
     char *document;
+    deck_ai_snapshot_codex_projection_t *codex_projection;
+    deck_ai_snapshot_pages_projection_t *pages_projection;
+    deck_m0_view_model_t *published_model;
     EventGroupHandle_t lifecycle;
     TaskHandle_t task;
     std::atomic<bool> stop_requested;
@@ -46,6 +49,7 @@ AiPageTaskContext *application_ai_page_task = nullptr;
 deck_m0_view_model_t application_model{};
 SemaphoreHandle_t application_model_mutex = nullptr;
 uint32_t handled_boot_long_press_count = 0;
+uint32_t handled_key_short_press_count = 0;
 int16_t application_temperature_offset_tenths_c =
     DECK_DEVICE_SETTINGS_DEFAULT_TEMPERATURE_OFFSET_TENTHS_C;
 
@@ -307,6 +311,14 @@ void peripheral_snapshot(void *, const deck_peripheral_snapshot_t *snapshot)
         application_model.key_event_count = snapshot->key_event_count;
         application_model.boot_event = boot_event.view;
         application_model.boot_event_count = snapshot->boot_event_count;
+        if (snapshot->key_event == DECK_BUTTON_INPUT_SHORT_PRESS &&
+            snapshot->key_event_count > handled_key_short_press_count) {
+            handled_key_short_press_count = snapshot->key_event_count;
+            if (application_model.ai_page.active &&
+                application_model.setup_state != DECK_SETUP_ACTIVE) {
+                deck_ai_page_view_model_next(&application_model.ai_page);
+            }
+        }
         if (snapshot->boot_event == DECK_BUTTON_INPUT_LONG_PRESS &&
             snapshot->boot_event_count > handled_boot_long_press_count) {
             pending_boot_long_press_count = snapshot->boot_event_count;
@@ -463,7 +475,6 @@ void ai_page_task(void *task_context)
             );
         }
 
-        deck_ai_snapshot_codex_projection_t projection{};
         bool projection_changed = false;
         bool projection_valid = true;
         wifi_ap_record_t access_point{};
@@ -471,10 +482,24 @@ void ai_page_task(void *task_context)
         if (copied && stored.document_visible && document_size != 0U &&
             (stored.metadata.generated_at_unix_ms != projected_generated_at ||
              document_size != projected_size)) {
+            std::memset(
+                context->codex_projection,
+                0,
+                sizeof(*context->codex_projection)
+            );
+            std::memset(
+                context->pages_projection,
+                0,
+                sizeof(*context->pages_projection)
+            );
             projection_valid = deck_ai_snapshot_project_codex(
                 context->document,
                 document_size,
-                &projection
+                context->codex_projection
+            ) && deck_ai_snapshot_project_pages(
+                context->document,
+                document_size,
+                context->pages_projection
             );
             projection_changed = projection_valid;
         }
@@ -502,7 +527,11 @@ void ai_page_task(void *task_context)
                     projection_valid ? ai_page_snapshot_state(stored.state)
                                      : DECK_AI_PAGE_SNAPSHOT_UNAVAILABLE;
                 if (projection_changed) {
-                    application_model.ai_page.codex = projection;
+                    application_model.ai_page.codex = *context->codex_projection;
+                    projection_valid = deck_ai_page_view_model_apply_pages(
+                        &application_model.ai_page,
+                        context->pages_projection
+                    );
                     projected_generated_at = stored.metadata.generated_at_unix_ms;
                     projected_size = document_size;
                 }
@@ -512,8 +541,8 @@ void ai_page_task(void *task_context)
         if (document_size != 0U) {
             std::memset(context->document, 0, document_size);
         }
-        deck_m0_view_model_t published{};
-        (void)publish_application_model(&published);
+        std::memset(context->published_model, 0, sizeof(*context->published_model));
+        (void)publish_application_model(context->published_model);
         (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1'000));
     }
     xEventGroupSetBits(context->lifecycle, kAiPageTaskStoppedBit);
@@ -536,9 +565,30 @@ AiPageTaskContext *start_ai_page_task(deck_companion_link_t *link)
         DECK_AI_SNAPSHOT_MAX_BYTES,
         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
     ));
+    context->codex_projection = static_cast<deck_ai_snapshot_codex_projection_t *>(
+        heap_caps_calloc(
+            1,
+            sizeof(*context->codex_projection),
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+        )
+    );
+    context->pages_projection = static_cast<deck_ai_snapshot_pages_projection_t *>(
+        heap_caps_calloc(
+            1,
+            sizeof(*context->pages_projection),
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+        )
+    );
+    context->published_model = static_cast<deck_m0_view_model_t *>(heap_caps_calloc(
+        1,
+        sizeof(*context->published_model),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+    ));
     context->lifecycle = xEventGroupCreate();
     context->stop_requested.store(false, std::memory_order_release);
-    if (context->document == nullptr || context->lifecycle == nullptr ||
+    if (context->document == nullptr || context->codex_projection == nullptr ||
+        context->pages_projection == nullptr || context->published_model == nullptr ||
+        context->lifecycle == nullptr ||
         xTaskCreatePinnedToCore(
             ai_page_task,
             "ai_page_model",
@@ -554,6 +604,26 @@ AiPageTaskContext *start_ai_page_task(deck_companion_link_t *link)
         if (context->document != nullptr) {
             std::memset(context->document, 0, DECK_AI_SNAPSHOT_MAX_BYTES);
             heap_caps_free(context->document);
+        }
+        if (context->codex_projection != nullptr) {
+            std::memset(
+                context->codex_projection,
+                0,
+                sizeof(*context->codex_projection)
+            );
+            heap_caps_free(context->codex_projection);
+        }
+        if (context->pages_projection != nullptr) {
+            std::memset(
+                context->pages_projection,
+                0,
+                sizeof(*context->pages_projection)
+            );
+            heap_caps_free(context->pages_projection);
+        }
+        if (context->published_model != nullptr) {
+            std::memset(context->published_model, 0, sizeof(*context->published_model));
+            heap_caps_free(context->published_model);
         }
         delete context;
         return nullptr;
@@ -585,6 +655,20 @@ bool stop_ai_page_task()
     vTaskDelete(context->task);
     std::memset(context->document, 0, DECK_AI_SNAPSHOT_MAX_BYTES);
     heap_caps_free(context->document);
+    std::memset(
+        context->codex_projection,
+        0,
+        sizeof(*context->codex_projection)
+    );
+    heap_caps_free(context->codex_projection);
+    std::memset(
+        context->pages_projection,
+        0,
+        sizeof(*context->pages_projection)
+    );
+    heap_caps_free(context->pages_projection);
+    std::memset(context->published_model, 0, sizeof(*context->published_model));
+    heap_caps_free(context->published_model);
     vEventGroupDelete(context->lifecycle);
     delete context;
     application_ai_page_task = nullptr;

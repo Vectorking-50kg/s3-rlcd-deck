@@ -120,7 +120,7 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "backup export requires only --data-directory, --backup-export-file, and --backup-passphrase-file")
 			return 2
 		}
-		_, backupService, _, _, closeConfiguration := loadStructuredCollectors(
+		_, backupService, _, _, closeConfiguration := loadStructuredProviders(
 			resolvedDataDirectory,
 			stderr,
 		)
@@ -171,8 +171,8 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "cannot configure pairing: %v\n", err)
 		return 2
 	}
-	structuredCollectors, backupService, configurationOwner, restorableConfiguration,
-		closeProviderDefinitions := loadStructuredCollectors(
+	structuredProviderService, backupService, configurationOwner, restorableConfiguration,
+		closeProviderDefinitions := loadStructuredProviders(
 		resolvedDataDirectory,
 		stderr,
 	)
@@ -252,14 +252,14 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		cursorCollector = nil
 	}
 	config := companionruntime.Config{
-		Version:              version,
-		CodexCollector:       codexCollector,
-		CodexObserver:        codexObserver,
-		CursorCollector:      cursorCollector,
-		StructuredCollectors: structuredCollectors,
-		History:              providerHistory,
-		Backup:               backupService,
-		Configuration:        configurationOwner,
+		Version:             version,
+		CodexCollector:      codexCollector,
+		CodexObserver:       codexObserver,
+		CursorCollector:     cursorCollector,
+		StructuredProviders: structuredProviderService,
+		History:             providerHistory,
+		Backup:              backupService,
+		Configuration:       configurationOwner,
 		Management: companionruntime.ManagementConfig{
 			Address:       *managementAddress,
 			AllowLAN:      *allowLANManagement,
@@ -386,11 +386,11 @@ func defaultDataDirectory() (string, error) {
 	return filepath.Join(base, "s3-rlcd-deck"), nil
 }
 
-func loadStructuredCollectors(
+func loadStructuredProviders(
 	dataDirectory string,
 	stderr io.Writer,
 ) (
-	[]companionruntime.StructuredCollector,
+	*structuredprovider.Service,
 	*backup.Service,
 	*structuredprovider.ConfigurationStore,
 	structuredprovider.RestorableConfiguration,
@@ -428,19 +428,10 @@ func loadStructuredCollectors(
 		fmt.Fprintln(stderr, "encrypted backup service is unavailable")
 		backupService = nil
 	}
-	collectors := make([]companionruntime.StructuredCollector, 0, len(restorableConfiguration.Definitions))
-	for _, definition := range restorableConfiguration.Definitions {
-		collector, collectorErr := structuredprovider.New(structuredprovider.Config{
-			Definition: definition,
-			Secrets:    providerSecrets,
-		})
-		if collectorErr != nil {
-			// One malformed Provider cannot disable healthy Providers or the
-			// Companion's management and Device Hub recovery surfaces.
-			fmt.Fprintln(stderr, "one structured Provider is unavailable")
-			continue
-		}
-		collectors = append(collectors, collector)
+	providerService, err := structuredprovider.NewService(providerDefinitions, providerSecrets)
+	if err != nil {
+		fmt.Fprintln(stderr, "structured Provider management is unavailable")
+		providerService = nil
 	}
-	return collectors, backupService, providerDefinitions, restorableConfiguration, closeStore
+	return providerService, backupService, providerDefinitions, restorableConfiguration, closeStore
 }

@@ -258,6 +258,14 @@ rules; an unsupported zone falls back to the cached RTC and then to `--:--` rath
 an offset. The projection worker owns a cancellable task and PSRAM document buffer, joins within
 two seconds before Companion Link teardown, and retains its complete owner when a join times out.
 
+The same validated document is also projected into a bounded ordered Provider page set. KEY short
+press cycles Codex and every configured Provider while Setup is inactive, preserving the selected
+Provider ID across a live reorder and falling back to Codex after deletion. With no extra Provider,
+KEY alternates Codex with a configuration hint. Generic pages show the fixed Provider name, textual
+status/confidence/update age, then only the available balance, quota, Token, and bounded error
+fields. `EXPERIMENTAL`, `DEGRADED`, `STALE`, and `UNAVAILABLE` never depend on grayscale, and every
+page ends with `TX DISARMED`.
+
 ## Long-duration HIL
 
 For fast development feedback, use the 90-second contract. It exercises the display and

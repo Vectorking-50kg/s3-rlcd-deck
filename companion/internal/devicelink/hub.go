@@ -11,15 +11,20 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/aisnapshot"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/configmodel"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/protocol"
 	"github.com/coder/websocket"
 )
 
 const (
 	defaultHeartbeatInterval = 10 * time.Second
 	defaultHeartbeatTimeout  = 30 * time.Second
+	MaxSnapshotMessageBytes  = 16 << 10
 )
+
+var ErrInvalidSnapshot = errors.New("invalid AI Snapshot publication")
 
 type Authenticator interface {
 	Verify(context.Context, pairing.Authentication) (bool, error)
@@ -44,10 +49,13 @@ type Hub struct {
 	done              chan struct{}
 	closeOnce         sync.Once
 
-	mu          sync.Mutex
-	closed      bool
-	connections map[*websocket.Conn]struct{}
-	sessions    map[string]*websocket.Conn
+	mu                 sync.Mutex
+	closed             bool
+	connections        map[*websocket.Conn]struct{}
+	sessions           map[string]*websocket.Conn
+	snapshotSignals    map[*websocket.Conn]chan struct{}
+	latestSnapshot     []byte
+	snapshotGeneration uint64
 }
 
 type authenticatedDeck struct {
@@ -93,7 +101,46 @@ func New(config Config) (*Hub, error) {
 		done:              make(chan struct{}),
 		connections:       make(map[*websocket.Conn]struct{}),
 		sessions:          make(map[string]*websocket.Conn),
+		snapshotSignals:   make(map[*websocket.Conn]chan struct{}),
 	}, nil
+}
+
+// PublishSnapshot replaces the latest validated display document and wakes
+// every authenticated Deck without waiting for network I/O. Slow Decks
+// coalesce intermediate updates and receive the newest complete document.
+func (hub *Hub) PublishSnapshot(document []byte) error {
+	if len(document) == 0 || len(document) > MaxSnapshotMessageBytes {
+		return ErrInvalidSnapshot
+	}
+	envelope, err := protocol.ParseEnvelope(document)
+	if err != nil || envelope.Type != "snapshot.ai" {
+		return ErrInvalidSnapshot
+	}
+	if _, err = aisnapshot.Decode(document); err != nil {
+		return ErrInvalidSnapshot
+	}
+	owned := append([]byte(nil), document...)
+	hub.mu.Lock()
+	if hub.closed {
+		hub.mu.Unlock()
+		clear(owned)
+		return ErrInvalidSnapshot
+	}
+	clear(hub.latestSnapshot)
+	hub.latestSnapshot = owned
+	hub.snapshotGeneration++
+	signals := make([]chan struct{}, 0, len(hub.snapshotSignals))
+	for _, signal := range hub.snapshotSignals {
+		signals = append(signals, signal)
+	}
+	hub.mu.Unlock()
+	for _, signal := range signals {
+		select {
+		case signal <- struct{}{}:
+		default:
+		}
+	}
+	return nil
 }
 
 func (hub *Hub) ServeHTTP(response http.ResponseWriter, request *http.Request) {
@@ -148,6 +195,8 @@ func (hub *Hub) Close() {
 		for connection := range hub.connections {
 			connections = append(connections, connection)
 		}
+		clear(hub.latestSnapshot)
+		hub.latestSnapshot = nil
 		hub.mu.Unlock()
 		for _, connection := range connections {
 			// Runtime shutdown is bounded. A Deck that stops reading must not make
@@ -191,6 +240,7 @@ func (hub *Hub) reserve(deviceID string, connection *websocket.Conn) bool {
 		return false
 	}
 	hub.sessions[deviceID] = connection
+	hub.snapshotSignals[connection] = make(chan struct{}, 1)
 	return true
 }
 
@@ -200,7 +250,36 @@ func (hub *Hub) removeConnection(connection *websocket.Conn, deviceID string) {
 	if hub.sessions[deviceID] == connection {
 		delete(hub.sessions, deviceID)
 	}
+	delete(hub.snapshotSignals, connection)
 	hub.mu.Unlock()
+}
+
+func (hub *Hub) snapshotSignal(connection *websocket.Conn) <-chan struct{} {
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	return hub.snapshotSignals[connection]
+}
+
+func (hub *Hub) writeLatestSnapshot(
+	connection *websocket.Conn,
+	previousGeneration uint64,
+) (uint64, bool) {
+	hub.mu.Lock()
+	generation := hub.snapshotGeneration
+	if generation == previousGeneration || len(hub.latestSnapshot) == 0 {
+		hub.mu.Unlock()
+		return previousGeneration, true
+	}
+	document := append([]byte(nil), hub.latestSnapshot...)
+	hub.mu.Unlock()
+	defer clear(document)
+	ctx, cancel := context.WithTimeout(context.Background(), hub.heartbeatInterval)
+	err := connection.Write(ctx, websocket.MessageText, document)
+	cancel()
+	if err != nil {
+		return previousGeneration, false
+	}
+	return generation, true
 }
 
 func (hub *Hub) serveConnection(
@@ -241,6 +320,15 @@ func (hub *Hub) serveConnection(
 	if !hub.writeHeartbeat(connection) {
 		return
 	}
+	snapshotSignal := hub.snapshotSignal(connection)
+	var snapshotGeneration uint64
+	var snapshotWritten bool
+	if snapshotGeneration, snapshotWritten = hub.writeLatestSnapshot(
+		connection,
+		snapshotGeneration,
+	); !snapshotWritten {
+		return
+	}
 
 	frames := make(chan receivedFrame, 1)
 	go readFrames(connection, frames)
@@ -271,6 +359,15 @@ func (hub *Hub) serveConnection(
 				return
 			}
 			if !hub.writeHeartbeat(connection) {
+				return
+			}
+		case <-snapshotSignal:
+			var written bool
+			snapshotGeneration, written = hub.writeLatestSnapshot(
+				connection,
+				snapshotGeneration,
+			)
+			if !written {
 				return
 			}
 		case frame := <-frames:

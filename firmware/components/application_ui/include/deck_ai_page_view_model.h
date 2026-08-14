@@ -49,12 +49,24 @@ typedef struct {
     deck_ai_page_snapshot_state_t snapshot_state;
     uint64_t trusted_utc_ms;
     deck_ai_snapshot_codex_projection_t codex;
+    deck_ai_snapshot_pages_projection_t pages;
+    uint8_t selected_provider;
+    bool configuration_hint;
 } deck_ai_page_view_model_t;
 
 bool deck_ai_page_view_model_equal(
     const deck_ai_page_view_model_t *left,
     const deck_ai_page_view_model_t *right
 );
+
+/* Reconciles a dynamic Provider order while preserving the selected ID. */
+bool deck_ai_page_view_model_apply_pages(
+    deck_ai_page_view_model_t *model,
+    const deck_ai_snapshot_pages_projection_t *pages
+);
+
+/* Advances Codex -> configured Providers, or Codex <-> configuration hint. */
+void deck_ai_page_view_model_next(deck_ai_page_view_model_t *model);
 
 uint8_t deck_ai_page_wifi_signal_bars(int8_t rssi);
 

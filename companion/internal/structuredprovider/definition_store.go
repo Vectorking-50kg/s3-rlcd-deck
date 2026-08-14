@@ -336,6 +336,38 @@ func (store *DefinitionStore) UpdateWebSettings(
 	})
 }
 
+// ReorderDefinitions atomically changes only Provider display order. The set
+// must match exactly so a stale browser cannot silently drop or resurrect a
+// concurrently edited Provider.
+func (store *DefinitionStore) ReorderDefinitions(
+	ctx context.Context,
+	providerIDs []string,
+) error {
+	return store.update(ctx, func(next *definitionStoreState) error {
+		if len(providerIDs) != len(next.Definitions) {
+			return ErrDefinitionCommit
+		}
+		byID := make(map[string]Definition, len(next.Definitions))
+		for _, definition := range next.Definitions {
+			byID[definition.ID] = definition
+		}
+		ordered := make([]Definition, 0, len(providerIDs))
+		for _, providerID := range providerIDs {
+			definition, exists := byID[providerID]
+			if !exists {
+				return ErrDefinitionCommit
+			}
+			ordered = append(ordered, cloneDefinition(definition))
+			delete(byID, providerID)
+		}
+		if len(byID) != 0 {
+			return ErrDefinitionCommit
+		}
+		next.Definitions = ordered
+		return nil
+	})
+}
+
 func (store *DefinitionStore) UpdateApplicationSettings(
 	ctx context.Context,
 	settings configmodel.ApplicationSettings,

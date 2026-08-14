@@ -66,6 +66,16 @@ parameters cannot be represented safely by the current model, so all URL query s
 Raw responses and request credentials never enter Runtime or diagnostics,
 and a failure degrades only its own last valid Provider page.
 
+The embedded management Web configures these Providers through authenticated
+`/api/v1/providers` create/list/update/delete routes, `/api/v1/providers/order`, and the bounded
+`/api/v1/providers/{id}/test` route. Writes require the management session, exact Origin, CSRF, and
+sensitive-operation rate limiting. API responses contain editable non-secret request/mapping fields
+and `secret_configured` booleans, but never vault references or credential bytes. One dynamic
+supervisor reconciles the committed ordered definitions into isolated collectors without a
+Companion restart. Runtime composes Codex, Cursor, and structured states into one complete
+`snapshot.ai`; Device Hub coalesces only the latest document per authenticated Deck through that
+connection's sole WebSocket writer.
+
 Provider credentials and raw private content must never be sent to a Deck.
 
 Provider credentials are owned by `internal/secretstore`. Its public seam accepts only an opaque
@@ -192,7 +202,7 @@ Only one Companion may own a data directory. A repeated launch fails with an
 explicit `already running` error instead of competing for listeners or trust
 files. Login-start installation is deliberately deferred to M5.
 
-The authenticated management API issues codes at `POST /api/v1/pairing/codes`, issues a device-bound rotation code at `POST /api/v1/devices/{device_id}/rotate`, and revokes trust at `DELETE /api/v1/devices/{device_id}`. Provider Hour data is read from `GET /api/v1/history`, exported from `GET /api/v1/history/export.csv`, enabled or disabled through `/api/v1/history/settings`, and cleared with `DELETE /api/v1/history`. Encrypted migration uses `/api/v1/backups/export`, `/api/v1/backups/preview`, and `/api/v1/backups/import`. A Deck redeems a code once at the rate-limited Device Hub route `POST /api/v1/pairing/redeem`. Management writes require the login session, exact Origin, and CSRF token described above; a successful redeem response is the only place a plaintext device Token is returned. Device requests authenticate the complete Device ID + Token + identity + protocol-version binding.
+The authenticated management API issues codes at `POST /api/v1/pairing/codes`, issues a device-bound rotation code at `POST /api/v1/devices/{device_id}/rotate`, and revokes trust at `DELETE /api/v1/devices/{device_id}`. Provider management uses `/api/v1/providers`, `/api/v1/providers/order`, and `/api/v1/providers/{id}/test`. Provider Hour data is read from `GET /api/v1/history`, exported from `GET /api/v1/history/export.csv`, enabled or disabled through `/api/v1/history/settings`, and cleared with `DELETE /api/v1/history`. Encrypted migration uses `/api/v1/backups/export`, `/api/v1/backups/preview`, and `/api/v1/backups/import`. A Deck redeems a code once at the rate-limited Device Hub route `POST /api/v1/pairing/redeem`. Management writes require the login session, exact Origin, and CSRF token described above; a successful redeem response is the only place a plaintext device Token is returned. Device requests authenticate the complete Device ID + Token + identity + protocol-version binding.
 
 The Device Link endpoint is `GET /api/v1/device/link` with WebSocket subprotocol
 `s3-rlcd-deck.v1`. An authenticated Deck must send `device.hello` first and continue with
