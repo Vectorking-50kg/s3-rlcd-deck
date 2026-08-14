@@ -489,6 +489,42 @@ func TestConcurrentCaptureAndBoundedQueries(t *testing.T) {
 	}
 }
 
+func TestDatabaseNeverReceivesDisplayOrNonHistoryProviderFields(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "provider-history.sqlite3")
+	store, err := history.Open(context.Background(), history.Config{Path: databasePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observed := time.Date(2026, 8, 15, 17, 0, 0, 0, time.UTC)
+	updated := observed.Add(-time.Minute).Format(time.RFC3339)
+	staleAfter := uint32(123)
+	provider := providerAt("codex", 1000, 1_000_000)
+	provider.DisplayName = "PRIVATE_DISPLAY_CANARY"
+	provider.UpdatedAt = &updated
+	provider.StaleAfterSeconds = &staleAfter
+	if err = store.Capture(context.Background(), provider, observed); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{databasePath, databasePath + "-wal", databasePath + "-shm"} {
+		contents, readErr := os.ReadFile(path)
+		if errors.Is(readErr, os.ErrNotExist) {
+			continue
+		}
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if bytes.Contains(contents, []byte("PRIVATE_DISPLAY_CANARY")) {
+			t.Fatalf("non-history Provider field persisted in %s", filepath.Base(path))
+		}
+	}
+}
+
 type blockingWriter struct {
 	started chan struct{}
 	release chan struct{}
