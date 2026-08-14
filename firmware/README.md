@@ -53,7 +53,8 @@ committed record unchanged and keep recovery available. Stored network passwords
 included in diagnostic events, screen errors, or HIL reports.
 
 Handled page, status, scan, and submission requests refresh the inactivity timer.
-Development builds use 120 seconds so macOS can recover and finish associating during automated HIL;
+Development builds use 120 seconds so the dual-homed HIL client can associate and complete the
+real recovery-page transaction;
 release builds use the required 600
 seconds. Wi-Fi validation independently allows 20 seconds for association and DHCP in both
 variants, and an in-flight validation keeps Setup active until it reaches a result. When
@@ -215,10 +216,14 @@ All credentials remain private to the Profile and Device Link modules.
 
 Development builds additionally emit a redacted `companion_link_state` JSONL event with only
 state, profile generation, reconnect/error counts, a stable last-error class/generation, and
-last-heartbeat monotonic time. The M1
-acceptance tool may request one in-memory Setup access record to automate the same recovery-page
-flow a user performs; that record is immediately replaced by a fixed redaction marker and is
-never part of committed evidence. It may also request `deck_build_identity`, which contains only
+last-heartbeat monotonic time. The M1 acceptance tool may request one in-memory Setup access record
+and send it over SSH standard input to a separate dual-homed Linux client. That client joins the
+real AP, returns the original Profile snapshot before any mutation, and then performs the same
+recovery-page, Pair 202, and single-use ACK flow as a user while the controller Mac remains on its
+normal LAN. A non-secret UUID journal plus an independent SSH cleanup/verify request restores the
+helper after normal completion, timeout, or control-channel loss. Every request revalidates the
+same helper SHA-256. The record is immediately replaced by a fixed redaction
+marker and is never part of committed evidence. The tool may also request `deck_build_identity`, which contains only
 the full source commit embedded by `tools/idf.sh`; the tool compares it with the clean checkout
 after safely programming both OTA application slots. Release builds do not compile the diagnostic
 console.

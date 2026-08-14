@@ -8,7 +8,6 @@ import datetime
 import hashlib
 import http.cookiejar
 import importlib
-import ipaddress
 import json
 import os
 import pathlib
@@ -22,7 +21,6 @@ import tempfile
 import threading
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 
 try:
@@ -137,19 +135,277 @@ class SensitiveValueTracker:
             return tuple(self._values)
 
 
+def load_setup_client_command(path: pathlib.Path) -> list[str]:
+    try:
+        if not path.is_file() or path.stat().st_size > 4096:
+            raise AcceptanceFailure("Setup client command file is invalid")
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise AcceptanceFailure("Setup client command file is invalid") from error
+    if (
+        not isinstance(document, list)
+        or not 1 <= len(document) <= 32
+        or any(
+            not isinstance(argument, str)
+            or not argument
+            or len(argument) > 512
+            or re.search(r"[\x00-\x1f\x7f]", argument) is not None
+            for argument in document
+        )
+    ):
+        raise AcceptanceFailure("Setup client command file is invalid")
+    return document
+
+
+def companion_profiles_valid(document: Any) -> bool:
+    if not isinstance(document, dict) or set(document) != {
+        "profile_ids",
+        "active_profile_id",
+    }:
+        return False
+    profile_ids = document.get("profile_ids")
+    active_profile_id = document.get("active_profile_id")
+    return (
+        isinstance(profile_ids, list)
+        and len(profile_ids) <= 5
+        and all(
+            isinstance(profile_id, str)
+            and re.fullmatch(r"sha256:[0-9a-f]{64}", profile_id) is not None
+            for profile_id in profile_ids
+        )
+        and len(set(profile_ids)) == len(profile_ids)
+        and isinstance(active_profile_id, str)
+        and (not active_profile_id or active_profile_id in profile_ids)
+    )
+
+
+class SetupClientAdapter:
+    """Run the real recovery-page transaction on a dual-homed helper host."""
+
+    def __init__(
+        self,
+        command: list[str],
+        secrets: SensitiveValueTracker,
+        expected_helper_sha256: str,
+    ) -> None:
+        self._command = list(command)
+        self._secrets = secrets
+        if re.fullmatch(r"[0-9a-f]{64}", expected_helper_sha256) is None:
+            raise AcceptanceFailure("Setup client identity is invalid")
+        self._expected_helper_sha256 = expected_helper_sha256
+        self._pending_transactions: set[str] = set()
+
+    def _invoke(
+        self,
+        action: str,
+        document: dict[str, Any],
+        timeout: float,
+        sensitive_values: tuple[str, ...] = (),
+    ) -> dict[str, Any]:
+        request = {
+            "protocol_version": 1,
+            "action": action,
+            "expected_helper_sha256": self._expected_helper_sha256,
+            **document,
+        }
+        try:
+            completed = subprocess.run(
+                self._command,
+                input=json.dumps(request, separators=(",", ":")) + "\n",
+                capture_output=True,
+                text=True,
+                timeout=timeout + 5,
+                start_new_session=True,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise AcceptanceFailure(
+                f"Setup client {action} transaction failed"
+            ) from error
+        combined = completed.stdout + completed.stderr
+        leaked = any(value and value in combined for value in sensitive_values)
+        if leaked:
+            self._secrets.observe(combined)
+        if completed.returncode != 0 or completed.stderr or leaked:
+            raise AcceptanceFailure(f"Setup client {action} transaction failed")
+        if len(completed.stdout.encode("utf-8")) > 8192:
+            raise AcceptanceFailure(f"Setup client {action} response is invalid")
+        try:
+            response = json.loads(completed.stdout)
+        except (UnicodeError, json.JSONDecodeError) as error:
+            raise AcceptanceFailure(
+                f"Setup client {action} response is invalid"
+            ) from error
+        if (
+            not isinstance(response, dict)
+            or response.get("protocol_version") != 1
+            or response.get("action") != action
+            or response.get("ok") is not True
+        ):
+            raise AcceptanceFailure(f"Setup client {action} response is invalid")
+        return response
+
+    def _cleanup_transaction(self, identifier: str, timeout: float) -> None:
+        response = self._invoke(
+            "cleanup",
+            {
+                "transaction_id": identifier,
+                "transaction_timeout_seconds": max(35.0, timeout),
+            },
+            max(35.0, timeout),
+        )
+        if set(response) != {
+            "protocol_version",
+            "action",
+            "ok",
+            "network_restored",
+        } or response.get("network_restored") is not True:
+            raise AcceptanceFailure("Setup client cleanup response is invalid")
+        self._pending_transactions.discard(identifier)
+
+    def _request(
+        self,
+        action: str,
+        document: dict[str, Any],
+        timeout: float,
+        sensitive_values: tuple[str, ...] = (),
+    ) -> dict[str, Any]:
+        transaction_timeout = max(35.0 if action == "probe" else 60.0, timeout)
+        identifier = os.urandom(16).hex()
+        self._pending_transactions.add(identifier)
+        primary_result: dict[str, Any] | None = None
+        primary_error: BaseException | None = None
+        try:
+            primary_result = self._invoke(
+                action,
+                {
+                    **document,
+                    "transaction_id": identifier,
+                    "transaction_timeout_seconds": transaction_timeout,
+                },
+                transaction_timeout,
+                sensitive_values,
+            )
+        except BaseException as error:
+            primary_error = error
+        try:
+            self._cleanup_transaction(identifier, 45.0)
+        except BaseException as cleanup_error:
+            raise AcceptanceFailure(
+                f"Setup client {action} network cleanup could not be verified"
+            ) from cleanup_error
+        if primary_error is not None:
+            raise primary_error
+        assert primary_result is not None
+        return primary_result
+
+    def cleanup_pending(self, timeout: float = 45.0) -> None:
+        failures = False
+        for identifier in tuple(self._pending_transactions):
+            try:
+                self._cleanup_transaction(identifier, timeout)
+            except BaseException:
+                failures = True
+        if failures or self._pending_transactions:
+            raise AcceptanceFailure("Setup client network cleanup could not be verified")
+
+    def probe(self, timeout: float) -> None:
+        response = self._request(
+            "probe",
+            {},
+            timeout,
+        )
+        if set(response) != {
+            "protocol_version",
+            "action",
+            "ok",
+            "helper_sha256",
+            "control_path",
+        } or response.get("helper_sha256") != self._expected_helper_sha256 or response.get(
+            "control_path"
+        ) != "wired":
+            raise AcceptanceFailure("Setup client probe response is invalid")
+
+    def pair(
+        self,
+        access: dict[str, Any],
+        hub_address: str,
+        pairing_code: str,
+        timeout: float,
+    ) -> dict[str, Any]:
+        response = self._request(
+            "pair",
+            {
+                "access": access,
+                "hub_address": hub_address,
+                "pairing_code": pairing_code,
+            },
+            timeout,
+            (str(access.get("password", "")), pairing_code),
+        )
+        if set(response) != {
+            "protocol_version",
+            "action",
+            "ok",
+            "recovery_page",
+            "response_acknowledged",
+        } or response.get("recovery_page") is not True or response.get(
+            "response_acknowledged"
+        ) is not True:
+            raise AcceptanceFailure("Setup client pair response is invalid")
+
+    def snapshot(
+        self,
+        access: dict[str, Any],
+        timeout: float,
+    ) -> dict[str, Any]:
+        response = self._request(
+            "snapshot",
+            {"access": access},
+            timeout,
+            (str(access.get("password", "")),),
+        )
+        if set(response) != {
+            "protocol_version",
+            "action",
+            "ok",
+            "recovery_page",
+            "profiles",
+        } or response.get("recovery_page") is not True or not companion_profiles_valid(
+            response.get("profiles")
+        ):
+            raise AcceptanceFailure("Setup client snapshot response is invalid")
+        return response["profiles"]
+
+    def restore(
+        self,
+        access: dict[str, Any],
+        original_profiles: dict[str, Any],
+        timeout: float,
+    ) -> None:
+        response = self._request(
+            "restore",
+            {"access": access, "original_profiles": original_profiles},
+            timeout,
+            (str(access.get("password", "")),),
+        )
+        if set(response) != {
+            "protocol_version",
+            "action",
+            "ok",
+            "profiles_restored",
+        } or response.get("profiles_restored") is not True:
+            raise AcceptanceFailure("Setup client restore response is invalid")
+
+
 class CleanupTransaction:
     def __init__(self) -> None:
         self.setup_pending = False
-        self.setup_ssids: set[str] = set()
         self.trust_may_need_restore = False
         self.original_profiles: dict[str, Any] | None = None
         self.profiles_may_need_restore = False
 
     def begin_setup(self) -> None:
         self.setup_pending = True
-
-    def observe_setup_access(self, ssid: str) -> None:
-        self.setup_ssids.add(ssid)
 
     def observe_setup_closed(self) -> None:
         self.setup_pending = False
@@ -731,127 +987,6 @@ class CompanionProcess:
         return ManagementClient("127.0.0.1:7777", self.token)
 
 
-def http_form(base: str, path: str, fields: dict[str, str]) -> int:
-    request = urllib.request.Request(
-        base.rstrip("/") + path,
-        data=urllib.parse.urlencode(fields).encode("ascii"),
-        method="POST",
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-    )
-    try:
-        with open_direct(request, timeout=4) as response:
-            response.read()
-            return response.status
-    except urllib.error.HTTPError as error:
-        error.read()
-        return error.code
-
-
-def http_form_json(
-    base: str, path: str, fields: dict[str, str]
-) -> tuple[int, dict[str, Any]]:
-    request = urllib.request.Request(
-        base.rstrip("/") + path,
-        data=urllib.parse.urlencode(fields).encode("ascii"),
-        method="POST",
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-    )
-    try:
-        with open_direct(request, timeout=4) as response:
-            body = response.read()
-            return response.status, json.loads(body) if body else {}
-    except urllib.error.HTTPError as error:
-        error.read()
-        return error.code, {}
-
-
-def submit_pairing(setup_base: str, hub_address: str, code: str) -> None:
-    try:
-        status, response = http_form_json(
-            setup_base,
-            "/api/companions/pair",
-            {"hub_address": hub_address, "code": code},
-        )
-    except OSError as error:
-        raise AcceptanceFailure("Deck Pairing 202 response was not received") from error
-    response_ack = response.get("response_ack")
-    if (
-        status != 202
-        or not isinstance(response_ack, str)
-        or re.fullmatch(r"[0-9a-f]{32}", response_ack) is None
-    ):
-        raise AcceptanceFailure(f"Deck Pairing request returned {status}")
-    try:
-        acknowledged = http_form(
-            setup_base,
-            "/api/companions/pair/ack",
-            {"response_ack": response_ack},
-        )
-    except OSError:
-        # The ACK is the final network message. Once the Deck receives it, the
-        # Setup AP may close before the ACK response reaches the host. The
-        # caller proves delivery with Setup inactive and Device Link online.
-        return
-    if acknowledged != 202:
-        raise AcceptanceFailure("Deck Pairing response acknowledgement failed")
-
-
-def setup_json(base: str, path: str = "/api/status") -> tuple[int, dict[str, Any]]:
-    request = urllib.request.Request(base.rstrip("/") + path, method="GET")
-    try:
-        with open_direct(request, timeout=4) as response:
-            body = response.read()
-            return response.status, json.loads(body) if body else {}
-    except urllib.error.HTTPError as error:
-        error.read()
-        return error.code, {}
-
-
-def snapshot_companion_profiles(setup_base: str) -> dict[str, Any]:
-    status, document = setup_json(setup_base)
-    companions = document.get("companions")
-    if status != 200 or not isinstance(companions, dict):
-        raise AcceptanceFailure("Setup did not expose the Companion Profile snapshot")
-    profiles = companions.get("profiles")
-    active_profile = companions.get("active_profile_id")
-    if not isinstance(profiles, list) or not isinstance(active_profile, str):
-        raise AcceptanceFailure("Setup Companion Profile snapshot is malformed")
-    profile_ids: list[str] = []
-    for profile in profiles:
-        if not isinstance(profile, dict) or not isinstance(profile.get("profile_id"), str):
-            raise AcceptanceFailure("Setup Companion Profile entry is malformed")
-        profile_ids.append(profile["profile_id"])
-    return {"profile_ids": profile_ids, "active_profile_id": active_profile}
-
-
-def restore_companion_profiles(
-    setup_base: str,
-    original: dict[str, Any],
-    stage_timeout: float,
-) -> None:
-    current = snapshot_companion_profiles(setup_base)
-    original_ids = set(original["profile_ids"])
-    extras = [profile_id for profile_id in current["profile_ids"] if profile_id not in original_ids]
-    for profile_id in extras:
-        if http_form(setup_base, "/api/companions/revoke", {"profile_id": profile_id}) != 202:
-            raise AcceptanceFailure("cannot revoke the temporary M1 Companion Profile")
-    original_active = str(original["active_profile_id"])
-    if original_active:
-        if http_form(
-            setup_base, "/api/companions/select", {"profile_id": original_active}
-        ) != 202:
-            raise AcceptanceFailure("cannot restore the original active Companion Profile")
-    deadline = time.monotonic() + stage_timeout
-    while time.monotonic() < deadline:
-        observed = snapshot_companion_profiles(setup_base)
-        if set(observed["profile_ids"]) == original_ids and (
-            not original_active or observed["active_profile_id"] == original_active
-        ):
-            return
-        time.sleep(0.25)
-    raise AcceptanceFailure("Companion Profile restoration did not commit")
-
-
 def enter_setup_access(
     serial_evidence: SerialEvidence,
     cleanup: CleanupTransaction,
@@ -868,7 +1003,6 @@ def enter_setup_access(
         lambda event: event.get("type") == "hil_setup_access",
         f"{stage}: Setup access",
     )
-    cleanup.observe_setup_access(access["ssid"])
     return access
 
 
@@ -910,276 +1044,32 @@ def plain_http_status(origin: str, path: str) -> int:
         return error.code
 
 
-def remaining_timeout(
-    deadline: float,
-    operation_limit: float,
-    reserve: float = 0,
-) -> float:
-    remaining = deadline - time.monotonic() - reserve
-    if remaining <= 0:
-        raise AcceptanceFailure("Mac Wi-Fi association timed out")
-    return min(operation_limit, remaining)
-
-
-def connect_wifi(
-    ssid: str,
-    password: str | None = None,
-    timeout: float = 60,
-) -> None:
-    command = ["networksetup", "-setairportnetwork", "en0", ssid]
-    if password is not None:
-        command.append(password)
-    # CoreWLAN can take longer than 20 seconds to leave the normal LAN and
-    # associate with a newly-created WPA2 Setup AP, especially immediately
-    # after a previous failed association. Keep this bounded but allow the
-    # platform to complete its own retry cycle.
-    try:
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired as error:
-        raise AcceptanceFailure("Mac Wi-Fi association timed out") from error
-    diagnostic = "".join(
-        value for value in (result.stdout, result.stderr) if isinstance(value, str)
-    ).lower()
-    false_success = any(
-        marker in diagnostic
-        for marker in ("could not find network", "failed to join network", "couldn't join")
-    )
-    if result.returncode != 0 or false_success:
-        raise AcceptanceFailure("cannot switch the Mac Wi-Fi network")
-
-
-def set_wifi_power(enabled: bool, timeout: float = 10) -> None:
-    try:
-        result = subprocess.run(
-            ["networksetup", "-setairportpower", "en0", "on" if enabled else "off"],
-            capture_output=True,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired as error:
-        raise AcceptanceFailure("Mac Wi-Fi interface reset timed out") from error
-    if result.returncode != 0:
-        raise AcceptanceFailure("cannot reset the Mac Wi-Fi interface")
-
-
-def wifi_command_output(command: list[str], timeout: float) -> str:
-    try:
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired:
-        return ""
-    return result.stdout.strip() if result.returncode == 0 else ""
-
-
-def host_is_reachable(host: str, timeout: float) -> bool:
-    # macOS 15 redacts SSID/BSSID from all unprivileged status APIs. Prove the
-    # association at the interface layer instead: en0 must hold a DHCP address
-    # on the target /24 and the scoped route to the target must resolve to en0.
-    # A VPN, Ethernet route, or a stale previous Wi-Fi association cannot meet
-    # both conditions.
-    deadline = time.monotonic() + timeout
-    local_address = wifi_command_output(
-        ["ipconfig", "getifaddr", "en0"],
-        remaining_timeout(deadline, timeout),
-    )
-    if not local_address:
-        return False
-    route = wifi_command_output(
-        ["route", "-n", "get", "-ifscope", "en0", host],
-        remaining_timeout(deadline, timeout),
-    )
-    try:
-        same_subnet = ipaddress.ip_address(local_address) in ipaddress.ip_network(
-            f"{host}/24", strict=False
-        )
-    except ValueError:
-        return False
-    if not same_subnet or re.search(r"(?m)^\s*interface:\s+en0\s*$", route) is None:
-        return False
-    try:
-        return subprocess.run(
-            [
-                "ping",
-                "-b",
-                "en0",
-                "-S",
-                local_address,
-                "-c",
-                "1",
-                "-W",
-                "1000",
-                host,
-            ],
-            capture_output=True,
-            timeout=remaining_timeout(deadline, timeout),
-        ).returncode == 0
-    except subprocess.TimeoutExpired:
-        return False
-
-
-def wait_for_wifi_host(host: str, deadline: float, wait_limit: float) -> bool:
-    settle_deadline = min(deadline, time.monotonic() + wait_limit)
-    while True:
-        remaining = settle_deadline - time.monotonic()
-        if remaining <= 0:
-            return False
-        if host_is_reachable(host, min(2.0, remaining)):
-            return True
-        remaining = settle_deadline - time.monotonic()
-        if remaining <= 0:
-            return False
-        time.sleep(min(0.5, remaining))
-
-
-def connect_wifi_for_host(
-    ssid: str,
-    password: str | None,
-    host: str,
-    timeout: float,
-    *,
-    deadline: float | None = None,
-) -> None:
-    deadline = deadline if deadline is not None else time.monotonic() + timeout
-    # Select the requested SSID before using reachability as proof. A stale
-    # route or VPN may make the same private address reachable via another
-    # interface and must never satisfy this transaction.
-    # macOS can leave CoreWLAN in a state where networksetup either blocks or
-    # reports success while retaining the old association. A power cycle before
-    # each bounded attempt is the reliable transition observed on the real
-    # acceptance host. Three scans absorb CoreWLAN's occasional false-success
-    # "network not found" result while all work shares the caller deadline.
-    for attempt in range(3):
-        now = time.monotonic()
-        later_attempt_reserve = min(
-            max(0.0, deadline - now) / 2,
-            30.0 if attempt == 0 else 15.0 if attempt == 1 else 0.0,
-        )
-        attempt_deadline = deadline - later_attempt_reserve
-        # A complete off/on cycle needs a reserved power-on window. If this
-        # attempt has consumed its slice, advance to the later attempt whose
-        # budget was deliberately kept aside instead of failing the run early.
-        if attempt_deadline - now <= 10:
-            continue
-        powered_off = False
-        try:
-            # Reserve the complete power-on budget before turning the interface
-            # off so interruption or failure cannot leave the host radio down.
-            powered_off = True
-            set_wifi_power(False, remaining_timeout(attempt_deadline, 10, reserve=10))
-            time.sleep(min(2, remaining_timeout(attempt_deadline, 2, reserve=10)))
-        finally:
-            if powered_off:
-                set_wifi_power(True, remaining_timeout(attempt_deadline, 10))
-        if time.monotonic() >= attempt_deadline:
-            continue
-        time.sleep(min(3, remaining_timeout(attempt_deadline, 3)))
-        for association_attempt in range(3):
-            if time.monotonic() >= attempt_deadline:
-                break
-            try:
-                connect_wifi(
-                    ssid,
-                    password,
-                    remaining_timeout(
-                        attempt_deadline,
-                        12 if attempt < 2 else 20,
-                    ),
-                )
-            except AcceptanceFailure:
-                # networksetup is not authoritative: on macOS it can report
-                # failure after CoreWLAN has already joined the requested AP.
-                # We did attempt the requested SSID above; the source-bound
-                # en0 address/route/host proof below decides the actual state.
-                pass
-            settle_budget = max(
-                0.0, attempt_deadline - time.monotonic()
-            )
-            if settle_budget <= 0:
-                break
-            if wait_for_wifi_host(
-                host,
-                attempt_deadline,
-                min(6.0, settle_budget) if attempt < 2 else settle_budget,
-            ):
-                return
-            if association_attempt < 2:
-                remaining = attempt_deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                time.sleep(min(1, remaining))
-    raise AcceptanceFailure(f"network host {host} did not become reachable")
-
-
-def restore_original_wifi(ssid: str, timeout: float) -> None:
-    # Always repair a half-finished power cycle before selecting and proving
-    # the original LAN. This is used by normal, compensation, and final paths.
-    deadline = time.monotonic() + timeout
-    set_wifi_power(True, remaining_timeout(deadline, 10))
-    connect_wifi_for_host(
-        ssid,
-        None,
-        "192.168.31.1",
-        timeout,
-        deadline=deadline,
-    )
-
-
-def forget_wifi(ssid: str) -> bool:
-    if not ssid:
-        return True
-    result = subprocess.run(
-        ["networksetup", "-removepreferredwirelessnetwork", "en0", ssid],
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        timeout=10,
-    )
-    return result.returncode == 0
-
-
-def forget_setup_networks(ssids: set[str]) -> tuple[bool, list[str]]:
-    failures: list[str] = []
-    for ssid in sorted(ssids):
-        try:
-            if not forget_wifi(ssid):
-                failures.append(ssid)
-        except Exception:
-            failures.append(ssid)
-    return not failures, failures
-
-
 def pair_deck(
     management: ManagementClient,
     serial_evidence: SerialEvidence,
-    original_ssid: str,
+    setup_client: SetupClientAdapter,
     hub_address: str,
     stage_timeout: float,
     cleanup: CleanupTransaction,
     secrets: SensitiveValueTracker,
     stage: str,
-    before_submit: Callable[[str], None] | None = None,
+    before_submit: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
+    access = enter_setup_access(serial_evidence, cleanup, stage)
+    secrets.add(access["password"])
+    original_profiles = setup_client.snapshot(access, stage_timeout)
+    if before_submit is not None:
+        before_submit(original_profiles)
     status, issued = management.request("POST", "/api/v1/pairing/codes")
     if status != 200 or re.fullmatch(r"[0-9]{6}", str(issued.get("code", ""))) is None:
         raise AcceptanceFailure(f"{stage}: Companion did not issue a six-digit Pairing code")
     secrets.add(str(issued["code"]))
-    access = enter_setup_access(serial_evidence, cleanup, stage)
-    secrets.add(access["password"])
-    connect_wifi_for_host(
-        access["ssid"], access["password"], access["address"], stage_timeout
+    setup_client.pair(
+        access,
+        hub_address,
+        str(issued["code"]),
+        stage_timeout,
     )
-    setup_base = f"http://{access['address']}"
-    if before_submit is not None:
-        before_submit(setup_base)
-    submit_pairing(setup_base, hub_address, str(issued["code"]))
     issued = {}
     serial_evidence.event(
         lambda event: event.get("type") == "setup_state" and event.get("active") is False,
@@ -1187,7 +1077,6 @@ def pair_deck(
         30,
     )
     cleanup.observe_setup_closed()
-    restore_original_wifi(original_ssid, stage_timeout)
     return serial_evidence.event(
         lambda event: event.get("type") == "companion_link_state"
         and event.get("state") == "online",
@@ -1309,7 +1198,12 @@ def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run real M1 Pairing and Device Link acceptance.")
     parser.add_argument("--port", required=True)
     parser.add_argument("--result-dir", type=pathlib.Path, required=True)
-    parser.add_argument("--original-ssid", required=True)
+    parser.add_argument(
+        "--setup-client-command-file",
+        type=pathlib.Path,
+        required=True,
+        help="JSON argv for a dual-homed Setup client helper reached over its wired path",
+    )
     parser.add_argument(
         "--hub-address",
         required=True,
@@ -1320,7 +1214,7 @@ def parse_arguments() -> argparse.Namespace:
         required=True,
         help="successful same-commit Actions run containing macOS and Windows native observations",
     )
-    parser.add_argument("--stage-timeout", type=float, default=45.0)
+    parser.add_argument("--stage-timeout", type=float, default=75.0)
     return parser.parse_args()
 
 
@@ -1347,6 +1241,7 @@ def main() -> int:
     companion: CompanionProcess | None = None
     managed_processes: list[CompanionProcess] = []
     serial_evidence: SerialEvidence | None = None
+    setup_client: SetupClientAdapter | None = None
     cleanup = CleanupTransaction()
     summary: dict[str, Any] = {"status": "failed"}
     summary_written = False
@@ -1354,6 +1249,14 @@ def main() -> int:
     try:
         if dirty:
             raise AcceptanceFailure("source tree is dirty; commit before auditable acceptance")
+        helper_path = REPOSITORY_ROOT / "tools/m1_setup_client.py"
+        helper_sha256 = hashlib.sha256(helper_path.read_bytes()).hexdigest()
+        setup_client = SetupClientAdapter(
+            load_setup_client_command(arguments.setup_client_command_file),
+            secrets,
+            helper_sha256,
+        )
+        setup_client.probe(max(35.0, min(arguments.stage_timeout, 45.0)))
         environment = run_preflight(arguments.result_dir / "preflight.log")
         toolchain_environment = environment
         if command_output(["idf.py", "--version"], environment) != "ESP-IDF v6.0.2":
@@ -1387,14 +1290,14 @@ def main() -> int:
         managed_processes.append(companion)
         management = companion.start()
 
-        def remember_original_profiles(setup_base: str) -> None:
-            cleanup.original_profiles = snapshot_companion_profiles(setup_base)
+        def remember_original_profiles(original_profiles: dict[str, Any]) -> None:
+            cleanup.original_profiles = original_profiles
             cleanup.profiles_may_need_restore = True
 
         online = pair_deck(
             management,
             serial_evidence,
-            arguments.original_ssid,
+            setup_client,
             arguments.hub_address,
             arguments.stage_timeout,
             cleanup,
@@ -1506,7 +1409,7 @@ def main() -> int:
         pair_deck(
             management,
             serial_evidence,
-            arguments.original_ssid,
+            setup_client,
             arguments.hub_address,
             arguments.stage_timeout,
             cleanup,
@@ -1590,14 +1493,8 @@ def main() -> int:
             "restore original Companion Profiles",
         )
         secrets.add(cleanup_access["password"])
-        connect_wifi_for_host(
-            cleanup_access["ssid"],
-            cleanup_access["password"],
-            cleanup_access["address"],
-            arguments.stage_timeout,
-        )
-        restore_companion_profiles(
-            f"http://{cleanup_access['address']}",
+        setup_client.restore(
+            cleanup_access,
             cleanup.original_profiles,
             arguments.stage_timeout,
         )
@@ -1609,7 +1506,6 @@ def main() -> int:
             arguments.stage_timeout,
             cleanup,
         )
-        restore_original_wifi(arguments.original_ssid, arguments.stage_timeout)
     except (
         AcceptanceFailure,
         KeyboardInterrupt,
@@ -1626,14 +1522,19 @@ def main() -> int:
             except Exception as error:
                 cleanup_ok = False
                 print(f"M1 cleanup failed: {error}", file=sys.stderr)
-        if serial_evidence is not None and companion is not None and cleanup.needs_compensation():
+        if (
+            serial_evidence is not None
+            and companion is not None
+            and setup_client is not None
+            and cleanup.needs_compensation()
+        ):
             try:
                 management = companion.ensure_started()
                 if cleanup.trust_may_need_restore:
                     pair_deck(
                         management,
                         serial_evidence,
-                        arguments.original_ssid,
+                        setup_client,
                         arguments.hub_address,
                         arguments.stage_timeout,
                         cleanup,
@@ -1648,14 +1549,8 @@ def main() -> int:
                         "cleanup Profile compensation",
                     )
                     secrets.add(access["password"])
-                    connect_wifi_for_host(
-                        access["ssid"],
-                        access["password"],
-                        access["address"],
-                        arguments.stage_timeout,
-                    )
-                    restore_companion_profiles(
-                        f"http://{access['address']}",
+                    setup_client.restore(
+                        access,
                         cleanup.original_profiles,
                         arguments.stage_timeout,
                     )
@@ -1681,18 +1576,12 @@ def main() -> int:
             except Exception as error:
                 cleanup_ok = False
                 print(f"M1 cleanup failed: {error}", file=sys.stderr)
-        try:
-            restore_original_wifi(arguments.original_ssid, arguments.stage_timeout)
-        except Exception as error:
-            cleanup_ok = False
-            print(f"M1 Wi-Fi restore failed: {error}", file=sys.stderr)
-        setup_networks_removed, failed_ssids = forget_setup_networks(cleanup.setup_ssids)
-        if not setup_networks_removed:
-            cleanup_ok = False
-            print(
-                f"M1 Setup Wi-Fi cleanup failed for {len(failed_ssids)} network(s)",
-                file=sys.stderr,
-            )
+        if setup_client is not None:
+            try:
+                setup_client.cleanup_pending(max(45.0, arguments.stage_timeout))
+            except Exception as error:
+                cleanup_ok = False
+                print(f"M1 helper cleanup failed: {error}", file=sys.stderr)
         if serial_evidence is not None:
             try:
                 serial_evidence.close()

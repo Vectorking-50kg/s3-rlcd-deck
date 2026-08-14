@@ -957,6 +957,16 @@ s3-rlcd-deck/
 - 管理入口与 Device Hub 分离。
 - 一次性码配对、证书指纹固定、WSS 心跳。
 - 多 Profile 数据结构先落地，故障切换可在 M5 完成。
+- 实板验收时控制 Mac 始终保留在普通 LAN；由有线控制、Wi-Fi 加入 Setup AP 的
+  双网口 Linux 客户端访问真实恢复页并透明转发 Device Hub TLS。没有该物理客户端时
+  `recovery_pairing` 必须保持 BLOCKED，USB/Host seam 不得替代。
+- 任何会修改 Companion Profile 的 Pairing 前，控制端必须先通过独立事务取得并保存
+  原 Profile 快照；SSH 返回或客户端网络清理失败不能丢失补偿依据。
+- Linux 客户端在切换 Wi-Fi 前只持久化非秘密 UUID 补偿日志；控制端每次事务后必须用
+  新 SSH 连接执行幂等 cleanup/verify，并以跨进程事务锁等待旧 primary 完全退出。SSH
+  cleanup 还必须留下 cancellation fence，使尚未取得锁的迟到 primary 永久拒绝变更。
+  控制口必须由 NetworkManager 明确识别为 Ethernet。每次请求都重新绑定受验 helper
+  SHA-256。
 
 ### M2：Codex 首页
 

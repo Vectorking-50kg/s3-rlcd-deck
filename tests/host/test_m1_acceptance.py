@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import pathlib
+import re
 import tempfile
 import urllib.request
 from unittest import mock
@@ -23,6 +24,229 @@ def test_private_acceptance_endpoints_never_inherit_system_proxies() -> None:
     proxy_handler = build.call_args.args[0]
     assert isinstance(proxy_handler, urllib.request.ProxyHandler)
     assert proxy_handler.proxies == {}
+
+
+def test_setup_client_command_is_an_exact_json_argv_without_secrets() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        config = pathlib.Path(directory) / "setup-client.json"
+        config.write_text(
+            json.dumps(["ssh", "-T", "m1-helper", "python3", "/opt/m1_setup_client.py"]),
+            encoding="utf-8",
+        )
+        assert m1.load_setup_client_command(config) == [
+            "ssh",
+            "-T",
+            "m1-helper",
+            "python3",
+            "/opt/m1_setup_client.py",
+        ]
+        for malformed in ({"command": ["ssh"]}, ["ssh", ""], ["ssh", "bad\narg"]):
+            config.write_text(json.dumps(malformed), encoding="utf-8")
+            try:
+                m1.load_setup_client_command(config)
+            except m1.AcceptanceFailure:
+                pass
+            else:
+                raise AssertionError("malformed helper command must fail closed")
+
+
+def test_setup_client_proves_same_helper_and_keeps_credentials_off_argv() -> None:
+    source_hash = "a" * 64
+    response = {
+        "protocol_version": 1,
+        "action": "probe",
+        "ok": True,
+        "helper_sha256": source_hash,
+        "control_path": "wired",
+    }
+    completed = mock.Mock(
+        returncode=0,
+        stdout=json.dumps(response) + "\n",
+        stderr="",
+    )
+    secrets = m1.SensitiveValueTracker()
+    client = m1.SetupClientAdapter(["ssh", "m1-helper"], secrets, source_hash)
+    cleanup_completed = mock.Mock(
+        returncode=0,
+        stdout=json.dumps(
+            {
+                "protocol_version": 1,
+                "action": "cleanup",
+                "ok": True,
+                "network_restored": True,
+            }
+        )
+        + "\n",
+        stderr="",
+    )
+    with mock.patch.object(
+        m1.subprocess, "run", side_effect=[completed, cleanup_completed]
+    ) as run:
+        client.probe(35)
+    assert run.call_args_list[0].args[0] == ["ssh", "m1-helper"]
+    request = json.loads(run.call_args_list[0].kwargs["input"])
+    assert request["protocol_version"] == 1
+    assert request["action"] == "probe"
+    assert request["expected_helper_sha256"] == source_hash
+    assert re.fullmatch(r"[0-9a-f]{32}", request["transaction_id"])
+    cleanup_request = json.loads(run.call_args_list[1].kwargs["input"])
+    assert cleanup_request["action"] == "cleanup"
+    assert cleanup_request["transaction_id"] == request["transaction_id"]
+
+    access = {
+        "ssid": "S3Deck-1234",
+        "password": "SETUP-SECRET",
+        "address": "192.168.4.1",
+    }
+    snapshot_response = {
+        "protocol_version": 1,
+        "action": "snapshot",
+        "ok": True,
+        "recovery_page": True,
+        "profiles": {"profile_ids": [], "active_profile_id": ""},
+    }
+    completed.stdout = json.dumps(snapshot_response) + "\n"
+    with mock.patch.object(
+        m1.subprocess, "run", side_effect=[completed, cleanup_completed]
+    ) as run:
+        original = client.snapshot(access, 20)
+    assert original == {"profile_ids": [], "active_profile_id": ""}
+    assert "SETUP-SECRET" not in " ".join(run.call_args_list[0].args[0])
+    request = json.loads(run.call_args_list[0].kwargs["input"])
+    assert request["access"] == access
+
+    pair_response = {
+        "protocol_version": 1,
+        "action": "pair",
+        "ok": True,
+        "recovery_page": True,
+        "response_acknowledged": True,
+    }
+    completed.stdout = json.dumps(pair_response) + "\n"
+    with mock.patch.object(
+        m1.subprocess, "run", side_effect=[completed, cleanup_completed]
+    ) as run:
+        client.pair(access, "192.168.31.45:7780", "012345", 20)
+    assert "SETUP-SECRET" not in " ".join(run.call_args_list[0].args[0])
+    assert "012345" not in " ".join(run.call_args_list[0].args[0])
+    request = json.loads(run.call_args_list[0].kwargs["input"])
+    assert request["pairing_code"] == "012345"
+
+    completed.stdout = json.dumps(
+        {
+            "protocol_version": 1,
+            "action": "restore",
+            "ok": True,
+            "profiles_restored": True,
+        }
+    ) + "\n"
+    with mock.patch.object(
+        m1.subprocess, "run", side_effect=[completed, cleanup_completed]
+    ) as run:
+        client.restore(access, original, 20)
+    assert "SETUP-SECRET" not in " ".join(run.call_args_list[0].args[0])
+    assert (
+        json.loads(run.call_args_list[0].kwargs["input"])["original_profiles"]
+        == original
+    )
+
+
+def test_setup_client_timeout_runs_a_fresh_ssh_cleanup_transaction() -> None:
+    source_hash = "a" * 64
+    client = m1.SetupClientAdapter(
+        ["ssh", "m1-helper"], m1.SensitiveValueTracker(), source_hash
+    )
+    cleanup_completed = mock.Mock(
+        returncode=0,
+        stdout=json.dumps(
+            {
+                "protocol_version": 1,
+                "action": "cleanup",
+                "ok": True,
+                "network_restored": True,
+            }
+        )
+        + "\n",
+        stderr="",
+    )
+    with mock.patch.object(
+        m1.subprocess,
+        "run",
+        side_effect=[m1.subprocess.TimeoutExpired(["ssh"], 40), cleanup_completed],
+    ) as run:
+        try:
+            client.snapshot(
+                {
+                    "ssid": "S3Deck-1234",
+                    "password": "SETUP-SECRET",
+                    "address": "192.168.4.1",
+                },
+                35,
+            )
+        except m1.AcceptanceFailure:
+            pass
+        else:
+            raise AssertionError("the primary timeout must fail after compensation")
+    primary = json.loads(run.call_args_list[0].kwargs["input"])
+    cleanup = json.loads(run.call_args_list[1].kwargs["input"])
+    assert cleanup["action"] == "cleanup"
+    assert cleanup["transaction_id"] == primary["transaction_id"]
+    assert cleanup["expected_helper_sha256"] == source_hash
+
+
+def test_m1_source_never_switches_the_controller_mac_wifi() -> None:
+    source = (m1.REPOSITORY_ROOT / "tools/m1_acceptance.py").read_text(
+        encoding="utf-8"
+    )
+    assert "networksetup" not in source
+    assert "-setairport" not in source
+    main = source.index("def main()")
+    probe = source.index("setup_client.probe(", main)
+    preflight = source.index("run_preflight(", probe)
+    flash = source.index("run_app_flash(", preflight)
+    assert probe < preflight < flash
+
+
+def test_pairing_records_the_profile_snapshot_before_issuing_the_code() -> None:
+    operations: list[str] = []
+    management = mock.Mock()
+    management.request.side_effect = lambda *_args: (
+        operations.append("issue-code") or (200, {"code": "012345"})
+    )
+    serial = mock.Mock()
+    serial.event.side_effect = [
+        {"type": "setup_state", "active": True},
+        {
+            "type": "hil_setup_access",
+            "ssid": "S3Deck-1234",
+            "password": "SETUP-SECRET",
+            "address": "192.168.4.1",
+        },
+        {"type": "setup_state", "active": False},
+        {"type": "companion_link_state", "state": "online"},
+    ]
+    setup_client = mock.Mock()
+    original = {"profile_ids": [], "active_profile_id": ""}
+    setup_client.snapshot.side_effect = lambda *_args: (
+        operations.append("snapshot") or original
+    )
+    setup_client.pair.side_effect = lambda *_args: operations.append("pair")
+    cleanup = m1.CleanupTransaction()
+    observed: list[dict[str, object]] = []
+
+    m1.pair_deck(
+        management,
+        serial,
+        setup_client,
+        "192.168.31.45:7780",
+        20,
+        cleanup,
+        m1.SensitiveValueTracker(),
+        "pair",
+        lambda profiles: (operations.append("record"), observed.append(profiles)),
+    )
+    assert operations == ["snapshot", "record", "issue-code", "pair"]
+    assert observed == [original]
 
 
 def test_serial_evidence_keeps_redacted_link_state_and_drops_setup_secret() -> None:
@@ -223,70 +447,6 @@ def test_companion_logs_are_drained_redacted_and_secret_observation_fails_gate()
         assert not process.logs_redacted()
         assert "ordinary line" not in output.read_text(encoding="utf-8")
         assert "secret-value" not in output.read_text(encoding="utf-8")
-
-
-def test_profile_cleanup_revokes_only_temporary_profile_and_reselects_original() -> None:
-    original = {"profile_ids": ["sha256:" + "a" * 64], "active_profile_id": "sha256:" + "a" * 64}
-    temporary = "sha256:" + "b" * 64
-    snapshots = [
-        {"profile_ids": original["profile_ids"] + [temporary], "active_profile_id": temporary},
-        original,
-    ]
-    operations: list[tuple[str, dict[str, str]]] = []
-
-    def fake_form(_base: str, path: str, fields: dict[str, str]) -> int:
-        operations.append((path, fields))
-        return 202
-
-    with mock.patch.object(m1, "snapshot_companion_profiles", side_effect=snapshots), mock.patch.object(
-        m1, "http_form", side_effect=fake_form
-    ):
-        m1.restore_companion_profiles("http://192.168.4.1", original, 1)
-    assert operations == [
-        ("/api/companions/revoke", {"profile_id": temporary}),
-        ("/api/companions/select", {"profile_id": original["active_profile_id"]}),
-    ]
-
-
-def test_pairing_closes_setup_only_after_client_acknowledges_the_202_body() -> None:
-    response_ack = "00112233445566778899aabbccddeeff"
-    operations: list[tuple[str, str, dict[str, str]]] = []
-
-    def pair_response(
-        _base: str, path: str, fields: dict[str, str]
-    ) -> tuple[int, dict[str, object]]:
-        operations.append(("json", path, fields))
-        return 202, {
-            "accepted": True,
-            "state": "queued",
-            "response_ack": response_ack,
-        }
-
-    def acknowledge(_base: str, path: str, fields: dict[str, str]) -> int:
-        operations.append(("form", path, fields))
-        return 202
-
-    with mock.patch.object(m1, "http_form_json", side_effect=pair_response), mock.patch.object(
-        m1, "http_form", side_effect=acknowledge
-    ):
-        m1.submit_pairing("http://192.168.4.1", "192.168.31.45:7780", "012345")
-    assert operations == [
-        (
-            "json",
-            "/api/companions/pair",
-            {"hub_address": "192.168.31.45:7780", "code": "012345"},
-        ),
-        (
-            "form",
-            "/api/companions/pair/ack",
-            {"response_ack": response_ack},
-        ),
-    ]
-
-    with mock.patch.object(m1, "http_form_json", side_effect=pair_response), mock.patch.object(
-        m1, "http_form", side_effect=ConnectionResetError("AP closed after ACK")
-    ):
-        m1.submit_pairing("http://192.168.4.1", "192.168.31.45:7780", "012345")
 
 
 def test_post_flash_monitor_requests_a_fresh_boot_after_ready_handshake() -> None:
@@ -541,324 +701,11 @@ def test_restart_ack_is_emitted_before_the_firmware_resets() -> None:
     assert command < acknowledgement < reset
 
 
-def test_wifi_switch_allows_slow_macos_association() -> None:
-    result = mock.Mock(returncode=0)
-    with mock.patch.object(m1.subprocess, "run", return_value=result) as run:
-        m1.connect_wifi("Setup", "password")
-    assert run.call_args.kwargs["timeout"] >= 45
-    assert run.call_args.args[0] == [
-        "networksetup", "-setairportnetwork", "en0", "Setup", "password"
-    ]
-
-
-def test_wifi_switch_timeout_never_exposes_the_password() -> None:
-    secret = "TOP-SECRET-SETUP-PASSWORD"
-    timeout = m1.subprocess.TimeoutExpired(
-        ["networksetup", "-setairportnetwork", "en0", "Setup", secret], 60
-    )
-    with mock.patch.object(m1.subprocess, "run", side_effect=timeout):
-        try:
-            m1.connect_wifi("Setup", secret)
-        except m1.AcceptanceFailure as error:
-            assert secret not in str(error)
-            assert "timed out" in str(error)
-        else:
-            raise AssertionError("association timeout must fail")
-
-
-def test_wifi_switch_rejects_networksetup_false_success() -> None:
-    result = mock.Mock(
-        returncode=0,
-        stdout="Could not find network Setup.\n",
-        stderr="",
-    )
-    with mock.patch.object(m1.subprocess, "run", return_value=result):
-        try:
-            m1.connect_wifi("Setup", "secret")
-        except m1.AcceptanceFailure as error:
-            assert "cannot switch" in str(error)
-            assert "secret" not in str(error)
-        else:
-            raise AssertionError("networksetup false success must be rejected")
-
-
-def test_reachable_target_wins_over_networksetup_false_failure() -> None:
-    operations: list[str] = []
-    with mock.patch.object(
-        m1,
-        "connect_wifi",
-        side_effect=m1.AcceptanceFailure("cannot switch the Mac Wi-Fi network"),
-    ), mock.patch.object(
-        m1,
-        "wait_for_wifi_host",
-        side_effect=lambda *_args: operations.append("prove") or True,
-    ), mock.patch.object(
-        m1,
-        "set_wifi_power",
-        side_effect=lambda enabled, _timeout: operations.append(
-            "power-on" if enabled else "power-off"
-        ),
-    ), mock.patch.object(m1.time, "sleep"), mock.patch.object(
-        m1.time, "monotonic", side_effect=lambda: 1.0
-    ):
-        m1.connect_wifi_for_host("Setup", "password", "192.168.4.1", 60)
-    assert operations == ["power-off", "power-on", "prove"]
-
-
 def test_dev_setup_window_outlives_slow_association() -> None:
     defaults = (
         m1.REPOSITORY_ROOT / "firmware/sdkconfig.defaults.dev"
     ).read_text(encoding="utf-8")
     assert "CONFIG_DECK_SETUP_INACTIVITY_TIMEOUT_SECONDS=120" in defaults
-
-
-def test_setup_wifi_recovery_requires_the_target_host_to_be_reachable() -> None:
-    operations: list[tuple[str, object]] = []
-
-    def connect(ssid: str, password: str | None, timeout: float) -> None:
-        operations.append(("connect", (ssid, password, timeout)))
-
-    def power(enabled: bool, timeout: float) -> None:
-        operations.append(("power", (enabled, timeout)))
-
-    with mock.patch.object(m1, "connect_wifi", side_effect=connect), mock.patch.object(
-        m1, "set_wifi_power", side_effect=power
-    ), mock.patch.object(
-        m1, "wait_for_wifi_host", side_effect=[False, True]
-    ), mock.patch.object(m1.time, "sleep"), mock.patch.object(
-        m1.time, "monotonic", side_effect=lambda: 1.0
-    ):
-        m1.connect_wifi_for_host("Setup", "password", "192.168.4.1", 90)
-
-    assert operations[0] == ("power", (False, mock.ANY))
-    assert operations[1] == ("power", (True, mock.ANY))
-    assert operations[2][0] == "connect"
-    assert any(name == "power" and value[0] is False for name, value in operations)
-    assert any(name == "power" and value[0] is True for name, value in operations)
-    assert sum(name == "connect" for name, _ in operations) == 2
-
-
-def test_exhausted_attempt_rolls_into_the_reserved_power_cycle() -> None:
-    clock = [0.0]
-    operations: list[str] = []
-    proofs = 0
-
-    def power(enabled: bool, _timeout: float) -> None:
-        operations.append("power-on" if enabled else "power-off")
-
-    def connect(*_args) -> None:
-        operations.append("connect")
-
-    def prove(_host: str, attempt_deadline: float, _wait_limit: float) -> bool:
-        nonlocal proofs
-        proofs += 1
-        if proofs == 1:
-            clock[0] = attempt_deadline
-            return False
-        return True
-
-    with mock.patch.object(m1, "connect_wifi", side_effect=connect), mock.patch.object(
-        m1, "set_wifi_power", side_effect=power
-    ), mock.patch.object(
-        m1, "wait_for_wifi_host", side_effect=prove
-    ), mock.patch.object(
-        m1.time, "sleep", side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)
-    ), mock.patch.object(m1.time, "monotonic", side_effect=lambda: clock[0]):
-        m1.connect_wifi_for_host("Setup", "password", "192.168.4.1", 45)
-
-    assert operations.count("power-off") == 2
-    assert operations.count("power-on") == 2
-    assert operations.count("connect") == 2
-
-
-def test_setup_wifi_recovery_survives_the_initial_association_timeout() -> None:
-    operations: list[str] = []
-
-    def connect(_ssid: str, _password: str | None, _timeout: float) -> None:
-        operations.append("connect")
-        if operations.count("connect") == 1:
-            raise m1.AcceptanceFailure("Mac Wi-Fi association timed out")
-
-    with mock.patch.object(m1, "connect_wifi", side_effect=connect), mock.patch.object(
-        m1,
-        "set_wifi_power",
-        side_effect=lambda enabled, _timeout: operations.append(
-            "power-on" if enabled else "power-off"
-        ),
-    ), mock.patch.object(
-        m1, "wait_for_wifi_host", return_value=True
-    ), mock.patch.object(m1.time, "sleep"), mock.patch.object(
-        m1.time, "monotonic", side_effect=lambda: 1.0
-    ):
-        m1.connect_wifi_for_host("Setup", "password", "192.168.4.1", 60)
-
-    assert operations == [
-        "power-off",
-        "power-on",
-        "connect",
-    ]
-
-
-def test_successful_association_waits_for_dhcp_before_resetting_again() -> None:
-    operations: list[str] = []
-    reachable = iter([False, False, True])
-
-    with mock.patch.object(
-        m1,
-        "connect_wifi",
-        side_effect=lambda *_args: operations.append("connect"),
-    ), mock.patch.object(
-        m1,
-        "set_wifi_power",
-        side_effect=lambda enabled, _timeout: operations.append(
-            "power-on" if enabled else "power-off"
-        ),
-    ), mock.patch.object(
-        m1, "host_is_reachable", side_effect=lambda *_args: next(reachable)
-    ), mock.patch.object(m1.time, "sleep"), mock.patch.object(
-        m1.time, "monotonic", side_effect=lambda: 1.0
-    ):
-        m1.connect_wifi_for_host("Setup", "password", "192.168.4.1", 60)
-
-    assert operations == ["power-off", "power-on", "connect"]
-
-
-def test_wifi_power_is_restored_when_reassociation_fails() -> None:
-    operations: list[bool] = []
-
-    def power(enabled: bool, _timeout: float) -> None:
-        operations.append(enabled)
-        if enabled:
-            raise m1.AcceptanceFailure("power on failed")
-
-    with mock.patch.object(m1, "connect_wifi"), mock.patch.object(
-        m1, "host_is_reachable", return_value=False
-    ), mock.patch.object(m1, "set_wifi_power", side_effect=power), mock.patch.object(
-        m1.time, "sleep"
-    ):
-        try:
-            m1.connect_wifi_for_host("Setup", "password", "192.168.4.1", 90)
-        except m1.AcceptanceFailure:
-            pass
-        else:
-            raise AssertionError("power-on failure must fail")
-    assert operations == [False, True]
-
-
-def test_original_lan_recovery_uses_the_reachability_helper() -> None:
-    source = (m1.REPOSITORY_ROOT / "tools/m1_acceptance.py").read_text(encoding="utf-8")
-    assert source.count("restore_original_wifi(") == 4
-    assert '"192.168.31.1",\n        timeout,\n        deadline=deadline' in source
-
-
-def test_wifi_operations_share_one_deadline_budget() -> None:
-    clock = iter([1.0, 1.0, 5.0])
-    with mock.patch.object(m1.time, "monotonic", side_effect=lambda: next(clock)):
-        assert m1.remaining_timeout(10.0, 60.0) == 9.0
-        assert m1.remaining_timeout(10.0, 60.0, reserve=3.0) == 6.0
-        try:
-            m1.remaining_timeout(10.0, 60.0, reserve=6.0)
-        except m1.AcceptanceFailure as error:
-            assert "timed out" in str(error)
-        else:
-            raise AssertionError("exhausted Wi-Fi deadline must fail")
-
-
-def test_target_ssid_is_selected_before_reachability_can_pass() -> None:
-    operations: list[str] = []
-    with mock.patch.object(
-        m1,
-        "connect_wifi",
-        side_effect=lambda *_args: operations.append("connect"),
-    ), mock.patch.object(
-        m1,
-        "host_is_reachable",
-        side_effect=lambda *_args: operations.append("ping") or True,
-    ), mock.patch.object(
-        m1,
-        "set_wifi_power",
-        side_effect=lambda enabled, _timeout: operations.append(
-            "power-on" if enabled else "power-off"
-        ),
-    ), mock.patch.object(m1.time, "monotonic", side_effect=lambda: 1.0):
-        m1.connect_wifi_for_host("Setup", "password", "192.168.4.1", 30)
-    assert operations == ["power-off", "power-on", "connect", "ping"]
-
-
-def test_wifi_reachability_requires_an_en0_address_on_the_target_subnet() -> None:
-    def command_output(command: list[str], _timeout: float) -> str:
-        if command[:2] == ["ipconfig", "getifaddr"]:
-            return "192.168.31.45"
-        return "route to: 192.168.4.1\ninterface: en0\n"
-
-    with mock.patch.object(
-        m1, "wifi_command_output", side_effect=command_output
-    ), mock.patch.object(m1.subprocess, "run", return_value=mock.Mock(returncode=0)):
-        assert not m1.host_is_reachable("192.168.4.1", 2)
-
-    def setup_output(command: list[str], _timeout: float) -> str:
-        if command[:2] == ["ipconfig", "getifaddr"]:
-            return "192.168.4.2"
-        return "route to: 192.168.4.1\ninterface: en0\n"
-
-    with mock.patch.object(
-        m1, "wifi_command_output", side_effect=setup_output
-    ), mock.patch.object(
-        m1.subprocess, "run", return_value=mock.Mock(returncode=0)
-    ) as run:
-        assert m1.host_is_reachable("192.168.4.1", 2)
-    assert run.call_args.args[0][:5] == [
-        "ping",
-        "-b",
-        "en0",
-        "-S",
-        "192.168.4.2",
-    ]
-
-
-def test_wifi_interface_probe_shares_one_deadline() -> None:
-    observed_timeouts: list[float] = []
-
-    def output(command: list[str], timeout: float) -> str:
-        observed_timeouts.append(timeout)
-        if command[0] == "ipconfig":
-            return "192.168.4.2"
-        return "route to: 192.168.4.1\ninterface: en0\n"
-
-    clock = iter([0.0, 0.5, 1.0, 1.5])
-    with mock.patch.object(m1, "wifi_command_output", side_effect=output), mock.patch.object(
-        m1.subprocess, "run", return_value=mock.Mock(returncode=0)
-    ) as run, mock.patch.object(m1.time, "monotonic", side_effect=lambda: next(clock)):
-        assert m1.host_is_reachable("192.168.4.1", 2)
-    assert observed_timeouts == [1.5, 1.0]
-    assert run.call_args.kwargs["timeout"] == 0.5
-
-
-def test_original_wifi_power_and_association_share_one_deadline() -> None:
-    observed: dict[str, object] = {}
-
-    def power(_enabled: bool, timeout: float) -> None:
-        observed["power_timeout"] = timeout
-
-    def connect(
-        _ssid: str,
-        _password: str | None,
-        _host: str,
-        timeout: float,
-        *,
-        deadline: float | None = None,
-    ) -> None:
-        observed["connect_timeout"] = timeout
-        observed["deadline"] = deadline
-
-    clock = iter([10.0, 11.0])
-    with mock.patch.object(m1, "set_wifi_power", side_effect=power), mock.patch.object(
-        m1, "connect_wifi_for_host", side_effect=connect
-    ), mock.patch.object(m1.time, "monotonic", side_effect=lambda: next(clock)):
-        m1.restore_original_wifi("LAN", 30)
-    assert observed["power_timeout"] == 10
-    assert observed["connect_timeout"] == 30
-    assert observed["deadline"] == 40.0
 
 
 def test_diagnostic_console_resets_usb_after_app_only_jtag_flash() -> None:
@@ -877,9 +724,6 @@ def test_cleanup_transaction_records_intent_before_observation() -> None:
     cleanup = m1.CleanupTransaction()
     cleanup.begin_setup()
     assert cleanup.needs_compensation()
-    cleanup.observe_setup_access("S3Deck-111111")
-    cleanup.observe_setup_access("S3Deck-222222")
-    assert cleanup.setup_ssids == {"S3Deck-111111", "S3Deck-222222"}
     cleanup.observe_setup_closed()
     assert cleanup.restored()
 
@@ -926,22 +770,6 @@ def test_expected_setup_access_does_not_trip_secret_observation() -> None:
     assert m1.serial_line_may_contain_secret("pairing code 123456", m1.REDACTED_NON_DIAGNOSTIC)
 
 
-def test_cleanup_attempts_every_setup_network_when_one_removal_fails() -> None:
-    cleanup = m1.CleanupTransaction()
-    cleanup.setup_ssids.update({"Deck-A", "Deck-B"})
-    attempted: list[str] = []
-
-    def removal(ssid: str) -> bool:
-        attempted.append(ssid)
-        return ssid != "Deck-A"
-
-    with mock.patch.object(m1, "forget_wifi", side_effect=removal):
-        cleanup_ok, failures = m1.forget_setup_networks(cleanup.setup_ssids)
-    assert not cleanup_ok
-    assert failures == ["Deck-A"]
-    assert set(attempted) == {"Deck-A", "Deck-B"}
-
-
 def test_preflight_uses_the_users_zsh_for_idf_activation() -> None:
     with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
         m1.os.environ, {}, clear=True
@@ -962,6 +790,11 @@ def test_preflight_uses_the_users_zsh_for_idf_activation() -> None:
 
 if __name__ == "__main__":
     test_private_acceptance_endpoints_never_inherit_system_proxies()
+    test_setup_client_command_is_an_exact_json_argv_without_secrets()
+    test_setup_client_proves_same_helper_and_keeps_credentials_off_argv()
+    test_setup_client_timeout_runs_a_fresh_ssh_cleanup_transaction()
+    test_m1_source_never_switches_the_controller_mac_wifi()
+    test_pairing_records_the_profile_snapshot_before_issuing_the_code()
     test_serial_evidence_keeps_redacted_link_state_and_drops_setup_secret()
     test_summary_passes_only_with_every_real_gate_and_hashes_redacted_log()
     test_evidence_redaction_gate_rejects_every_secret_field()
@@ -972,8 +805,6 @@ if __name__ == "__main__":
     test_serial_module_falls_back_to_the_pinned_idf_environment()
     test_native_run_requires_same_commit_and_both_real_platform_jobs()
     test_companion_logs_are_drained_redacted_and_secret_observation_fails_gate()
-    test_profile_cleanup_revokes_only_temporary_profile_and_reselects_original()
-    test_pairing_closes_setup_only_after_client_acknowledges_the_202_body()
     test_post_flash_monitor_requests_a_fresh_boot_after_ready_handshake()
     test_boot_gate_accepts_only_the_expected_software_reset()
     test_post_flash_usb_reenumeration_reopens_without_a_second_reset()
@@ -988,27 +819,11 @@ if __name__ == "__main__":
     test_serial_command_never_calls_unbounded_flush()
     test_restart_waits_for_device_ack_before_closing_the_endpoint()
     test_restart_ack_is_emitted_before_the_firmware_resets()
-    test_wifi_switch_allows_slow_macos_association()
-    test_wifi_switch_timeout_never_exposes_the_password()
-    test_wifi_switch_rejects_networksetup_false_success()
-    test_reachable_target_wins_over_networksetup_false_failure()
     test_dev_setup_window_outlives_slow_association()
-    test_setup_wifi_recovery_requires_the_target_host_to_be_reachable()
-    test_exhausted_attempt_rolls_into_the_reserved_power_cycle()
-    test_setup_wifi_recovery_survives_the_initial_association_timeout()
-    test_successful_association_waits_for_dhcp_before_resetting_again()
-    test_wifi_power_is_restored_when_reassociation_fails()
-    test_original_lan_recovery_uses_the_reachability_helper()
-    test_wifi_operations_share_one_deadline_budget()
-    test_target_ssid_is_selected_before_reachability_can_pass()
-    test_wifi_reachability_requires_an_en0_address_on_the_target_subnet()
-    test_wifi_interface_probe_shares_one_deadline()
-    test_original_wifi_power_and_association_share_one_deadline()
     test_cleanup_transaction_records_intent_before_observation()
     test_setup_restart_requires_explicit_inactive_observation()
     test_exact_link_error_gate_rejects_unrelated_failures()
     test_secret_tracker_catches_value_leaked_before_it_was_known()
     test_expected_setup_access_does_not_trip_secret_observation()
-    test_cleanup_attempts_every_setup_network_when_one_removal_fails()
     test_preflight_uses_the_users_zsh_for_idf_activation()
     print("M1 acceptance contract passed")
