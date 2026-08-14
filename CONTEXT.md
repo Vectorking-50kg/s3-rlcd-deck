@@ -20,6 +20,10 @@ _Avoid_: Account, collector
 A timestamped, display-safe view of normalized Provider data sent by a Companion to a Deck. It excludes upstream credentials and raw private content.
 _Avoid_: Raw snapshot, provider response
 
+**Snapshot Store**:
+The Deck-owned module that immediately retains the latest valid AI Snapshot in memory and transactionally checkpoints it to Flash at a bounded rate. It alone applies offline visibility policy to cached quota data.
+_Avoid_: Raw cache, Provider database
+
 **Quota Window**:
 A Provider-defined interval whose normalized usage, remaining allowance, duration, and reset time may be presented in an AI Snapshot. Unknown values remain null rather than becoming zero.
 _Avoid_: Limit bucket, rate-limit response

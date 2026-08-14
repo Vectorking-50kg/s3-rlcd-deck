@@ -17,6 +17,8 @@ const char *key_name(deck_transaction_storage_key_t key)
             return "slot1";
         case DECK_TRANSACTION_STORAGE_ACTIVE_MARKER:
             return "active";
+        case DECK_TRANSACTION_STORAGE_METADATA:
+            return "metadata";
         case DECK_TRANSACTION_STORAGE_KEY_COUNT:
         default:
             return nullptr;

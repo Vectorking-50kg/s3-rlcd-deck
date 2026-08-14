@@ -810,11 +810,23 @@ Web 修改 ESP32 配置时使用 write-through：只有收到设备确认才显�
 
 ### 13.4 快照持久化
 
-- ESP32 保存最后一个规范化 AI 快照。
-- 使用两个交替 NVS blob、版本号、长度和 CRC，写完校验后切换 active marker。
-- 最多每 30 分钟写一次，减少 Flash 磨损。
-- 解析失败或 schema 不兼容不能覆盖最后有效快照。
-- 离线不足 24 小时显示旧数据和 `STALE`；超过 24 小时隐藏额度。
+- Snapshot Store 在内存中立即保存最后一个校验通过的规范化 AI Snapshot。
+- `snapshot_nvs` 是独立 128 KiB 分区；candidate 和两个交替 blob 都带存储版本、
+  长度与 CRC，读回校验成功后才原子切换 active marker。
+- 首次快照立即 checkpoint；后续成功或失败的 Flash 尝试最多每 30 分钟一次。
+  独立 worker 执行 NVS 打开、恢复读取、写入和关闭，Store 创建先返回有界内存态；带版本
+  与 CRC 的 attempt watermark 让失败节流在重启后仍然成立。已有事务但 watermark 缺失或
+  损坏时，从首次可信 UTC 起保守等待 30 分钟；窗口到期后从最后有效事务记录重建并允许
+  瞬态故障恢复。Flash 节流、慢打开/读取/写入或 NVS 故障都不阻塞新的有效内存快照和 UI
+  读取；异步恢复与已发布 live 快照按时间戳合并，较新者保留，同时间戳但字节冲突时
+  fail-closed 到已提交记录。关闭时在 2 秒预算内排空已排队
+  checkpoint；驱动仍阻塞时保留完整 owner 并允许幂等重试关闭。
+- Companion Link 只通过统一 message dispatch 把完整校验通过的 `snapshot.ai`
+  发布给 Snapshot Store；解析失败、过大、隐私边界、未来时间、时间回退或未知 major
+  都不能覆盖最后有效快照。
+- Companion 离线不足 24 小时时 Snapshot Store 允许读取旧文档并标 `STALE`；达到
+  24 小时、时钟无效或任一可信时间源低于其 high-water mark 时不向 UI 暴露文档/额度，
+  只返回 Unavailable State；时间恢复到原 high-water 后才重新可见。
 
 ### 13.5 时间与温度
 

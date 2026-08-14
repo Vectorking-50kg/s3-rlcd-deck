@@ -150,11 +150,41 @@ target_compile_definitions(
     PRIVATE DECK_REPOSITORY_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../.."
 )
 deck_add_host_test(
+    test_ai_snapshot_store
+    SOURCES
+        test_ai_snapshot_store.cpp
+        ../../firmware/components/ai_snapshot/deck_ai_snapshot.cpp
+        ../../firmware/components/ai_snapshot/deck_ai_snapshot_store.cpp
+        ../../firmware/components/transaction_store/deck_transaction_store.cpp
+    INCLUDE_DIRS
+        ../../firmware/components/ai_snapshot/include
+        ../../firmware/components/transaction_store/include
+)
+deck_add_host_test(
     test_companion_link_timing
     SOURCES
         test_companion_link_timing.cpp
         ../../firmware/components/companion_link/deck_companion_link_timing.cpp
     INCLUDE_DIRS ../../firmware/components/companion_link/include
+)
+deck_add_host_test(
+    test_companion_link_messages
+    SOURCES
+        test_companion_link_messages.cpp
+        ../../firmware/components/ai_snapshot/deck_ai_snapshot.cpp
+        ../../firmware/components/ai_snapshot/deck_ai_snapshot_store.cpp
+        ../../firmware/components/companion_link/deck_companion_link_frame.cpp
+        ../../firmware/components/companion_link/deck_companion_link_message.cpp
+        ../../firmware/components/companion_link/deck_device_protocol.cpp
+        ../../firmware/components/transaction_store/deck_transaction_store.cpp
+    INCLUDE_DIRS
+        ../../firmware/components/ai_snapshot/include
+        ../../firmware/components/companion_link/include
+        ../../firmware/components/transaction_store/include
+)
+target_compile_definitions(
+    test_companion_link_messages
+    PRIVATE DECK_REPOSITORY_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../.."
 )
 deck_add_host_test(
     test_setup_confirmation

@@ -9,7 +9,7 @@ extern "C" {
 #endif
 
 #define DECK_TRANSACTION_PAYLOAD_CAPACITY 128
-#define DECK_TRANSACTION_MAX_PAYLOAD_CAPACITY 8192
+#define DECK_TRANSACTION_MAX_PAYLOAD_CAPACITY (16U * 1024U)
 
 typedef struct deck_transaction_store deck_transaction_store_t;
 typedef struct deck_transaction_nvs_storage deck_transaction_nvs_storage_t;
@@ -19,6 +19,8 @@ typedef enum {
     DECK_TRANSACTION_STORAGE_SLOT_0,
     DECK_TRANSACTION_STORAGE_SLOT_1,
     DECK_TRANSACTION_STORAGE_ACTIVE_MARKER,
+    /* Optional component-owned, versioned metadata in the same namespace. */
+    DECK_TRANSACTION_STORAGE_METADATA,
     DECK_TRANSACTION_STORAGE_KEY_COUNT,
 } deck_transaction_storage_key_t;
 
