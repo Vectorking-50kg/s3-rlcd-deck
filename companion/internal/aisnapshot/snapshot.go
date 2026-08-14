@@ -178,6 +178,24 @@ func (provider Provider) Clone() Provider {
 	return cloned
 }
 
+// ValidateProvider applies the shared wire/privacy contract to one normalized
+// Provider without exposing the contract's internal parsing implementation.
+func ValidateProvider(provider Provider, generatedAt time.Time) error {
+	generatedAt = generatedAt.UTC()
+	_, err := Encode(Snapshot{
+		Type:              "snapshot.ai",
+		ProtocolVersion:   protocol.CurrentVersion,
+		SchemaVersion:     SchemaVersion{Major: SchemaMajor, Minor: SchemaMinor},
+		GeneratedAt:       generatedAt.Format(time.RFC3339Nano),
+		GeneratedAtUnixMS: generatedAt.UnixMilli(),
+		ProviderOrder:     []string{provider.ID},
+		Providers:         []Provider{provider},
+		Sessions:          []Session{},
+		NextRefresh:       1,
+	})
+	return err
+}
+
 func clonePointer[T any](value *T) *T {
 	if value == nil {
 		return nil

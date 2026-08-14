@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/cursorprovider"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/devicelink"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/structuredprovider"
 )
 
 const shutdownTimeout = 5 * time.Second
@@ -47,25 +49,27 @@ type Status struct {
 type Runtime struct {
 	config Config
 
-	managementHandler http.Handler
-	deviceHubHandler  http.Handler
-	shutdownTimeout   time.Duration
-	sessions          *managementSessions
-	consoleAccess     *consoleAccessGrants
-	pairing           *pairing.Service
-	deviceLink        *devicelink.Hub
-	codexCollector    CodexCollector
-	codexObserver     CodexObserver
-	cursorCollector   CursorCollector
+	managementHandler    http.Handler
+	deviceHubHandler     http.Handler
+	shutdownTimeout      time.Duration
+	sessions             *managementSessions
+	consoleAccess        *consoleAccessGrants
+	pairing              *pairing.Service
+	deviceLink           *devicelink.Hub
+	codexCollector       CodexCollector
+	codexObserver        CodexObserver
+	cursorCollector      CursorCollector
+	structuredCollectors []StructuredCollector
 
-	mu                sync.RWMutex
-	status            Status
-	started           bool
-	codexUpdate       codexappserver.Update
-	hasCodexUpdate    bool
-	codexSessions     []aisnapshot.Session
-	cursorProvider    aisnapshot.Provider
-	hasCursorProvider bool
+	mu                  sync.RWMutex
+	status              Status
+	started             bool
+	codexUpdate         codexappserver.Update
+	hasCodexUpdate      bool
+	codexSessions       []aisnapshot.Session
+	cursorProvider      aisnapshot.Provider
+	hasCursorProvider   bool
+	structuredProviders map[string]aisnapshot.Provider
 }
 
 func New(config Config) (*Runtime, error) {
@@ -92,17 +96,32 @@ func New(config Config) (*Runtime, error) {
 		return nil, err
 	}
 	return &Runtime{
-		config:          normalized,
-		shutdownTimeout: shutdownTimeout,
-		sessions:        newManagementSessions(),
-		consoleAccess:   &consoleAccessGrants{},
-		pairing:         normalized.Pairing,
-		deviceLink:      deviceLink,
-		codexCollector:  normalized.CodexCollector,
-		codexObserver:   normalized.CodexObserver,
-		cursorCollector: normalized.CursorCollector,
-		status:          status,
+		config:               normalized,
+		shutdownTimeout:      shutdownTimeout,
+		sessions:             newManagementSessions(),
+		consoleAccess:        &consoleAccessGrants{},
+		pairing:              normalized.Pairing,
+		deviceLink:           deviceLink,
+		codexCollector:       normalized.CodexCollector,
+		codexObserver:        normalized.CodexObserver,
+		cursorCollector:      normalized.CursorCollector,
+		structuredCollectors: normalized.StructuredCollectors,
+		structuredProviders:  make(map[string]aisnapshot.Provider),
+		status:               status,
 	}, nil
+}
+
+// StructuredProviders returns stable-ID ordered, independently owned Provider
+// pages. Raw requests, responses, and credentials remain inside collectors.
+func (application *Runtime) StructuredProviders() []aisnapshot.Provider {
+	application.mu.RLock()
+	providers := make([]aisnapshot.Provider, 0, len(application.structuredProviders))
+	for _, provider := range application.structuredProviders {
+		providers = append(providers, provider.Clone())
+	}
+	application.mu.RUnlock()
+	sort.Slice(providers, func(left, right int) bool { return providers[left].ID < providers[right].ID })
+	return providers
 }
 
 // CursorProvider returns the latest normalized experimental Cursor page. Raw
@@ -234,7 +253,7 @@ func (application *Runtime) Run(ctx context.Context) error {
 		serveResults <- serveResult{name: "Device Hub", err: deviceHubServer.Serve(deviceHubListener)}
 	}()
 	collectorContext, stopCollector := context.WithCancel(ctx)
-	collectorDone := make([]chan error, 0, 3)
+	collectorDone := make([]chan error, 0, 3+len(application.structuredCollectors))
 	if application.codexCollector != nil {
 		done := make(chan error, 1)
 		collectorDone = append(collectorDone, done)
@@ -264,6 +283,21 @@ func (application *Runtime) Run(ctx context.Context) error {
 				application.publishCursorProvider,
 			)
 		}()
+	}
+	for _, collector := range application.structuredCollectors {
+		if collector == nil {
+			continue
+		}
+		done := make(chan error, 1)
+		collectorDone = append(collectorDone, done)
+		go func(owned StructuredCollector, result chan<- error) {
+			result <- owned.Run(collectorContext, func(ctx context.Context, provider aisnapshot.Provider) error {
+				if provider.ID != owned.ProviderID() {
+					return structuredprovider.ErrUnavailable
+				}
+				return application.publishStructuredProvider(ctx, provider)
+			})
+		}(collector, done)
 	}
 
 	var trigger serveResult
@@ -318,6 +352,35 @@ func (application *Runtime) publishCursorProvider(
 	application.mu.Lock()
 	application.cursorProvider = provider.Clone()
 	application.hasCursorProvider = true
+	application.mu.Unlock()
+	return nil
+}
+
+func (application *Runtime) publishStructuredProvider(
+	_ context.Context,
+	provider aisnapshot.Provider,
+) error {
+	generatedAt := time.Now().UTC()
+	if provider.UpdatedAt != nil {
+		parsed, err := time.Parse(time.RFC3339Nano, *provider.UpdatedAt)
+		if err != nil {
+			return structuredprovider.ErrUnavailable
+		}
+		generatedAt = parsed
+	}
+	if provider.ID == "" || len(provider.ID) > 32 || provider.ID == "codex" || provider.ID == "cursor" ||
+		(provider.Source == aisnapshot.ProviderSourceStructuredHTTP &&
+			(provider.Status != aisnapshot.ProviderOK && provider.Status != aisnapshot.ProviderDegraded ||
+				provider.Confidence != aisnapshot.ConfidenceVerified)) ||
+		(provider.Source == aisnapshot.ProviderSourceNone &&
+			(provider.Status != aisnapshot.ProviderUnavailable ||
+				provider.Confidence != aisnapshot.ConfidenceUnavailable)) ||
+		provider.Source != aisnapshot.ProviderSourceStructuredHTTP && provider.Source != aisnapshot.ProviderSourceNone ||
+		aisnapshot.ValidateProvider(provider, generatedAt) != nil {
+		return structuredprovider.ErrUnavailable
+	}
+	application.mu.Lock()
+	application.structuredProviders[provider.ID] = provider.Clone()
 	application.mu.Unlock()
 	return nil
 }

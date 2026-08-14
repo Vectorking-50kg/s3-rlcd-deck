@@ -46,6 +46,26 @@ schema failures update only the experimental Cursor Provider. A previously valid
 is retained as `degraded`; otherwise Cursor is `unavailable`. Raw responses, account fields, and
 credentials never enter Runtime or logs.
 
+AIHubMix, DeepSeek, and user-defined Structured HTTP Providers share one safe request module. The
+built-in templates use the versioned AIHubMix `/api/user/self` and DeepSeek `/user/balance`
+contracts; custom definitions are limited to GET/POST, structured headers, an optional bounded JSON
+body, and explicit balance/used/total/reset/currency JSONPath fields. Refresh is restricted to
+1/5/15/30/60-minute tiers, requests default to ten seconds, and decoded responses are capped at
+256 KiB. Test Request returns only a normalized Provider preview and fixed status/latency/schema
+diagnostics.
+
+Public targets require HTTPS. Cleartext HTTP is accepted only for private-network addresses and is
+always marked with a warning. The transport disables environment proxies, compression, and
+connection reuse; validates every DNS answer before dialing its pinned IP; rejects loopback,
+link-local, metadata, mixed-safe rebinding answers, and cross-origin redirects. Curl import is a
+non-executing allowlist parser: it rejects shell operators, variables, substitutions, files,
+redirects, and unknown options while separating sensitive header bytes into secret references.
+Every imported header value is placed in the platform secret store; the persisted definition holds
+only its reference and a tightly allowlisted authentication-scheme prefix. Sensitive URL query
+parameters cannot be represented safely by the current model, so all URL query strings are rejected.
+Raw responses and request credentials never enter Runtime or diagnostics,
+and a failure degrades only its own last valid Provider page.
+
 Provider credentials and raw private content must never be sent to a Deck.
 
 ## Run

@@ -13,6 +13,7 @@ import (
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/codexobserver"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/cursorprovider"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/structuredprovider"
 )
 
 const (
@@ -27,13 +28,14 @@ var (
 )
 
 type Config struct {
-	Version         string
-	Management      ManagementConfig
-	DeviceHub       DeviceHubConfig
-	Pairing         *pairing.Service
-	CodexCollector  CodexCollector
-	CodexObserver   CodexObserver
-	CursorCollector CursorCollector
+	Version              string
+	Management           ManagementConfig
+	DeviceHub            DeviceHubConfig
+	Pairing              *pairing.Service
+	CodexCollector       CodexCollector
+	CodexObserver        CodexObserver
+	CursorCollector      CursorCollector
+	StructuredCollectors []StructuredCollector
 }
 
 // CodexCollector is intentionally narrow: the runtime can supervise normalized
@@ -54,6 +56,13 @@ type CodexObserver interface {
 // access credentials, or invoke the private endpoint itself.
 type CursorCollector interface {
 	Run(context.Context, cursorprovider.Publisher) error
+}
+
+// StructuredCollector is publish-only. Runtime never receives the request
+// definition, upstream response, URL, headers, or Provider credentials.
+type StructuredCollector interface {
+	ProviderID() string
+	Run(context.Context, structuredprovider.Publisher) error
 }
 
 type ManagementConfig struct {
@@ -150,6 +159,20 @@ func normalizeConfig(config Config) (Config, error) {
 	}
 	config.DeviceHub.Limits = normalizeDeviceHubLimits(config.DeviceHub.Limits)
 	config.Management.Limits = normalizeManagementLimits(config.Management.Limits)
+	if len(config.StructuredCollectors) > 6 {
+		return Config{}, errors.New("at most six structured Provider collectors are supported")
+	}
+	structuredIDs := make(map[string]struct{}, len(config.StructuredCollectors))
+	for _, collector := range config.StructuredCollectors {
+		if collector == nil || collector.ProviderID() == "" {
+			return Config{}, errors.New("structured Provider collector is invalid")
+		}
+		if _, duplicate := structuredIDs[collector.ProviderID()]; duplicate {
+			return Config{}, errors.New("structured Provider IDs must be unique")
+		}
+		structuredIDs[collector.ProviderID()] = struct{}{}
+	}
+	config.StructuredCollectors = append([]StructuredCollector(nil), config.StructuredCollectors...)
 	return config, nil
 }
 

@@ -16,6 +16,11 @@ _Avoid_: Agent, PC service, host app
 An AI service or local AI tool whose quota, balance, usage, or session state is normalized for presentation.
 _Avoid_: Account, collector
 
+**Structured HTTP Provider**:
+A user-configured Provider whose balance or quota comes from one fixed GET/POST request and an
+explicit field mapping. It is data configuration, never executable code.
+_Avoid_: Script Provider, curl Provider, plugin
+
 **AI Snapshot**:
 A timestamped, display-safe view of normalized Provider data sent by a Companion to a Deck. It excludes upstream credentials and raw private content.
 _Avoid_: Raw snapshot, provider response
