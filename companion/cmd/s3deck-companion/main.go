@@ -22,6 +22,8 @@ import (
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/managementtoken"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
 	companionruntime "github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/runtime"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/secretstore"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/structuredprovider"
 )
 
 var (
@@ -133,6 +135,11 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "cannot configure pairing: %v\n", err)
 		return 2
 	}
+	structuredCollectors, closeProviderDefinitions := loadStructuredCollectors(
+		resolvedDataDirectory,
+		stderr,
+	)
+	defer closeProviderDefinitions()
 	codexCollector, err := codexappserver.New(codexappserver.Config{
 		AdapterVersion: codexappserver.AdapterVersion,
 		ClientVersion:  version,
@@ -157,10 +164,11 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		cursorCollector = nil
 	}
 	config := companionruntime.Config{
-		Version:         version,
-		CodexCollector:  codexCollector,
-		CodexObserver:   codexObserver,
-		CursorCollector: cursorCollector,
+		Version:              version,
+		CodexCollector:       codexCollector,
+		CodexObserver:        codexObserver,
+		CursorCollector:      cursorCollector,
+		StructuredCollectors: structuredCollectors,
 		Management: companionruntime.ManagementConfig{
 			Address:       *managementAddress,
 			AllowLAN:      *allowLANManagement,
@@ -237,4 +245,52 @@ func defaultDataDirectory() (string, error) {
 		return "", errors.Join(errors.New("user configuration directory is unavailable"), err)
 	}
 	return filepath.Join(base, "s3-rlcd-deck"), nil
+}
+
+func loadStructuredCollectors(
+	dataDirectory string,
+	stderr io.Writer,
+) ([]companionruntime.StructuredCollector, func()) {
+	closeStore := func() {}
+	providerSecrets, err := secretstore.OpenForDataDirectory(dataDirectory)
+	if err != nil {
+		fmt.Fprintln(stderr, "structured Providers are unavailable")
+		return nil, closeStore
+	}
+	providerDefinitions, err := structuredprovider.OpenDefinitionStore(
+		filepath.Join(dataDirectory, "structured-providers.json"),
+	)
+	if err != nil {
+		fmt.Fprintln(stderr, "structured Provider configuration is unavailable")
+		return nil, closeStore
+	}
+	closeStore = func() { _ = providerDefinitions.Close() }
+	cleanupContext, cancelCleanup := context.WithTimeout(context.Background(), 5*time.Second)
+	cleanupErr := providerDefinitions.ReconcileCleanup(cleanupContext, providerSecrets)
+	cancelCleanup()
+	if cleanupErr != nil {
+		// References are non-secret, but even they do not belong in logs. The
+		// protected journal remains authoritative for the next startup retry.
+		fmt.Fprintln(stderr, "structured Provider secret cleanup remains pending")
+	}
+	storedDefinitions, err := providerDefinitions.Definitions(context.Background())
+	if err != nil {
+		fmt.Fprintln(stderr, "structured Provider configuration is unavailable")
+		return nil, closeStore
+	}
+	collectors := make([]companionruntime.StructuredCollector, 0, len(storedDefinitions))
+	for _, definition := range storedDefinitions {
+		collector, collectorErr := structuredprovider.New(structuredprovider.Config{
+			Definition: definition,
+			Secrets:    providerSecrets,
+		})
+		if collectorErr != nil {
+			// One malformed Provider cannot disable healthy Providers or the
+			// Companion's management and Device Hub recovery surfaces.
+			fmt.Fprintln(stderr, "one structured Provider is unavailable")
+			continue
+		}
+		collectors = append(collectors, collector)
+	}
+	return collectors, closeStore
 }

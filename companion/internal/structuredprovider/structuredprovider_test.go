@@ -13,7 +13,10 @@ import (
 	"time"
 
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/aisnapshot"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/secretstore"
 )
+
+const testSecretReference = secretstore.Reference("secret-0123456789abcdef0123456789abcdef")
 
 type staticHTTPClient struct {
 	response func(*http.Request) (*http.Response, error)
@@ -29,7 +32,7 @@ type countingSecrets struct {
 	requests int
 }
 
-func (secrets *countingSecrets) Resolve(context.Context, string) ([]byte, error) {
+func (secrets *countingSecrets) Get(context.Context, secretstore.Reference) ([]byte, error) {
 	secrets.mutex.Lock()
 	defer secrets.mutex.Unlock()
 	secrets.requests++
@@ -47,7 +50,7 @@ func validDefinition() Definition {
 			URL:    "https://usage.example.test/v1/balance",
 			Headers: []Header{{
 				Name:            "Authorization",
-				SecretReference: "provider-key",
+				SecretReference: testSecretReference,
 				Prefix:          "Bearer ",
 			}},
 		},
@@ -201,7 +204,9 @@ func TestTemplatesMatchSupportedProviderContracts(t *testing.T) {
 		if len(template.SecretSlots) != 1 || template.Definition.Request.Method != MethodGET {
 			t.Fatalf("template = %+v", template)
 		}
-		if _, err := New(Config{Definition: template.Definition}); err != nil {
+		definition := cloneDefinition(template.Definition)
+		definition.Request.Headers[0].SecretReference = testSecretReference
+		if _, err := New(Config{Definition: definition}); err != nil {
 			t.Fatalf("New(%s) error = %v", template.ID, err)
 		}
 	}
@@ -216,8 +221,10 @@ func TestTemplatesMatchSupportedProviderContracts(t *testing.T) {
 	}
 	for _, testCase := range tests {
 		template := templates[testCase.index]
+		definition := cloneDefinition(template.Definition)
+		definition.Request.Headers[0].SecretReference = testSecretReference
 		collector, err := New(Config{
-			Definition: template.Definition,
+			Definition: definition,
 			Secrets:    &countingSecrets{},
 			client: staticHTTPClient{response: func(*http.Request) (*http.Response, error) {
 				return jsonResponse(http.StatusOK, testCase.document), nil

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/aisnapshot"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/secretstore"
 )
 
 const (
@@ -48,9 +49,9 @@ const (
 // Header is a structured request header. Its value is always resolved from the
 // platform secret store for one request and is never persisted in Definition.
 type Header struct {
-	Name            string `json:"name"`
-	SecretReference string `json:"secret_reference,omitempty"`
-	Prefix          string `json:"prefix,omitempty"`
+	Name            string                `json:"name"`
+	SecretReference secretstore.Reference `json:"secret_reference,omitempty"`
+	Prefix          string                `json:"prefix,omitempty"`
 }
 
 type Request struct {
@@ -89,7 +90,7 @@ type Definition struct {
 // SecretResolver returns caller-owned bytes. The collector overwrites them
 // after constructing the one request for which they were resolved.
 type SecretResolver interface {
-	Resolve(context.Context, string) ([]byte, error)
+	Get(context.Context, secretstore.Reference) ([]byte, error)
 }
 
 type Publisher func(context.Context, aisnapshot.Provider) error
@@ -133,13 +134,14 @@ type Template struct {
 }
 
 type ImportedSecret struct {
-	Reference string
-	Value     []byte
+	Slot        string
+	HeaderIndex int
+	Value       []byte
 }
 
 // CurlImport separates sensitive header values from the persisted request
-// definition. The caller must transfer Secrets into a platform secret store
-// and overwrite the returned byte slices.
+// definition. CommitCurlImport transfers and clears Secrets; a caller that
+// abandons the import must overwrite the returned byte slices itself.
 type CurlImport struct {
 	Request Request
 	Secrets []ImportedSecret

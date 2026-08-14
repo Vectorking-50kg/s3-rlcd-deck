@@ -38,6 +38,11 @@ jobs:
           cache-dependency-path: companion/go.sum
       - name: Verify and build Companion
         run: ./tools/test_companion.sh
+      - name: Verify native Keychain secret store
+        working-directory: companion
+        env:
+          S3DECK_NATIVE_SECRET_STORE_TEST: "1"
+        run: go test -count=1 -run '^TestNative' ./internal/secretstore
       - name: Run native menu-bar smoke
         run: |
           python3 tools/smoke_companion_artifact.py \
@@ -74,6 +79,12 @@ jobs:
             -o ../build/companion/windows-amd64/s3deck-companion.exe `
             ./cmd/s3deck-companion
           Pop-Location
+      - name: Verify native Credential Manager secret store
+        shell: pwsh
+        working-directory: companion
+        env:
+          S3DECK_NATIVE_SECRET_STORE_TEST: "1"
+        run: go test -count=1 -run '^TestNative' ./internal/secretstore
       - name: Run native tray smoke
         shell: pwsh
         run: |

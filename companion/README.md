@@ -68,6 +68,30 @@ and a failure degrades only its own last valid Provider page.
 
 Provider credentials and raw private content must never be sent to a Deck.
 
+Provider credentials are owned by `internal/secretstore`. Its public seam accepts only an opaque
+Secret Reference for put/get/delete/list-metadata operations. A new put generates a random
+reference; an update replaces the value at the same reference in one platform-vault operation, so
+a failed update preserves the previous value and cannot orphan a replacement reference. Delete is
+idempotent, and list-metadata returns only references. macOS uses Security.framework Keychain
+items and Windows uses Credential Manager entries in a fixed Companion Provider namespace family,
+with an owner sub-namespace derived from the canonical `--data-directory`. The owner scope prevents
+one valid data directory from enumerating or cleaning another's credentials. The namespace and
+generated-reference grammar prevent this module from discovering or modifying
+Codex/Cursor-owned authentication. Authentication UI is disabled for background access: locked,
+denied, and canceled operations return fixed errors without including credential bytes.
+Credential Manager lacks a metadata-only enumeration API, so its adapter never copies or returns
+enumerated blobs and explicitly overwrites them before releasing the native result buffer.
+Structured Provider headers use the `secretstore.Reference` domain type, and collectors resolve it
+through `Store.Get` for each request. Template and curl-import drafts contain empty header slots,
+not persistable aliases such as `api_key`. `CommitDefinition`/`CommitCurlImport` create the vault
+entries first, replace every slot with its generated reference, and publish through the protected
+`structured-providers.json` owner. New references are journaled before publication; one atomic file
+replacement activates them and journals references retired by an update or delete. Successful vault
+deletes clear the journal, while failed cleanup remains durable and is retried at every Companion
+startup. Startup also reconciles vault metadata against active and pending references, recovering a
+crash after collision-free placeholder reservation but before the journal commit. The file contains
+definitions and opaque references only—never credential bytes.
+
 ## Run
 
 Go 1.26.x is the development baseline.

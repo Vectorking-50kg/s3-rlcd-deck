@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -30,5 +32,27 @@ func TestRunFailsClosedWithMalformedPersistedManagementToken(t *testing.T) {
 	}
 	if !bytes.Contains(stderr.Bytes(), []byte("management admin token")) {
 		t.Fatalf("stderr = %q, want fail-closed management token error", stderr.String())
+	}
+}
+
+func TestMalformedStructuredProviderConfigurationDoesNotDisableCompanion(t *testing.T) {
+	t.Setenv(managementTokenEnvironment, "not-a-valid-token")
+	directory := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(directory, "structured-providers.json"),
+		[]byte(`{"schema_version":1,"secret":"PRIVATE_CONFIG_CANARY"}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := run([]string{"--headless", "--data-directory", directory}, &stdout, &stderr)
+	if exitCode != 2 || !bytes.Contains(stderr.Bytes(), []byte("management admin token")) {
+		t.Fatalf("run() exit=%d stderr=%q", exitCode, stderr.String())
+	}
+	if !bytes.Contains(stderr.Bytes(), []byte("structured Provider configuration is unavailable")) ||
+		bytes.Contains(stderr.Bytes(), []byte("PRIVATE_CONFIG_CANARY")) {
+		t.Fatalf("structured Provider degradation was not isolated/redacted: %q", stderr.String())
 	}
 }

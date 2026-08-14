@@ -106,6 +106,9 @@ func TestCurlImportParsesWhitelistWithoutExecutingOrPersistingSecrets(t *testing
 	if imported.Request.Method != MethodPOST || imported.Request.URL != "https://usage.example/v1" ||
 		string(imported.Request.Body) != `{"query":"quota"}` || len(imported.Secrets) != 1 ||
 		string(imported.Secrets[0].Value) != secret ||
+		imported.Secrets[0].Slot != "imported_header_1" ||
+		imported.Secrets[0].HeaderIndex != 0 ||
+		imported.Request.Headers[0].SecretReference != "" ||
 		imported.Request.Headers[0].Prefix != "Bearer " {
 		t.Fatalf("ImportCurl() = %+v", imported)
 	}

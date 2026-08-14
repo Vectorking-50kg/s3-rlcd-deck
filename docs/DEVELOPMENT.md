@@ -534,7 +534,7 @@ companion/
 │   ├── sessions/          # App Server + passive observer
 │   ├── normalize/         # Provider / session DTO
 │   ├── history/           # SQLite, retention, CSV
-│   ├── secrets/           # Keychain / Credential Manager
+│   ├── secretstore/       # opaque refs → Keychain / Credential Manager
 │   ├── backup/            # age export/import
 │   ├── devices/           # pairing, WSS, profiles
 │   ├── serialhub/         # 8 MiB ring, browser fan-out
@@ -577,6 +577,7 @@ Companion 使用本地 SQLite 保存最近 90 天的小时级用量、余额和�
 - macOS 使用 Keychain。
 - Windows 使用 Credential Manager。
 - 配置文件只保存 secret reference ID。
+- Provider 配置替换/删除与待清理 reference 日志使用同一次受保护文件提交；Vault 清理失败在后续启动幂等重试。
 - Access token 失效时返回 `AUTH_STALE`，提示用户回到原应用重新登录。
 - Companion 不刷新、不轮换、不写回 Codex/Cursor 拥有的认证文件。
 
