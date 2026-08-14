@@ -3,9 +3,13 @@
 package protectedfile
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -14,6 +18,71 @@ import (
 var replaceFileW = windows.NewLazySystemDLL("kernel32.dll").NewProc("ReplaceFileW")
 
 const fileFullControl = windows.STANDARD_RIGHTS_REQUIRED | windows.SYNCHRONIZE | 0x1ff
+
+func createPrivateTemp(parent string) (*os.File, error) {
+	token, err := windows.OpenCurrentProcessToken()
+	if err != nil {
+		return nil, err
+	}
+	user, err := token.GetTokenUser()
+	_ = token.Close()
+	if err != nil {
+		return nil, err
+	}
+	descriptor, err := windows.SecurityDescriptorFromString(
+		"D:P(A;;FA;;;" + user.User.Sid.String() + ")",
+	)
+	if err != nil {
+		return nil, err
+	}
+	attributes := &windows.SecurityAttributes{
+		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
+		SecurityDescriptor: descriptor,
+	}
+	for range 8 {
+		var entropy [16]byte
+		if _, err = rand.Read(entropy[:]); err != nil {
+			return nil, err
+		}
+		path := filepath.Join(parent, ".protected-"+hex.EncodeToString(entropy[:])+".tmp")
+		pathPointer, pointerErr := windows.UTF16PtrFromString(path)
+		if pointerErr != nil {
+			return nil, pointerErr
+		}
+		handle, createErr := windows.CreateFile(
+			pathPointer,
+			windows.GENERIC_READ|windows.GENERIC_WRITE,
+			0,
+			attributes,
+			windows.CREATE_NEW,
+			windows.FILE_ATTRIBUTE_TEMPORARY|windows.FILE_FLAG_SEQUENTIAL_SCAN,
+			0,
+		)
+		runtime.KeepAlive(pathPointer)
+		runtime.KeepAlive(attributes)
+		runtime.KeepAlive(descriptor)
+		if errors.Is(createErr, windows.ERROR_FILE_EXISTS) ||
+			errors.Is(createErr, windows.ERROR_ALREADY_EXISTS) {
+			continue
+		}
+		if createErr != nil {
+			return nil, createErr
+		}
+		if err = verifyHandleCurrentUserACL(handle, user.User.Sid); err != nil {
+			_ = windows.CloseHandle(handle)
+			_ = os.Remove(path)
+			return nil, err
+		}
+		file := os.NewFile(uintptr(handle), path)
+		if file == nil {
+			_ = windows.CloseHandle(handle)
+			_ = os.Remove(path)
+			return nil, errors.New("create protected temporary file handle")
+		}
+		return file, nil
+	}
+	return nil, errors.New("create collision-free protected temporary file")
+}
 
 func EnsurePrivateDirectory(path string) error {
 	if err := os.MkdirAll(path, 0o700); err != nil {
@@ -28,6 +97,77 @@ func EnsurePrivateFile(path string) error {
 		return fmt.Errorf("protected file must be a regular non-symlink file: %w", err)
 	}
 	return applyAndVerifyCurrentUserACL(path)
+}
+
+func openPrivateRead(path string) (*os.File, error) {
+	pathPointer, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return nil, err
+	}
+	handle, err := windows.CreateFile(
+		pathPointer,
+		windows.GENERIC_READ,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT|
+			windows.FILE_FLAG_SEQUENTIAL_SCAN,
+		0,
+	)
+	if err != nil {
+		return nil, err
+	}
+	var information windows.ByHandleFileInformation
+	if err = windows.GetFileInformationByHandle(handle, &information); err != nil ||
+		information.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 ||
+		information.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
+		_ = windows.CloseHandle(handle)
+		return nil, errors.New("protected file handle is not a regular non-reparse file")
+	}
+	token, err := windows.OpenCurrentProcessToken()
+	if err != nil {
+		_ = windows.CloseHandle(handle)
+		return nil, err
+	}
+	user, err := token.GetTokenUser()
+	_ = token.Close()
+	if err != nil {
+		_ = windows.CloseHandle(handle)
+		return nil, err
+	}
+	if err = verifyHandleCurrentUserACL(handle, user.User.Sid); err != nil {
+		_ = windows.CloseHandle(handle)
+		return nil, errors.New("protected file handle DACL is not current-user only")
+	}
+	file := os.NewFile(uintptr(handle), path)
+	if file == nil {
+		_ = windows.CloseHandle(handle)
+		return nil, errors.New("create protected file handle")
+	}
+	opened, err := file.Stat()
+	current, currentErr := os.Lstat(path)
+	if err != nil || currentErr != nil || current.Mode()&os.ModeSymlink != 0 ||
+		!current.Mode().IsRegular() || !os.SameFile(opened, current) {
+		_ = file.Close()
+		return nil, errors.New("protected file path changed while opening")
+	}
+	return file, nil
+}
+
+func verifyHandleCurrentUserACL(handle windows.Handle, sid *windows.SID) error {
+	descriptor, err := windows.GetSecurityInfo(
+		handle,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil || descriptor == nil {
+		return errors.New("read protected file handle DACL")
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil || verifySingleFullControlACE(dacl, sid) != nil {
+		return errors.New("protected file handle DACL is not current-user only")
+	}
+	return nil
 }
 
 func verifyPrivate(path string) error {

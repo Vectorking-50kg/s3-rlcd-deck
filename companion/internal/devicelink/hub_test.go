@@ -1,17 +1,20 @@
 package devicelink
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/configmodel"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
 	"github.com/coder/websocket"
 )
@@ -148,6 +151,52 @@ func TestHubAuthenticatesThenRequiresDeviceHelloBeforeHeartbeat(t *testing.T) {
 	if heartbeat.Type != MessageHeartbeat || heartbeat.ProtocolVersion != ProtocolVersion ||
 		heartbeat.UTC == "" || heartbeat.RXQueueCapacity == 0 || heartbeat.TXQueueCapacity == 0 {
 		t.Fatalf("heartbeat = %#v", heartbeat)
+	}
+}
+
+func TestHubPublishesOnlyNonSecretDeviceProfileAfterValidHello(t *testing.T) {
+	authenticator := &testAuthenticator{}
+	profiles := make(chan configmodel.DeviceProfile, 1)
+	hub, err := New(Config{
+		Authenticator:     authenticator,
+		HeartbeatInterval: 20 * time.Millisecond,
+		HeartbeatTimeout:  100 * time.Millisecond,
+		Now: func() time.Time {
+			return time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+		},
+		OnDeviceProfile: func(profile configmodel.DeviceProfile) { profiles <- profile },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewTLSServer(hub)
+	defer func() {
+		hub.Close()
+		server.Close()
+	}()
+	connection, _, err := dialTestDeck(t, server, testDeviceID, testDeviceToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.CloseNow()
+	if err = connection.Write(context.Background(), websocket.MessageText, validHello()); err != nil {
+		t.Fatal(err)
+	}
+	_ = readText(t, connection, time.Second)
+	select {
+	case profile := <-profiles:
+		if profile.DeviceID != testDeviceID || profile.Board != BoardESP32S3RLCD42 ||
+			profile.LastSeenUTC != "2026-08-15T12:00:00Z" ||
+			!reflect.DeepEqual(profile.Capabilities, []string{"display", "ota", "serial"}) {
+			t.Fatalf("device profile = %#v", profile)
+		}
+		serialized, _ := json.Marshal(profile)
+		if bytes.Contains(serialized, []byte(testDeviceToken)) ||
+			bytes.Contains(serialized, []byte(testDeviceIdentity)) {
+			t.Fatalf("device profile crossed trust boundary: %s", serialized)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("device profile was not published")
 	}
 }
 

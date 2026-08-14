@@ -7,13 +7,13 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/aisnapshot"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/codexappserver"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/configmodel"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/cursorprovider"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/devicelink"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/history"
@@ -52,18 +52,22 @@ type Status struct {
 type Runtime struct {
 	config Config
 
-	managementHandler    http.Handler
-	deviceHubHandler     http.Handler
-	shutdownTimeout      time.Duration
-	sessions             *managementSessions
-	consoleAccess        *consoleAccessGrants
-	pairing              *pairing.Service
-	deviceLink           *devicelink.Hub
-	codexCollector       CodexCollector
-	codexObserver        CodexObserver
-	cursorCollector      CursorCollector
-	structuredCollectors []StructuredCollector
-	history              *history.Store
+	managementHandler       http.Handler
+	deviceHubHandler        http.Handler
+	shutdownTimeout         time.Duration
+	sessions                *managementSessions
+	consoleAccess           *consoleAccessGrants
+	pairing                 *pairing.Service
+	deviceLink              *devicelink.Hub
+	codexCollector          CodexCollector
+	codexObserver           CodexObserver
+	cursorCollector         CursorCollector
+	structuredCollectors    []StructuredCollector
+	structuredProviderOrder []string
+	history                 *history.Store
+	backup                  BackupService
+	configuration           ConfigurationOwner
+	deviceProfileUpdates    chan configmodel.DeviceProfile
 
 	mu                  sync.RWMutex
 	status              Status
@@ -91,10 +95,22 @@ func New(config Config) (*Runtime, error) {
 	if normalized.Management.AllowLAN {
 		status.SecurityWarning = "management Web is exposed beyond loopback"
 	}
+	var deviceProfileUpdates chan configmodel.DeviceProfile
+	var onDeviceProfile func(configmodel.DeviceProfile)
+	if normalized.Configuration != nil {
+		deviceProfileUpdates = make(chan configmodel.DeviceProfile, 32)
+		onDeviceProfile = func(profile configmodel.DeviceProfile) {
+			select {
+			case deviceProfileUpdates <- profile:
+			default:
+			}
+		}
+	}
 	deviceLink, err := devicelink.New(devicelink.Config{
 		Authenticator:     normalized.Pairing,
 		HeartbeatInterval: normalized.DeviceHub.HeartbeatInterval,
 		HeartbeatTimeout:  normalized.DeviceHub.HeartbeatTimeout,
+		OnDeviceProfile:   onDeviceProfile,
 	})
 	if err != nil {
 		return nil, err
@@ -110,22 +126,33 @@ func New(config Config) (*Runtime, error) {
 		codexObserver:        normalized.CodexObserver,
 		cursorCollector:      normalized.CursorCollector,
 		structuredCollectors: normalized.StructuredCollectors,
+		structuredProviderOrder: func() []string {
+			order := make([]string, len(normalized.StructuredCollectors))
+			for index, collector := range normalized.StructuredCollectors {
+				order[index] = collector.ProviderID()
+			}
+			return order
+		}(),
 		history:              normalized.History,
+		backup:               normalized.Backup,
+		configuration:        normalized.Configuration,
+		deviceProfileUpdates: deviceProfileUpdates,
 		structuredProviders:  make(map[string]aisnapshot.Provider),
 		status:               status,
 	}, nil
 }
 
-// StructuredProviders returns stable-ID ordered, independently owned Provider
+// StructuredProviders returns configured-order, independently owned Provider
 // pages. Raw requests, responses, and credentials remain inside collectors.
 func (application *Runtime) StructuredProviders() []aisnapshot.Provider {
 	application.mu.RLock()
 	providers := make([]aisnapshot.Provider, 0, len(application.structuredProviders))
-	for _, provider := range application.structuredProviders {
-		providers = append(providers, provider.Clone())
+	for _, providerID := range application.structuredProviderOrder {
+		if provider, exists := application.structuredProviders[providerID]; exists {
+			providers = append(providers, provider.Clone())
+		}
 	}
 	application.mu.RUnlock()
-	sort.Slice(providers, func(left, right int) bool { return providers[left].ID < providers[right].ID })
 	return providers
 }
 
@@ -263,6 +290,23 @@ func (application *Runtime) Run(ctx context.Context) error {
 	}()
 	collectorContext, stopCollector := context.WithCancel(ctx)
 	collectorDone := make([]chan error, 0, 3+len(application.structuredCollectors))
+	if application.deviceProfileUpdates != nil {
+		done := make(chan error, 1)
+		collectorDone = append(collectorDone, done)
+		go func() {
+			for {
+				select {
+				case <-collectorContext.Done():
+					done <- nil
+					return
+				case profile := <-application.deviceProfileUpdates:
+					updateContext, cancel := context.WithTimeout(collectorContext, 2*time.Second)
+					_ = application.configuration.UpdateDeviceProfile(updateContext, profile)
+					cancel()
+				}
+			}
+		}()
+	}
 	if application.codexCollector != nil {
 		done := make(chan error, 1)
 		collectorDone = append(collectorDone, done)

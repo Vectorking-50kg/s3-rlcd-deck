@@ -27,6 +27,18 @@ user's platform vault. Configuration may persist the identifier but never the cr
 a platform storage path.
 _Avoid_: API Key ID, Keychain path, credential filename
 
+**Backup Archive**:
+A password-encrypted, versioned `age` document containing only explicitly restorable Companion
+configuration and user-entered Provider credentials. It is not a copy of any live store and never
+contains discovered credentials, device trust, Web sessions, history, or serial data.
+_Avoid_: Config ZIP, database backup, Keychain export
+
+**Import Preview**:
+A redacted, side-effect-free plan for one Backup Archive and current Companion configuration. Its
+short-lived single-use receipt must be presented to commit the exact archive, mode, and current
+configuration that were previewed.
+_Avoid_: Dry-run import, confirmation dialog
+
 **AI Snapshot**:
 A timestamped, display-safe view of normalized Provider data sent by a Companion to a Deck. It excludes upstream credentials and raw private content.
 _Avoid_: Raw snapshot, provider response

@@ -3,12 +3,47 @@
 package protectedfile
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	"golang.org/x/sys/unix"
 )
+
+func createPrivateTemp(parent string) (*os.File, error) {
+	// os.CreateTemp creates mode 0600 atomically on Unix, independent of the
+	// parent directory's permissions.
+	return os.CreateTemp(parent, ".protected-*.tmp")
+}
+
+func openPrivateRead(path string) (*os.File, error) {
+	descriptor, err := unix.Open(
+		path,
+		unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK,
+		0,
+	)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(descriptor), path)
+	if file == nil {
+		_ = unix.Close(descriptor)
+		return nil, errors.New("create protected file handle")
+	}
+	opened, err := file.Stat()
+	if err != nil || !opened.Mode().IsRegular() || opened.Mode().Perm() != 0o600 {
+		_ = file.Close()
+		return nil, errors.New("protected file handle is not a private regular file")
+	}
+	current, err := os.Lstat(path)
+	if err != nil || current.Mode()&os.ModeSymlink != 0 || !current.Mode().IsRegular() ||
+		!os.SameFile(opened, current) {
+		_ = file.Close()
+		return nil, errors.New("protected file path changed while opening")
+	}
+	return file, nil
+}
 
 func EnsurePrivateDirectory(path string) error {
 	if err := os.MkdirAll(path, 0o700); err != nil {

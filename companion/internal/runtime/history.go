@@ -1,11 +1,13 @@
 package runtime
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
 	"time"
 
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/configmodel"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/history"
 )
 
@@ -71,9 +73,22 @@ func (application *Runtime) handleHistorySettingsUpdate(response http.ResponseWr
 		http.Error(response, "malformed Provider history settings", http.StatusBadRequest)
 		return
 	}
+	previous := application.history.Enabled()
 	if err := application.history.SetEnabled(request.Context(), settings.Enabled); err != nil {
 		writeHistoryError(response, err)
 		return
+	}
+	if application.configuration != nil {
+		if err := application.configuration.UpdateApplicationSettings(
+			request.Context(),
+			configmodel.ApplicationSettings{HistoryEnabled: settings.Enabled},
+		); err != nil {
+			rollbackContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = application.history.SetEnabled(rollbackContext, previous)
+			cancel()
+			http.Error(response, "Provider history settings unavailable", http.StatusServiceUnavailable)
+			return
+		}
 	}
 	response.WriteHeader(http.StatusNoContent)
 }

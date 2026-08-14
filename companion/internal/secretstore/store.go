@@ -20,10 +20,13 @@ import (
 )
 
 const (
-	providerSecretService       = "S3 RLCD Deck Companion Provider"
-	referencePrefix             = "secret-"
-	referenceRandomBytes        = 16
-	maximumSecretBytes          = 2560
+	providerSecretService = "S3 RLCD Deck Companion Provider"
+	referencePrefix       = "secret-"
+	referenceRandomBytes  = 16
+	// MaximumSecretBytes is the cross-store credential bound. Encrypted
+	// backups use it so every accepted archive can be staged into the Vault.
+	MaximumSecretBytes          = 2560
+	maximumSecretBytes          = MaximumSecretBytes
 	maximumMetadata             = 512
 	maximumCreateAttempts       = 8
 	failedReserveCleanupTimeout = 5 * time.Second

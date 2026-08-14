@@ -120,3 +120,39 @@ func TestRuntimeRejectsReservedStructuredProvider(t *testing.T) {
 		t.Fatalf("publishStructuredProvider() error = %v", err)
 	}
 }
+
+func TestRuntimePreservesConfiguredStructuredProviderOrder(t *testing.T) {
+	provider := func(id string) aisnapshot.Provider {
+		return aisnapshot.Provider{
+			SchemaVersion: aisnapshot.SchemaVersion{Major: 1, Minor: 0},
+			ID:            id, DisplayName: id, Status: aisnapshot.ProviderOK,
+			Source:     aisnapshot.ProviderSourceStructuredHTTP,
+			Confidence: aisnapshot.ConfidenceVerified,
+			Windows:    []aisnapshot.QuotaWindow{},
+		}
+	}
+	first := &fakeStructuredCollector{provider: provider("zeta")}
+	second := &fakeStructuredCollector{provider: provider("alpha")}
+	application, err := New(Config{
+		Version: "1.2.3-test",
+		Management: ManagementConfig{
+			Address: "127.0.0.1:0", AdminToken: "management-test-token-000000000001",
+		},
+		DeviceHub:            DeviceHubConfig{Address: "127.0.0.1:0"},
+		Pairing:              testPairingService(t),
+		StructuredCollectors: []StructuredCollector{first, second},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = application.publishStructuredProvider(context.Background(), second.provider); err != nil {
+		t.Fatal(err)
+	}
+	if err = application.publishStructuredProvider(context.Background(), first.provider); err != nil {
+		t.Fatal(err)
+	}
+	providers := application.StructuredProviders()
+	if len(providers) != 2 || providers[0].ID != "zeta" || providers[1].ID != "alpha" {
+		t.Fatalf("configured Provider order = %#v", providers)
+	}
+}
