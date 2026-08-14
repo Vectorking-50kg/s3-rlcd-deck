@@ -13,6 +13,7 @@ import (
 
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/aisnapshot"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/codexappserver"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/cursorprovider"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/devicelink"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
 )
@@ -55,13 +56,16 @@ type Runtime struct {
 	deviceLink        *devicelink.Hub
 	codexCollector    CodexCollector
 	codexObserver     CodexObserver
+	cursorCollector   CursorCollector
 
-	mu             sync.RWMutex
-	status         Status
-	started        bool
-	codexUpdate    codexappserver.Update
-	hasCodexUpdate bool
-	codexSessions  []aisnapshot.Session
+	mu                sync.RWMutex
+	status            Status
+	started           bool
+	codexUpdate       codexappserver.Update
+	hasCodexUpdate    bool
+	codexSessions     []aisnapshot.Session
+	cursorProvider    aisnapshot.Provider
+	hasCursorProvider bool
 }
 
 func New(config Config) (*Runtime, error) {
@@ -96,8 +100,20 @@ func New(config Config) (*Runtime, error) {
 		deviceLink:      deviceLink,
 		codexCollector:  normalized.CodexCollector,
 		codexObserver:   normalized.CodexObserver,
+		cursorCollector: normalized.CursorCollector,
 		status:          status,
 	}, nil
+}
+
+// CursorProvider returns the latest normalized experimental Cursor page. Raw
+// local state, credentials, and private endpoint responses never enter Runtime.
+func (application *Runtime) CursorProvider() (aisnapshot.Provider, bool) {
+	application.mu.RLock()
+	defer application.mu.RUnlock()
+	if !application.hasCursorProvider {
+		return aisnapshot.Provider{}, false
+	}
+	return cursorprovider.CloneProvider(application.cursorProvider), true
 }
 
 func (application *Runtime) Status() Status {
@@ -218,7 +234,7 @@ func (application *Runtime) Run(ctx context.Context) error {
 		serveResults <- serveResult{name: "Device Hub", err: deviceHubServer.Serve(deviceHubListener)}
 	}()
 	collectorContext, stopCollector := context.WithCancel(ctx)
-	collectorDone := make([]chan error, 0, 2)
+	collectorDone := make([]chan error, 0, 3)
 	if application.codexCollector != nil {
 		done := make(chan error, 1)
 		collectorDone = append(collectorDone, done)
@@ -236,6 +252,16 @@ func (application *Runtime) Run(ctx context.Context) error {
 			done <- application.codexObserver.Run(
 				collectorContext,
 				application.publishCodexSessions,
+			)
+		}()
+	}
+	if application.cursorCollector != nil {
+		done := make(chan error, 1)
+		collectorDone = append(collectorDone, done)
+		go func() {
+			done <- application.cursorCollector.Run(
+				collectorContext,
+				application.publishCursorProvider,
 			)
 		}()
 	}
@@ -278,6 +304,20 @@ func (application *Runtime) publishCodexUpdate(
 	application.mu.Lock()
 	application.codexUpdate = update.Clone()
 	application.hasCodexUpdate = true
+	application.mu.Unlock()
+	return nil
+}
+
+func (application *Runtime) publishCursorProvider(
+	_ context.Context,
+	provider aisnapshot.Provider,
+) error {
+	if provider.ID != "cursor" || !provider.Experimental {
+		return cursorprovider.ErrUnavailable
+	}
+	application.mu.Lock()
+	application.cursorProvider = cursorprovider.CloneProvider(provider)
+	application.hasCursorProvider = true
 	application.mu.Unlock()
 	return nil
 }

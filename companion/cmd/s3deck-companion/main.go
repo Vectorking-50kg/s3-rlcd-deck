@@ -15,6 +15,7 @@ import (
 
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/codexappserver"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/codexobserver"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/cursorprovider"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/desktop"
 	desktopassets "github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/desktop/assets"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/deviceidentity"
@@ -147,10 +148,19 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "Codex session observation is unavailable")
 		codexObserver = nil
 	}
+	cursorCollector, err := cursorprovider.New(cursorprovider.Config{
+		AdapterVersion:        cursorprovider.AdapterVersion,
+		ResponseSchemaVersion: cursorprovider.ResponseSchemaVersion,
+	})
+	if err != nil {
+		fmt.Fprintln(stderr, "Cursor usage collection is unavailable")
+		cursorCollector = nil
+	}
 	config := companionruntime.Config{
-		Version:        version,
-		CodexCollector: codexCollector,
-		CodexObserver:  codexObserver,
+		Version:         version,
+		CodexCollector:  codexCollector,
+		CodexObserver:   codexObserver,
+		CursorCollector: cursorCollector,
 		Management: companionruntime.ManagementConfig{
 			Address:       *managementAddress,
 			AllowLAN:      *allowLANManagement,
