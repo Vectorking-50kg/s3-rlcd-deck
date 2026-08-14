@@ -119,6 +119,23 @@ func TestManagementHistoryRoutesQueryExportDisableAndClear(t *testing.T) {
 		t.Fatalf("DELETE history status=%d", response.StatusCode)
 	}
 
+	if err = historyStore.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	request, _ = http.NewRequest(http.MethodGet, "http://"+status.ManagementAddress+"/api/v1/history?"+query, nil)
+	request.AddCookie(session)
+	response, err = client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("degraded GET history status=%d, want 503", response.StatusCode)
+	}
+	if current := application.Status(); current.HistoryAvailable || current.HistoryEnabled {
+		t.Fatalf("degraded history status = %+v", current)
+	}
+
 	cancel()
 	if err = <-done; err != nil {
 		t.Fatalf("Run() error = %v", err)

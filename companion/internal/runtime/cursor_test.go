@@ -178,4 +178,7 @@ func TestRuntimeCapturesNormalizedCursorHistoryAndIsolatesHistoryFailure(t *test
 	if err = application.publishCursorProvider(context.Background(), provider); err != nil {
 		t.Fatalf("history failure escaped Provider publication: %v", err)
 	}
+	if status := application.Status(); status.HistoryAvailable || status.HistoryEnabled {
+		t.Fatalf("history failure was not explicit in Runtime status: %+v", status)
+	}
 }

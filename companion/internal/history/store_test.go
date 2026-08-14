@@ -285,15 +285,16 @@ func TestOpenRejectsCorruptDatabaseWithoutReplacingIt(t *testing.T) {
 }
 
 func TestRetentionKeepsExactlyNinetyDaysAndPrunesOlderHours(t *testing.T) {
+	latest := time.Date(2026, 8, 15, 15, 0, 0, 0, time.UTC)
 	store, err := history.Open(context.Background(), history.Config{
 		Path: filepath.Join(t.TempDir(), "provider-history.sqlite3"),
+		Now:  func() time.Time { return latest },
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer store.Close(context.Background())
 
-	latest := time.Date(2026, 8, 15, 15, 0, 0, 0, time.UTC)
 	exactBoundary := latest.Add(-90 * 24 * time.Hour)
 	tooOld := exactBoundary.Add(-time.Hour)
 	for _, observed := range []time.Time{tooOld, exactBoundary, latest} {
@@ -312,6 +313,52 @@ func TestRetentionKeepsExactlyNinetyDaysAndPrunesOlderHours(t *testing.T) {
 	}
 	if len(records) != 2 || !records[0].HourUTC.Equal(exactBoundary) || !records[1].HourUTC.Equal(latest) {
 		t.Fatalf("retained records = %+v", records)
+	}
+}
+
+func TestStartupPrunesAgainstCurrentUTCEvenWhenRecordingIsDisabled(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "provider-history.sqlite3")
+	firstNow := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+	store, err := history.Open(context.Background(), history.Config{
+		Path: databasePath,
+		Now:  func() time.Time { return firstNow },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Capture(context.Background(), providerAt("codex", 1000, 1_000_000), firstNow); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.SetEnabled(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	laterNow := firstNow.Add(90*24*time.Hour + time.Hour)
+	store, err = history.Open(context.Background(), history.Config{
+		Path: databasePath,
+		Now:  func() time.Time { return laterNow },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(context.Background())
+	if store.Enabled() {
+		t.Fatal("recording unexpectedly re-enabled on restart")
+	}
+	records, err := store.Query(context.Background(), history.Query{
+		From: firstNow.Add(-time.Hour), Until: laterNow.Add(time.Hour), Limit: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("expired records after disabled restart = %+v", records)
 	}
 }
 

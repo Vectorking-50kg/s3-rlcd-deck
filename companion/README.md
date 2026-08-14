@@ -97,7 +97,10 @@ into its bounded queue; no Session DTO or upstream response can be represented a
 private SQLite writer keeps the latest observation for each Provider and UTC hour, including only
 normalized status, error code, balance, Token counters, and quota windows. The default 90-day
 retention keeps the exact boundary hour and deletes older hours. Recording can be disabled and the
-setting survives restart.
+setting survives restart. Disable and clear are writer-generation barriers: no capture admitted
+before either successful operation can be committed afterward. Retention uses current UTC at
+startup, during capture, after settings changes, and in an hourly maintenance sweep, so an idle or
+disabled collector cannot retain expired rows indefinitely.
 
 SQLite runs in WAL mode with a protected database, lock, and migration backup. Schema upgrades
 create and verify a consistent `VACUUM INTO` backup before entering the migration transaction; an
@@ -105,7 +108,9 @@ upgrade failure rolls back the original schema and retains the backup. Queries h
 and row bounds. CSV export copies its bounded query result and closes the database read before
 writing to a potentially slow client, and it neutralizes spreadsheet formula prefixes. Corruption
 or history backpressure degrades history alone and never stops Provider collection, Device Hub, or
-the management recovery surface.
+the management recovery surface. Runtime status exposes only fixed
+`history_available`/`history_enabled` booleans; unavailable query/export endpoints return 503 rather
+than serving an unacknowledged stale view.
 
 ## Run
 

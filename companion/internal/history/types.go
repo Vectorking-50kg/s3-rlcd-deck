@@ -29,6 +29,7 @@ type Config struct {
 	Path      string
 	Retention time.Duration
 	QueueSize int
+	Now       func() time.Time
 }
 
 type Query struct {
@@ -59,5 +60,6 @@ type QuotaWindow struct {
 
 type Settings struct {
 	Enabled       bool `json:"enabled"`
+	Available     bool `json:"available"`
 	RetentionDays int  `json:"retention_days"`
 }

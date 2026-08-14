@@ -21,7 +21,12 @@ import (
 
 type commandKind uint8
 
-const writerOperationTimeout = 5 * time.Second
+const (
+	writerOperationTimeout = 5 * time.Second
+	queryOperationTimeout  = 5 * time.Second
+	maintenanceTimeout     = 2 * time.Second
+	retentionSweepInterval = time.Hour
+)
 
 const (
 	commandCapture commandKind = iota
@@ -36,6 +41,7 @@ type storeCommand struct {
 	provider   aisnapshot.Provider
 	observedAt time.Time
 	enabled    bool
+	generation uint64
 	result     chan error
 }
 
@@ -49,10 +55,13 @@ type Store struct {
 	lock      *protectedfile.Lock
 	commands  chan storeCommand
 	done      chan struct{}
+	now       func() time.Time
 
-	stateMu sync.RWMutex
-	closed  bool
-	enabled atomic.Bool
+	stateMu    sync.RWMutex
+	closed     bool
+	enabled    atomic.Bool
+	available  atomic.Bool
+	generation atomic.Uint64
 }
 
 func Open(ctx context.Context, config Config) (*Store, error) {
@@ -77,6 +86,13 @@ func Open(ctx context.Context, config Config) (*Store, error) {
 	}
 	if config.QueueSize < 1 || config.QueueSize > 4096 {
 		return nil, fmt.Errorf("%w: queue size is out of range", ErrInvalid)
+	}
+	if config.Now == nil {
+		config.Now = time.Now
+	}
+	currentUTC := config.Now().UTC()
+	if currentUTC.IsZero() {
+		return nil, fmt.Errorf("%w: current UTC time is unavailable", ErrInvalid)
 	}
 
 	lock, err := protectedfile.AcquireDirectoryLock(filepath.Dir(path), ".provider-history.lock")
@@ -124,9 +140,21 @@ func Open(ctx context.Context, config Config) (*Store, error) {
 		}
 		return nil, classifyDatabaseError(err)
 	}
+	if err = ensureSQLiteFilesPrivate(path); err != nil {
+		return nil, fmt.Errorf("protect Provider history: %w", err)
+	}
 	var enabled int
 	if err = writer.QueryRowContext(ctx, "SELECT enabled FROM history_settings WHERE singleton = 1").Scan(&enabled); err != nil {
 		return nil, classifyDatabaseError(err)
+	}
+	pruneContext, cancelPrune := context.WithTimeout(ctx, writerOperationTimeout)
+	err = pruneExpired(pruneContext, writer, currentUTC, config.Retention)
+	cancelPrune()
+	if err != nil {
+		return nil, err
+	}
+	if err = ensureSQLiteFilesPrivate(path); err != nil {
+		return nil, fmt.Errorf("protect Provider history: %w", err)
 	}
 
 	reader, err := sql.Open("sqlite", readOnlyDSN(path))
@@ -148,8 +176,10 @@ func Open(ctx context.Context, config Config) (*Store, error) {
 		lock:      lock,
 		commands:  make(chan storeCommand, config.QueueSize),
 		done:      make(chan struct{}),
+		now:       config.Now,
 	}
 	store.enabled.Store(enabled == 1)
+	store.available.Store(true)
 	closeLock = false
 	closeWriter = false
 	go store.runWriter()
@@ -163,6 +193,12 @@ func (store *Store) Capture(ctx context.Context, provider aisnapshot.Provider, o
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	store.stateMu.RLock()
+	defer store.stateMu.RUnlock()
+	if store.closed {
+		store.available.Store(false)
+		return ErrClosed
+	}
 	if !store.enabled.Load() {
 		return nil
 	}
@@ -174,16 +210,13 @@ func (store *Store) Capture(ctx context.Context, provider aisnapshot.Provider, o
 		kind:       commandCapture,
 		provider:   provider.Clone(),
 		observedAt: observedAt,
-	}
-	store.stateMu.RLock()
-	defer store.stateMu.RUnlock()
-	if store.closed {
-		return ErrClosed
+		generation: store.generation.Load(),
 	}
 	select {
 	case store.commands <- command:
 		return nil
 	default:
+		store.available.Store(false)
 		return ErrBusy
 	}
 }
@@ -196,12 +229,20 @@ func (store *Store) Enabled() bool {
 	return store != nil && store.enabled.Load()
 }
 
+// Available reports whether the bounded history subsystem can currently
+// accept and persist normalized Provider updates. It never exposes a database
+// or Provider error string across the Runtime boundary.
+func (store *Store) Available() bool {
+	return store != nil && store.available.Load()
+}
+
 func (store *Store) Settings() Settings {
 	if store == nil {
 		return Settings{}
 	}
 	return Settings{
 		Enabled:       store.enabled.Load(),
+		Available:     store.available.Load(),
 		RetentionDays: int(store.retention / (24 * time.Hour)),
 	}
 }
@@ -232,6 +273,7 @@ func (store *Store) Close(ctx context.Context) error {
 	select {
 	case store.commands <- storeCommand{kind: commandClose, result: result}:
 		store.closed = true
+		store.available.Store(false)
 		store.stateMu.Unlock()
 	case <-ctx.Done():
 		store.stateMu.Unlock()
@@ -258,6 +300,7 @@ func (store *Store) synchronizeCommand(ctx context.Context, command storeCommand
 	store.stateMu.RLock()
 	defer store.stateMu.RUnlock()
 	if store.closed {
+		store.available.Store(false)
 		return ErrClosed
 	}
 	select {
@@ -275,31 +318,52 @@ func (store *Store) synchronizeCommand(ctx context.Context, command storeCommand
 
 func (store *Store) runWriter() {
 	defer close(store.done)
+	ticker := time.NewTicker(retentionSweepInterval)
+	defer ticker.Stop()
 	var persistenceErr error
-	for command := range store.commands {
+	for {
+		var command storeCommand
+		select {
+		case command = <-store.commands:
+		default:
+			select {
+			case command = <-store.commands:
+			case <-ticker.C:
+				operationContext, cancel := context.WithTimeout(context.Background(), maintenanceTimeout)
+				err := pruneExpired(operationContext, store.writer, store.now().UTC(), store.retention)
+				if err == nil {
+					err = ensureSQLiteFilesPrivate(store.path)
+				}
+				cancel()
+				persistenceErr = err
+				store.available.Store(err == nil)
+				continue
+			}
+		}
 		var err error
 		switch command.kind {
 		case commandCapture:
+			if !store.enabled.Load() || command.generation != store.generation.Load() {
+				break
+			}
 			operationContext, cancel := context.WithTimeout(context.Background(), writerOperationTimeout)
 			err = store.capture(operationContext, command.provider, command.observedAt)
 			cancel()
 			persistenceErr = err
+			store.available.Store(err == nil)
 		case commandFlush:
 			// FIFO ordering makes reaching this command the flush barrier.
 			err = persistenceErr
 		case commandSetEnabled:
 			operationContext, cancel := context.WithTimeout(context.Background(), writerOperationTimeout)
-			_, err = store.writer.ExecContext(
-				operationContext,
-				"UPDATE history_settings SET enabled = ? WHERE singleton = 1",
-				command.enabled,
-			)
+			err = store.setEnabled(operationContext, command.enabled)
 			cancel()
 			if err == nil {
+				store.generation.Add(1)
 				store.enabled.Store(command.enabled)
-			} else {
-				err = classifyDatabaseError(err)
 			}
+			persistenceErr = err
+			store.available.Store(err == nil)
 		case commandClear:
 			operationContext, cancel := context.WithTimeout(context.Background(), writerOperationTimeout)
 			_, err = store.writer.ExecContext(operationContext, "DELETE FROM provider_hours")
@@ -307,8 +371,10 @@ func (store *Store) runWriter() {
 			if err != nil {
 				err = classifyDatabaseError(err)
 			} else {
+				store.generation.Add(1)
 				persistenceErr = nil
 			}
+			store.available.Store(err == nil)
 		case commandClose:
 			err = errors.Join(persistenceErr, store.reader.Close(), store.writer.Close(), store.lock.Close())
 			if command.result != nil {
@@ -395,9 +461,8 @@ INSERT INTO quota_hours (
 			}
 		}
 	}
-	cutoff := hour.Add(-store.retention)
-	if _, err = transaction.ExecContext(ctx, "DELETE FROM provider_hours WHERE hour_utc_ms < ?", cutoff.UnixMilli()); err != nil {
-		return classifyDatabaseError(err)
+	if err = pruneExpired(ctx, transaction, store.now().UTC(), store.retention); err != nil {
+		return err
 	}
 	if err = transaction.Commit(); err != nil {
 		return classifyDatabaseError(err)
@@ -412,6 +477,15 @@ func (store *Store) Query(ctx context.Context, query Query) ([]Record, error) {
 	if err := validateQuery(query); err != nil {
 		return nil, err
 	}
+	store.stateMu.RLock()
+	closed := store.closed
+	store.stateMu.RUnlock()
+	if closed {
+		store.available.Store(false)
+		return nil, ErrClosed
+	}
+	queryContext, cancel := context.WithTimeout(ctx, queryOperationTimeout)
+	defer cancel()
 	arguments := []any{query.From.UTC().UnixMilli(), query.Until.UTC().UnixMilli()}
 	providerClause := ""
 	if query.ProviderID != "" {
@@ -419,7 +493,7 @@ func (store *Store) Query(ctx context.Context, query Query) ([]Record, error) {
 		arguments = append(arguments, query.ProviderID)
 	}
 	arguments = append(arguments, query.Limit)
-	rows, err := store.reader.QueryContext(ctx, `
+	rows, err := store.reader.QueryContext(queryContext, `
 WITH selected AS (
     SELECT * FROM provider_hours
     WHERE hour_utc_ms >= ? AND hour_utc_ms < ?`+providerClause+`
@@ -439,6 +513,7 @@ FROM selected
 LEFT JOIN quota_hours USING (provider_id, hour_utc_ms)
 ORDER BY selected.hour_utc_ms ASC, selected.provider_id ASC, quota_hours.ordinal ASC`, arguments...)
 	if err != nil {
+		store.available.Store(false)
 		return nil, classifyDatabaseError(err)
 	}
 	defer rows.Close()
@@ -457,6 +532,7 @@ ORDER BY selected.hour_utc_ms ASC, selected.provider_id ASC, quota_hours.ordinal
 			&tokenReasoning, &tokenTotal, &ordinal, &name, &used, &remaining,
 			&minutes, &resetMS,
 		); err != nil {
+			store.available.Store(false)
 			return nil, classifyDatabaseError(err)
 		}
 		if current == nil || current.ProviderID != providerID || current.HourUTC.UnixMilli() != hourMS {
@@ -471,9 +547,50 @@ ORDER BY selected.hour_utc_ms ASC, selected.provider_id ASC, quota_hours.ordinal
 		}
 	}
 	if err = rows.Err(); err != nil {
+		store.available.Store(false)
 		return nil, classifyDatabaseError(err)
 	}
 	return records, nil
+}
+
+type databaseExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func pruneExpired(ctx context.Context, database databaseExecer, currentUTC time.Time, retention time.Duration) error {
+	if currentUTC.IsZero() {
+		return ErrUnavailable
+	}
+	cutoff := currentUTC.UTC().Truncate(time.Hour).Add(-retention)
+	if _, err := database.ExecContext(ctx, "DELETE FROM provider_hours WHERE hour_utc_ms < ?", cutoff.UnixMilli()); err != nil {
+		return classifyDatabaseError(err)
+	}
+	return nil
+}
+
+func (store *Store) setEnabled(ctx context.Context, enabled bool) error {
+	if err := ensureSQLiteFilesPrivate(store.path); err != nil {
+		return classifyDatabaseError(err)
+	}
+	transaction, err := store.writer.BeginTx(ctx, nil)
+	if err != nil {
+		return classifyDatabaseError(err)
+	}
+	defer transaction.Rollback()
+	if _, err = transaction.ExecContext(
+		ctx,
+		"UPDATE history_settings SET enabled = ? WHERE singleton = 1",
+		enabled,
+	); err != nil {
+		return classifyDatabaseError(err)
+	}
+	if err = pruneExpired(ctx, transaction, store.now().UTC(), store.retention); err != nil {
+		return err
+	}
+	if err = transaction.Commit(); err != nil {
+		return classifyDatabaseError(err)
+	}
+	return nil
 }
 
 func validateQuery(query Query) error {

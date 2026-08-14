@@ -62,7 +62,7 @@ func initializeSchema(ctx context.Context, database *sql.DB, path string) error 
 		return fmt.Errorf("read Provider history schema: %w", err)
 	}
 	if version < 0 || version > currentSchemaVersion {
-		return fmt.Errorf("unsupported Provider history schema version %d", version)
+		return fmt.Errorf("%w: unsupported Provider history schema version %d", ErrMigration, version)
 	}
 	switch version {
 	case 0:

@@ -45,6 +45,8 @@ type Status struct {
 	LANManagementEnabled bool   `json:"lan_management_enabled"`
 	SecurityWarning      string `json:"security_warning,omitempty"`
 	LastError            string `json:"last_error,omitempty"`
+	HistoryAvailable     bool   `json:"history_available"`
+	HistoryEnabled       bool   `json:"history_enabled"`
 }
 
 type Runtime struct {
@@ -143,6 +145,10 @@ func (application *Runtime) Status() Status {
 	status := application.status
 	application.mu.RUnlock()
 	status.ConnectedDecks = application.deviceLink.ConnectedDecks()
+	if application.history != nil {
+		status.HistoryAvailable = application.history.Available()
+		status.HistoryEnabled = status.HistoryAvailable && application.history.Enabled()
+	}
 	return status
 }
 

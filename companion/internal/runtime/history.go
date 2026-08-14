@@ -11,7 +11,7 @@ import (
 
 func (application *Runtime) handleHistoryQuery(response http.ResponseWriter, request *http.Request) {
 	store := application.history
-	if store == nil {
+	if store == nil || !store.Available() {
 		http.Error(response, "Provider history unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -32,7 +32,7 @@ func (application *Runtime) handleHistoryQuery(response http.ResponseWriter, req
 
 func (application *Runtime) handleHistoryExport(response http.ResponseWriter, request *http.Request) {
 	store := application.history
-	if store == nil {
+	if store == nil || !store.Available() {
 		http.Error(response, "Provider history unavailable", http.StatusServiceUnavailable)
 		return
 	}
