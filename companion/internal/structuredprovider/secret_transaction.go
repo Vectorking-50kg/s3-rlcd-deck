@@ -23,8 +23,9 @@ type SecretBinding struct {
 }
 
 // DefinitionSecretStore is the exact mutation seam needed to bind new
-// credentials to a persistable Definition. The production *secretstore.Store
-// satisfies it directly.
+// credentials to a persistable Definition. PutNew invokes its callback only
+// after reserving a collision-free reference and before writing secret bytes.
+// The production *secretstore.Store satisfies it directly.
 type DefinitionSecretStore interface {
 	PutNew(
 		context.Context,

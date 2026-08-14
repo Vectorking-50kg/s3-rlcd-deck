@@ -80,4 +80,27 @@ func TestNativeSecretStore(t *testing.T) {
 			t.Fatal("native cleanup left the deleted reference behind")
 		}
 	}
+
+	var staged Reference
+	transactionReference, err := store.PutNew(ctx, first, func(reference Reference) error {
+		staged = reference
+		return nil
+	})
+	if err != nil || staged != transactionReference {
+		t.Fatalf("native PutNew() = %q staged=%q error=%v", transactionReference, staged, err)
+	}
+	t.Cleanup(func() {
+		if cleanupErr := store.Delete(context.Background(), transactionReference); cleanupErr != nil {
+			t.Errorf("native transactional secret cleanup: %v", cleanupErr)
+		}
+	})
+	read, err = store.Get(ctx, transactionReference)
+	if err != nil || !bytes.Equal(read, first) {
+		overwrite(read)
+		t.Fatalf("native Get(PutNew) mismatch: %v", err)
+	}
+	overwrite(read)
+	if err = store.Delete(ctx, transactionReference); err != nil {
+		t.Fatal(err)
+	}
 }

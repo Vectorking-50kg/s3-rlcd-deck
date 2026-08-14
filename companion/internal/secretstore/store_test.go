@@ -130,8 +130,9 @@ func TestPutNewPersistsReferenceIntentBeforeVaultMutation(t *testing.T) {
 		context.Background(),
 		[]byte("transactional-secret"),
 		func(reference Reference) error {
-			if len(vault.values) != 0 {
-				t.Fatal("vault mutation happened before cleanup intent")
+			reserved := vault.values[accountName(reference)]
+			if len(vault.values) != 1 || !bytes.Equal(reserved, []byte{0}) {
+				t.Fatal("PutNew did not reserve a non-secret placeholder before cleanup intent")
 			}
 			staged = reference
 			return nil
@@ -149,6 +150,35 @@ func TestPutNewPersistsReferenceIntentBeforeVaultMutation(t *testing.T) {
 		func(Reference) error { return context.Canceled },
 	); !errors.Is(err, context.Canceled) || len(vault.values) != 0 {
 		t.Fatalf("PutNew(failed intent) error=%v values=%d", err, len(vault.values))
+	}
+}
+
+func TestPutNewCollisionPreservesExistingCredential(t *testing.T) {
+	vault := newMemoryVault()
+	collision := Reference(referencePrefix + strings.Repeat("54", referenceRandomBytes))
+	vault.values[accountName(collision)] = []byte("existing-secret")
+	random := append(
+		bytes.Repeat([]byte{0x54}, referenceRandomBytes),
+		bytes.Repeat([]byte{0x55}, referenceRandomBytes)...,
+	)
+	store, err := newStore(vault, bytes.NewReader(random))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var staged []Reference
+	reference, err := store.PutNew(
+		context.Background(),
+		[]byte("new-secret"),
+		func(reference Reference) error {
+			staged = append(staged, reference)
+			return nil
+		},
+	)
+	if err != nil || reference == collision || len(staged) != 1 || staged[0] != reference {
+		t.Fatalf("PutNew(collision)=%q staged=%v error=%v", reference, staged, err)
+	}
+	if string(vault.values[accountName(collision)]) != "existing-secret" {
+		t.Fatal("PutNew collision modified the existing credential")
 	}
 }
 

@@ -30,7 +30,9 @@ references and journals the old references retired by an update or delete. Vault
 idempotent; successful cleanup removes journal entries and failed cleanup remains persisted for the
 next startup retry. Thus a failed config write retains the old definition and secret, while a
 committed replacement cannot silently orphan its retired reference. The unavoidable OS-vault/file
-boundary is ordered conservatively: reference creation, durable cleanup intent, then publication.
+boundary is ordered conservatively: collision-free non-secret reference reservation, durable cleanup
+intent, secret write, then publication. A create collision is rejected before journaling and never
+modifies or deletes the pre-existing credential.
 
 Tests use an in-memory adapter to cover duplicate IDs, concurrent updates, lock/permission/cancel
 failures, rollback, redaction, and cleanup. Desktop CI additionally performs create, read, update,

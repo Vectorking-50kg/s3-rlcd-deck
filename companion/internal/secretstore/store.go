@@ -118,17 +118,18 @@ func (store *Store) Put(
 	return store.createLocked(ctx, owned, func(Reference) error { return nil })
 }
 
-// PutNew creates a new secret after beforeCreate has durably recorded the
-// generated reference. The callback runs before any vault mutation and must
-// not call back into Store. It lets a cross-store transaction establish a
-// cleanup intent before the secret can exist, closing the crash window between
-// OS-vault creation and configuration journaling.
+// PutNew first atomically reserves a collision-free reference in the vault
+// using a non-secret placeholder. beforeSecret then durably records that
+// reference before the placeholder is replaced by the actual secret. The
+// callback must not call back into Store. A duplicate reference is retried
+// before the callback and therefore can never be journaled or deleted by this
+// transaction.
 func (store *Store) PutNew(
 	ctx context.Context,
 	secret []byte,
-	beforeCreate func(Reference) error,
+	beforeSecret func(Reference) error,
 ) (Reference, error) {
-	if store == nil || ctx == nil || beforeCreate == nil || len(secret) == 0 ||
+	if store == nil || ctx == nil || beforeSecret == nil || len(secret) == 0 ||
 		len(secret) > maximumSecretBytes {
 		return "", ErrInvalid
 	}
@@ -139,7 +140,38 @@ func (store *Store) PutNew(
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	return store.createLocked(ctx, owned, beforeCreate)
+	for range maximumCreateAttempts {
+		reference, err := store.newReference()
+		if err != nil {
+			return "", ErrUnavailable
+		}
+		placeholder := []byte{0}
+		err = store.vault.Create(ctx, accountName(reference), placeholder)
+		overwrite(placeholder)
+		if errors.Is(err, ErrDuplicate) {
+			continue
+		}
+		if err != nil {
+			return "", normalizeVaultError(err)
+		}
+		if err = beforeSecret(reference); err != nil {
+			deleteErr := store.vault.Delete(ctx, accountName(reference))
+			if deleteErr != nil && !errors.Is(deleteErr, ErrNotFound) {
+				return "", normalizeVaultError(deleteErr)
+			}
+			if errors.Is(err, ErrDuplicate) {
+				continue
+			}
+			return "", err
+		}
+		if err = store.vault.Update(ctx, accountName(reference), owned); err != nil {
+			// The durable intent is now responsible for idempotent cleanup of
+			// the placeholder if the secret write did not commit.
+			return "", normalizeVaultError(err)
+		}
+		return reference, nil
+	}
+	return "", ErrUnavailable
 }
 
 func (store *Store) createLocked(
