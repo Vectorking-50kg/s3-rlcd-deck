@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/codexappserver"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
 )
 
@@ -23,10 +25,19 @@ var (
 )
 
 type Config struct {
-	Version    string
-	Management ManagementConfig
-	DeviceHub  DeviceHubConfig
-	Pairing    *pairing.Service
+	Version        string
+	Management     ManagementConfig
+	DeviceHub      DeviceHubConfig
+	Pairing        *pairing.Service
+	CodexCollector CodexCollector
+}
+
+// CodexCollector is intentionally narrow: the runtime can supervise normalized
+// updates and explicitly load an owned thread, but it cannot reach raw App
+// Server responses or process details.
+type CodexCollector interface {
+	Run(context.Context, codexappserver.Publisher) error
+	LoadThread(context.Context, string) error
 }
 
 type ManagementConfig struct {

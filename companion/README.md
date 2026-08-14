@@ -19,6 +19,14 @@ The current M1 runtime provides:
 - an authenticated, read-only `/api/v1/status` endpoint and public `/api/v1/bootstrap`;
 - a size-limited, versioned control-message envelope parser backed by shared fixtures.
 
+The M2 runtime also starts the official Codex App Server behind a private versioned adapter. It
+normalizes dynamic rate-limit windows and lifetime Token usage, refreshes after rolling
+notifications, and publishes only the shared AI Snapshot Provider/Session DTO. Raw App Server
+responses, account metadata, prompts, thread IDs, and paths never leave the adapter. Provider
+timeouts, process exits, authentication failures, permission failures, and schema drift degrade
+Codex independently while the rest of Companion stays available. The adapter does not read or
+write Codex authentication files.
+
 Provider credentials and raw private content must never be sent to a Deck.
 
 ## Run
@@ -117,3 +125,13 @@ The native tray adapter is pinned to `gogpu/systray` commit
 NSApplication-before-NSStatusItem initialization fix and snapshot-safe dynamic
 menu updates. Its MIT notice and the notices of all other shipped Go modules are
 available from the embedded `/third-party-licenses.txt` route.
+
+Fake App Server transcripts cover out-of-order replies, rolling notifications, reconnects,
+abnormal numbers, schema drift, and connection-local thread authority. A developer who owns the
+local Codex login can additionally verify the installed official process without persisting raw
+responses:
+
+```bash
+cd companion
+S3DECK_TEST_CODEX_APP_SERVER=1 go test -run TestInstalledCodexAppServer ./internal/codexappserver
+```

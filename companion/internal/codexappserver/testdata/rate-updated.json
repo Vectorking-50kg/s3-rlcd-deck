@@ -1,0 +1,17 @@
+{
+  "rateLimits": {
+    "credits": null,
+    "individualLimit": null,
+    "limitId": "dynamic-limit",
+    "limitName": "dynamic-window",
+    "planType": null,
+    "primary": {
+      "resetsAt": 1786698000,
+      "usedPercent": 31,
+      "windowDurationMins": 300
+    },
+    "rateLimitReachedType": null,
+    "secondary": null,
+    "spendControlReached": false
+  }
+}
