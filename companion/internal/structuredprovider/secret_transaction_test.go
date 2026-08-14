@@ -147,6 +147,16 @@ func (store *transactionSecretStore) Delete(
 	return nil
 }
 
+func (store *transactionSecretStore) ListMetadata(
+	context.Context,
+) ([]secretstore.Metadata, error) {
+	metadata := make([]secretstore.Metadata, 0, len(store.values))
+	for reference := range store.values {
+		metadata = append(metadata, secretstore.Metadata{Reference: reference})
+	}
+	return metadata, nil
+}
+
 func TestCommitDefinitionPersistsOnlyOpaqueReferenceAndResolvesForRequest(t *testing.T) {
 	const canary = "PRIVATE_PROVIDER_COMMIT_CANARY"
 	template := Templates()[0]
@@ -367,6 +377,31 @@ func TestDefinitionStoreDeleteFailureIsDurableAndRetryable(t *testing.T) {
 	}
 	if len(secrets.values) != 0 || len(owner.state.PendingSecretDeletes) != 0 {
 		t.Fatalf("durable cleanup did not converge: values=%d pending=%d", len(secrets.values), len(owner.state.PendingSecretDeletes))
+	}
+}
+
+func TestDefinitionStoreReconcilesUnjournaledReserveAfterReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "structured-providers.json")
+	owner, err := OpenDefinitionStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = owner.Close(); err != nil {
+		t.Fatal(err)
+	}
+	secrets := newTransactionSecretStore()
+	orphan := secretstore.Reference("secret-33333333333333333333333333333333")
+	secrets.values[orphan] = []byte{0}
+	owner, err = OpenDefinitionStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+	if err = owner.ReconcileCleanup(context.Background(), secrets); err != nil {
+		t.Fatal(err)
+	}
+	if len(secrets.values) != 0 || len(owner.state.PendingSecretDeletes) != 0 {
+		t.Fatalf("orphan reconciliation values=%d pending=%v", len(secrets.values), owner.state.PendingSecretDeletes)
 	}
 }
 

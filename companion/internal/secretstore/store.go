@@ -13,15 +13,17 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
-	providerSecretService = "S3 RLCD Deck Companion Provider"
-	referencePrefix       = "secret-"
-	referenceRandomBytes  = 16
-	maximumSecretBytes    = 2560
-	maximumMetadata       = 512
-	maximumCreateAttempts = 8
+	providerSecretService       = "S3 RLCD Deck Companion Provider"
+	referencePrefix             = "secret-"
+	referenceRandomBytes        = 16
+	maximumSecretBytes          = 2560
+	maximumMetadata             = 512
+	maximumCreateAttempts       = 8
+	failedReserveCleanupTimeout = 5 * time.Second
 )
 
 var (
@@ -155,7 +157,11 @@ func (store *Store) PutNew(
 			return "", normalizeVaultError(err)
 		}
 		if err = beforeSecret(reference); err != nil {
-			deleteErr := store.vault.Delete(ctx, accountName(reference))
+			cleanupContext, cancel := context.WithTimeout(
+				context.Background(), failedReserveCleanupTimeout,
+			)
+			deleteErr := store.vault.Delete(cleanupContext, accountName(reference))
+			cancel()
 			if deleteErr != nil && !errors.Is(deleteErr, ErrNotFound) {
 				return "", normalizeVaultError(deleteErr)
 			}

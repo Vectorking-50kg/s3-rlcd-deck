@@ -62,7 +62,10 @@ func (vault *memoryVault) Get(_ context.Context, account string) ([]byte, error)
 	return append([]byte(nil), secret...), nil
 }
 
-func (vault *memoryVault) Delete(_ context.Context, account string) error {
+func (vault *memoryVault) Delete(ctx context.Context, account string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if vault.deleteError != nil {
 		return vault.deleteError
 	}
@@ -179,6 +182,22 @@ func TestPutNewCollisionPreservesExistingCredential(t *testing.T) {
 	}
 	if string(vault.values[accountName(collision)]) != "existing-secret" {
 		t.Fatal("PutNew collision modified the existing credential")
+	}
+}
+
+func TestPutNewCanceledIntentUsesIndependentReserveCleanup(t *testing.T) {
+	vault := newMemoryVault()
+	store, err := newStore(vault, bytes.NewReader(bytes.Repeat([]byte{0x56}, 64)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	_, err = store.PutNew(ctx, []byte("must-not-exist"), func(Reference) error {
+		cancel()
+		return ctx.Err()
+	})
+	if !errors.Is(err, context.Canceled) || len(vault.values) != 0 {
+		t.Fatalf("PutNew(canceled intent) error=%v values=%d", err, len(vault.values))
 	}
 }
 

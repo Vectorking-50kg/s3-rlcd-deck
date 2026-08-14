@@ -86,7 +86,9 @@ entries first, replace every slot with its generated reference, and publish thro
 `structured-providers.json` owner. New references are journaled before publication; one atomic file
 replacement activates them and journals references retired by an update or delete. Successful vault
 deletes clear the journal, while failed cleanup remains durable and is retried at every Companion
-startup. The file contains definitions and opaque references only—never credential bytes.
+startup. Startup also reconciles vault metadata against active and pending references, recovering a
+crash after collision-free placeholder reservation but before the journal commit. The file contains
+definitions and opaque references only—never credential bytes.
 
 ## Run
 

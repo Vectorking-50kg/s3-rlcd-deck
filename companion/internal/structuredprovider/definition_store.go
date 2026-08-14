@@ -39,6 +39,11 @@ type DefinitionStore struct {
 	lock  *protectedfile.Lock
 }
 
+type cleanupSecretStore interface {
+	DefinitionSecretStore
+	ListMetadata(context.Context) ([]secretstore.Metadata, error)
+}
+
 func OpenDefinitionStore(path string) (*DefinitionStore, error) {
 	if path == "" {
 		return nil, ErrInvalidConfig
@@ -281,6 +286,44 @@ func (store *DefinitionStore) RetryCleanup(
 	references := append([]secretstore.Reference(nil), store.state.PendingSecretDeletes...)
 	store.mutex.RUnlock()
 	return store.cleanupReferences(ctx, secrets, references)
+}
+
+// ReconcileCleanup recovers the only cross-store crash window: a process may
+// stop after PutNew reserves a non-secret vault placeholder but before its
+// cleanup intent reaches this file. Every vault reference not owned by an
+// active definition or an existing cleanup record is first journaled and then
+// idempotently deleted. Production calls this before accepting config edits.
+func (store *DefinitionStore) ReconcileCleanup(
+	ctx context.Context,
+	secrets cleanupSecretStore,
+) error {
+	if store == nil || ctx == nil || secrets == nil {
+		return ErrInvalidConfig
+	}
+	metadata, err := secrets.ListMetadata(ctx)
+	if err != nil {
+		return normalizeSecretStoreError(err)
+	}
+	store.mutex.RLock()
+	active := definitionReferences(store.state.Definitions)
+	pending := referenceSet(store.state.PendingSecretDeletes)
+	store.mutex.RUnlock()
+	orphans := make([]secretstore.Reference, 0, len(metadata))
+	for _, item := range metadata {
+		if _, owned := active[item.Reference]; owned {
+			continue
+		}
+		if _, alreadyPending := pending[item.Reference]; alreadyPending {
+			continue
+		}
+		orphans = append(orphans, item.Reference)
+	}
+	if len(orphans) != 0 {
+		if err = store.StageCleanup(ctx, orphans); err != nil {
+			return ErrSecretRollback
+		}
+	}
+	return store.RetryCleanup(ctx, secrets)
 }
 
 func (store *DefinitionStore) cleanupReferences(

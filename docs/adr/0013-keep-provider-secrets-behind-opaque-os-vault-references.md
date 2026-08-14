@@ -32,7 +32,9 @@ next startup retry. Thus a failed config write retains the old definition and se
 committed replacement cannot silently orphan its retired reference. The unavoidable OS-vault/file
 boundary is ordered conservatively: collision-free non-secret reference reservation, durable cleanup
 intent, secret write, then publication. A create collision is rejected before journaling and never
-modifies or deletes the pre-existing credential.
+modifies or deletes the pre-existing credential. A failed intent uses an independent bounded cleanup
+context. On startup, metadata reconciliation journals and deletes every vault reference that is
+neither active nor already pending, recovering a crash between reservation and intent persistence.
 
 Tests use an in-memory adapter to cover duplicate IDs, concurrent updates, lock/permission/cancel
 failures, rollback, redaction, and cleanup. Desktop CI additionally performs create, read, update,

@@ -266,7 +266,7 @@ func loadStructuredCollectors(
 	}
 	closeStore = func() { _ = providerDefinitions.Close() }
 	cleanupContext, cancelCleanup := context.WithTimeout(context.Background(), 5*time.Second)
-	cleanupErr := providerDefinitions.RetryCleanup(cleanupContext, providerSecrets)
+	cleanupErr := providerDefinitions.ReconcileCleanup(cleanupContext, providerSecrets)
 	cancelCleanup()
 	if cleanupErr != nil {
 		// References are non-secret, but even they do not belong in logs. The
