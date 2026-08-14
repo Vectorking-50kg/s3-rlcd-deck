@@ -665,7 +665,7 @@ func safeForwardScalar(document json.RawMessage) bool {
 func canonicalUTC(value string) (time.Time, error) {
 	parsed, err := time.Parse(time.RFC3339Nano, value)
 	if err != nil || !strings.HasSuffix(value, "Z") || parsed.Location() != time.UTC ||
-		parsed.Format(time.RFC3339Nano) != value {
+		parsed.Year() < 1970 || parsed.Format(time.RFC3339Nano) != value {
 		return time.Time{}, fmt.Errorf("non-canonical UTC timestamp")
 	}
 	return parsed, nil
