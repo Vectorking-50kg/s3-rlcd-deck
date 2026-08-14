@@ -1057,30 +1057,40 @@ def connect_wifi_for_host(
     # acceptance host. Three scans absorb CoreWLAN's occasional false-success
     # "network not found" result while all work shares the caller deadline.
     for attempt in range(3):
+        now = time.monotonic()
         later_attempt_reserve = min(
-            max(0.0, deadline - time.monotonic()) / 2,
+            max(0.0, deadline - now) / 2,
             30.0 if attempt == 0 else 15.0 if attempt == 1 else 0.0,
         )
+        attempt_deadline = deadline - later_attempt_reserve
+        # A complete off/on cycle needs a reserved power-on window. If this
+        # attempt has consumed its slice, advance to the later attempt whose
+        # budget was deliberately kept aside instead of failing the run early.
+        if attempt_deadline - now <= 10:
+            continue
         powered_off = False
         try:
             # Reserve the complete power-on budget before turning the interface
             # off so interruption or failure cannot leave the host radio down.
             powered_off = True
-            set_wifi_power(False, remaining_timeout(deadline, 10, reserve=10))
-            time.sleep(min(2, remaining_timeout(deadline, 2, reserve=10)))
+            set_wifi_power(False, remaining_timeout(attempt_deadline, 10, reserve=10))
+            time.sleep(min(2, remaining_timeout(attempt_deadline, 2, reserve=10)))
         finally:
             if powered_off:
-                set_wifi_power(True, remaining_timeout(deadline, 10))
-        time.sleep(min(3, remaining_timeout(deadline, 3)))
+                set_wifi_power(True, remaining_timeout(attempt_deadline, 10))
+        if time.monotonic() >= attempt_deadline:
+            continue
+        time.sleep(min(3, remaining_timeout(attempt_deadline, 3)))
         for association_attempt in range(3):
+            if time.monotonic() >= attempt_deadline:
+                break
             try:
                 connect_wifi(
                     ssid,
                     password,
                     remaining_timeout(
-                        deadline,
+                        attempt_deadline,
                         12 if attempt < 2 else 20,
-                        reserve=later_attempt_reserve,
                     ),
                 )
             except AcceptanceFailure:
@@ -1090,18 +1100,21 @@ def connect_wifi_for_host(
                 # en0 address/route/host proof below decides the actual state.
                 pass
             settle_budget = max(
-                0.0, deadline - later_attempt_reserve - time.monotonic()
+                0.0, attempt_deadline - time.monotonic()
             )
+            if settle_budget <= 0:
+                break
             if wait_for_wifi_host(
                 host,
-                deadline,
+                attempt_deadline,
                 min(6.0, settle_budget) if attempt < 2 else settle_budget,
             ):
                 return
             if association_attempt < 2:
-                time.sleep(min(1, remaining_timeout(
-                    deadline, 1, reserve=later_attempt_reserve
-                )))
+                remaining = attempt_deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(1, remaining))
     raise AcceptanceFailure(f"network host {host} did not become reachable")
 
 
