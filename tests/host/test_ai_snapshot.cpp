@@ -20,8 +20,40 @@ std::string read_file(const std::string &path)
 
 struct FixtureCase {
     std::string file;
+    std::string encoding;
     std::string result;
 };
+
+std::string decode_hex(const std::string &encoded)
+{
+    std::string decoded;
+    unsigned high = 0;
+    bool have_high = false;
+    for (const char character : encoded) {
+        if (character == '\n' || character == '\r' || character == ' ' || character == '\t') {
+            continue;
+        }
+        unsigned value = 0;
+        if (character >= '0' && character <= '9') {
+            value = static_cast<unsigned>(character - '0');
+        } else if (character >= 'a' && character <= 'f') {
+            value = static_cast<unsigned>(character - 'a' + 10);
+        } else if (character >= 'A' && character <= 'F') {
+            value = static_cast<unsigned>(character - 'A' + 10);
+        } else {
+            assert(false);
+        }
+        if (!have_high) {
+            high = value;
+            have_high = true;
+        } else {
+            decoded.push_back(static_cast<char>((high << 4U) | value));
+            have_high = false;
+        }
+    }
+    assert(!have_high);
+    return decoded;
+}
 
 std::string quoted_value(const std::string &document, size_t key_position)
 {
@@ -45,7 +77,10 @@ std::vector<FixtureCase> manifest_cases()
         const std::string file = quoted_value(manifest, cursor);
         const size_t result_key = manifest.find("\"result\"", cursor);
         assert(result_key != std::string::npos);
-        cases.push_back({file, quoted_value(manifest, result_key)});
+        const size_t encoding_key = manifest.find("\"encoding\"", cursor);
+        const std::string encoding = encoding_key < result_key ?
+            quoted_value(manifest, encoding_key) : "json";
+        cases.push_back({file, encoding, quoted_value(manifest, result_key)});
         cursor = result_key + 8U;
     }
     return cases;
@@ -72,9 +107,14 @@ void shared_fixtures_match_the_firmware_contract()
     const std::vector<FixtureCase> cases = manifest_cases();
     assert(cases.size() >= 12U);
     for (const FixtureCase &test_case : cases) {
-        const std::string document = read_file(
+        std::string document = read_file(
             root + "/protocol/fixtures/ai-snapshot-v1/" + test_case.file
         );
+        if (test_case.encoding == "hex") {
+            document = decode_hex(document);
+        } else {
+            assert(test_case.encoding == "json");
+        }
         deck_ai_snapshot_metadata_t metadata{};
         const deck_ai_snapshot_result_t result = deck_ai_snapshot_validate(
             document.data(), document.size(), &metadata

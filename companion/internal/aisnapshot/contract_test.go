@@ -1,6 +1,8 @@
 package aisnapshot
 
 import (
+	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -75,8 +77,9 @@ func TestDecodeRejectsPrivateContentCanary(t *testing.T) {
 
 func TestCanonicalFixtureManifest(t *testing.T) {
 	type fixtureCase struct {
-		File   string `json:"file"`
-		Result string `json:"result"`
+		File     string `json:"file"`
+		Encoding string `json:"encoding"`
+		Result   string `json:"result"`
 	}
 	var manifest struct {
 		Cases []fixtureCase `json:"cases"`
@@ -89,7 +92,17 @@ func TestCanonicalFixtureManifest(t *testing.T) {
 	}
 	for _, testCase := range manifest.Cases {
 		t.Run(testCase.File, func(t *testing.T) {
-			_, err := Decode(fixture(t, testCase.File))
+			document := fixture(t, testCase.File)
+			if testCase.Encoding == "hex" {
+				var decodeErr error
+				document, decodeErr = hex.DecodeString(string(bytes.TrimSpace(document)))
+				if decodeErr != nil {
+					t.Fatalf("decode hex fixture: %v", decodeErr)
+				}
+			} else if testCase.Encoding != "" && testCase.Encoding != "json" {
+				t.Fatalf("unsupported fixture encoding %q", testCase.Encoding)
+			}
+			_, err := Decode(document)
 			switch testCase.Result {
 			case "accepted":
 				if err != nil {
