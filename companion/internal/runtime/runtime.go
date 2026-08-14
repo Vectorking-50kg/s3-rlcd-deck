@@ -16,6 +16,7 @@ import (
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/codexappserver"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/cursorprovider"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/devicelink"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/history"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/structuredprovider"
 )
@@ -44,6 +45,8 @@ type Status struct {
 	LANManagementEnabled bool   `json:"lan_management_enabled"`
 	SecurityWarning      string `json:"security_warning,omitempty"`
 	LastError            string `json:"last_error,omitempty"`
+	HistoryAvailable     bool   `json:"history_available"`
+	HistoryEnabled       bool   `json:"history_enabled"`
 }
 
 type Runtime struct {
@@ -60,6 +63,7 @@ type Runtime struct {
 	codexObserver        CodexObserver
 	cursorCollector      CursorCollector
 	structuredCollectors []StructuredCollector
+	history              *history.Store
 
 	mu                  sync.RWMutex
 	status              Status
@@ -106,6 +110,7 @@ func New(config Config) (*Runtime, error) {
 		codexObserver:        normalized.CodexObserver,
 		cursorCollector:      normalized.CursorCollector,
 		structuredCollectors: normalized.StructuredCollectors,
+		history:              normalized.History,
 		structuredProviders:  make(map[string]aisnapshot.Provider),
 		status:               status,
 	}, nil
@@ -140,6 +145,10 @@ func (application *Runtime) Status() Status {
 	status := application.status
 	application.mu.RUnlock()
 	status.ConnectedDecks = application.deviceLink.ConnectedDecks()
+	if application.history != nil {
+		status.HistoryAvailable = application.history.Available()
+		status.HistoryEnabled = status.HistoryAvailable && application.history.Enabled()
+	}
 	return status
 }
 
@@ -332,18 +341,19 @@ func (application *Runtime) Run(ctx context.Context) error {
 }
 
 func (application *Runtime) publishCodexUpdate(
-	_ context.Context,
+	ctx context.Context,
 	update codexappserver.Update,
 ) error {
 	application.mu.Lock()
 	application.codexUpdate = update.Clone()
 	application.hasCodexUpdate = true
 	application.mu.Unlock()
+	application.captureHistory(ctx, update.Provider)
 	return nil
 }
 
 func (application *Runtime) publishCursorProvider(
-	_ context.Context,
+	ctx context.Context,
 	provider aisnapshot.Provider,
 ) error {
 	if provider.ID != "cursor" || !provider.Experimental {
@@ -353,11 +363,12 @@ func (application *Runtime) publishCursorProvider(
 	application.cursorProvider = provider.Clone()
 	application.hasCursorProvider = true
 	application.mu.Unlock()
+	application.captureHistory(ctx, provider)
 	return nil
 }
 
 func (application *Runtime) publishStructuredProvider(
-	_ context.Context,
+	ctx context.Context,
 	provider aisnapshot.Provider,
 ) error {
 	generatedAt := time.Now().UTC()
@@ -382,7 +393,18 @@ func (application *Runtime) publishStructuredProvider(
 	application.mu.Lock()
 	application.structuredProviders[provider.ID] = provider.Clone()
 	application.mu.Unlock()
+	application.captureHistory(ctx, provider)
 	return nil
+}
+
+func (application *Runtime) captureHistory(ctx context.Context, provider aisnapshot.Provider) {
+	if application.history == nil {
+		return
+	}
+	// Capture is a validated bounded-queue transfer. History backpressure or
+	// storage failure is intentionally Provider-independent and cannot escape
+	// into collector lifecycle.
+	_ = application.history.Capture(ctx, provider, time.Now().UTC())
 }
 
 func (application *Runtime) publishCodexSessions(

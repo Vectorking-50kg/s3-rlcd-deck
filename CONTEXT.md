@@ -31,6 +31,10 @@ _Avoid_: API Key ID, Keychain path, credential filename
 A timestamped, display-safe view of normalized Provider data sent by a Companion to a Deck. It excludes upstream credentials and raw private content.
 _Avoid_: Raw snapshot, provider response
 
+**Provider Hour**:
+The latest validated Provider usage, balance, quota, and status observed within one UTC hour. It never includes Session Observation or upstream content.
+_Avoid_: Raw history, hourly response
+
 **Snapshot Store**:
 The Deck-owned module that immediately retains the latest valid AI Snapshot in memory and transactionally checkpoints it to Flash at a bounded rate. It alone applies offline visibility policy to cached quota data.
 _Avoid_: Raw cache, Provider database

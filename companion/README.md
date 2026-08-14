@@ -92,6 +92,26 @@ startup. Startup also reconciles vault metadata against active and pending refer
 crash after collision-free placeholder reservation but before the journal commit. The file contains
 definitions and opaque references only—never credential bytes.
 
+Provider history is owned by `internal/history`. Runtime transfers only a validated Provider DTO
+into its bounded queue; no Session DTO or upstream response can be represented at that seam. One
+private SQLite writer keeps the latest observation for each Provider and UTC hour, including only
+normalized status, error code, balance, Token counters, and quota windows. The default 90-day
+retention keeps the exact boundary hour and deletes older hours. Recording can be disabled and the
+setting survives restart. Disable and clear are writer-generation barriers: no capture admitted
+before either successful operation can be committed afterward. Retention uses current UTC at
+startup, during capture, after settings changes, and in an hourly maintenance sweep, so an idle or
+disabled collector cannot retain expired rows indefinitely.
+
+SQLite runs in WAL mode with a protected database, lock, and migration backup. Schema upgrades
+create and verify a consistent `VACUUM INTO` backup before entering the migration transaction; an
+upgrade failure rolls back the original schema and retains the backup. Queries have mandatory time
+and row bounds. CSV export copies its bounded query result and closes the database read before
+writing to a potentially slow client, and it neutralizes spreadsheet formula prefixes. Corruption
+or history backpressure degrades history alone and never stops Provider collection, Device Hub, or
+the management recovery surface. Runtime status exposes only fixed
+`history_available`/`history_enabled` booleans; unavailable query/export endpoints return 503 rather
+than serving an unacknowledged stale view.
+
 ## Run
 
 Go 1.26.x is the development baseline.
@@ -146,7 +166,7 @@ Only one Companion may own a data directory. A repeated launch fails with an
 explicit `already running` error instead of competing for listeners or trust
 files. Login-start installation is deliberately deferred to M5.
 
-The authenticated management API issues codes at `POST /api/v1/pairing/codes`, issues a device-bound rotation code at `POST /api/v1/devices/{device_id}/rotate`, and revokes trust at `DELETE /api/v1/devices/{device_id}`. A Deck redeems a code once at the rate-limited Device Hub route `POST /api/v1/pairing/redeem`. Management writes require the login session, exact Origin, and CSRF token described above; a successful redeem response is the only place a plaintext device Token is returned. Device requests authenticate the complete Device ID + Token + identity + protocol-version binding.
+The authenticated management API issues codes at `POST /api/v1/pairing/codes`, issues a device-bound rotation code at `POST /api/v1/devices/{device_id}/rotate`, and revokes trust at `DELETE /api/v1/devices/{device_id}`. Provider Hour data is read from `GET /api/v1/history`, exported from `GET /api/v1/history/export.csv`, enabled or disabled through `/api/v1/history/settings`, and cleared with `DELETE /api/v1/history`. A Deck redeems a code once at the rate-limited Device Hub route `POST /api/v1/pairing/redeem`. Management writes require the login session, exact Origin, and CSRF token described above; a successful redeem response is the only place a plaintext device Token is returned. Device requests authenticate the complete Device ID + Token + identity + protocol-version binding.
 
 The Device Link endpoint is `GET /api/v1/device/link` with WebSocket subprotocol
 `s3-rlcd-deck.v1`. An authenticated Deck must send `device.hello` first and continue with

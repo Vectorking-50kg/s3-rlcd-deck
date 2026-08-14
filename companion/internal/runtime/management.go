@@ -66,6 +66,11 @@ func (application *Runtime) managementRoutes() http.Handler {
 		application.handleLogin,
 	))
 	mux.HandleFunc("GET /api/v1/status", application.requireManagementSession(application.handleStatus))
+	mux.HandleFunc("GET /api/v1/history", application.requireManagementSession(application.handleHistoryQuery))
+	mux.HandleFunc("GET /api/v1/history/export.csv", application.requireManagementSession(application.handleHistoryExport))
+	mux.HandleFunc("GET /api/v1/history/settings", application.requireManagementSession(application.handleHistorySettings))
+	mux.HandleFunc("PUT /api/v1/history/settings", application.requireManagementWrite(application.handleHistorySettingsUpdate))
+	mux.HandleFunc("DELETE /api/v1/history", application.requireManagementWrite(application.handleHistoryClear))
 	mux.HandleFunc("POST /api/v1/logout", limitManagementRequests(
 		sensitiveRateLimiter,
 		limits.SensitiveRateWindow,
