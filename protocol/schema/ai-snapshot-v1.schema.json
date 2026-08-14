@@ -91,7 +91,7 @@
     "provider": {
       "type": "object",
       "maxProperties": 29,
-      "propertyNames": {"pattern": "^[a-z][a-z0-9_]{0,31}$"},
+      "propertyNames": {"pattern": "^[a-z][a-z0-9_-]{0,31}$"},
       "required": ["schema_version", "provider_id", "display_name", "status", "source", "confidence", "experimental", "updated_at", "stale_after_seconds", "balance", "windows", "tokens", "error"],
       "properties": {
         "schema_version": {"$ref": "#/$defs/schema_version"},
@@ -117,7 +117,7 @@
     "session": {
       "type": "object",
       "maxProperties": 28,
-      "propertyNames": {"pattern": "^[a-z][a-z0-9_]{0,31}$"},
+      "propertyNames": {"pattern": "^[a-z][a-z0-9_-]{0,31}$"},
       "required": ["schema_version", "session_id", "provider_id", "display_name", "state", "source", "confidence", "started_at", "last_activity_at", "duration_seconds", "turn_tokens", "context_used_basis_points"],
       "properties": {
         "schema_version": {"$ref": "#/$defs/schema_version"},
@@ -142,7 +142,7 @@
     "snapshot": {
       "type": "object",
       "maxProperties": 25,
-      "propertyNames": {"pattern": "^[a-z][a-z0-9_]{0,31}$"},
+      "propertyNames": {"pattern": "^[a-z][a-z0-9_-]{0,31}$"},
       "required": ["type", "protocol_version", "schema_version", "generated_at", "timezone", "provider_order", "providers", "sessions", "next_refresh_seconds"],
       "properties": {
         "type": {"const": "snapshot.ai"},

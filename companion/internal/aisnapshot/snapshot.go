@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/protocol"
 )
@@ -811,7 +812,8 @@ func safeOpaqueID(value string, maximum int) bool {
 }
 
 func safeText(value string, maximum int) bool {
-	if len(value) == 0 || len(value) > maximum {
+	length := utf8.RuneCountInString(value)
+	if !utf8.ValidString(value) || length == 0 || length > maximum {
 		return false
 	}
 	for _, char := range value {

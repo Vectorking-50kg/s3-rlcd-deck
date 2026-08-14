@@ -466,11 +466,28 @@ public:
         if (value.type != NodeType::string || value.end == value.start) {
             return false;
         }
-        size_t decoded_bytes = 0;
+        size_t decoded_codepoints = 0;
         for (size_t cursor = value.start; cursor < value.end;) {
             const uint8_t byte = static_cast<uint8_t>(text_[cursor++]);
             if (byte != '\\') {
-                ++decoded_bytes;
+                if (byte == 0x7fU) {
+                    return false;
+                }
+                if (byte >= 0x80U) {
+                    if ((byte & 0xe0U) == 0xc0U) {
+                        cursor += 1U;
+                    } else if ((byte & 0xf0U) == 0xe0U) {
+                        cursor += 2U;
+                    } else if ((byte & 0xf8U) == 0xf0U) {
+                        cursor += 3U;
+                    } else {
+                        return false;
+                    }
+                    if (cursor > value.end) {
+                        return false;
+                    }
+                }
+                ++decoded_codepoints;
                 continue;
             }
             if (cursor >= value.end) {
@@ -482,7 +499,7 @@ public:
                 return false;
             }
             if (escaped != 'u') {
-                ++decoded_bytes;
+                ++decoded_codepoints;
                 continue;
             }
             if (cursor + 4U > value.end) {
@@ -525,20 +542,14 @@ public:
                 if (low < 0xdc00U || low > 0xdfffU) {
                     return false;
                 }
-                decoded_bytes += 4U;
             } else if (codepoint >= 0xdc00U && codepoint <= 0xdfffU) {
                 return false;
             } else if (codepoint < 0x20U || codepoint == 0x7fU) {
                 return false;
-            } else if (codepoint <= 0x7fU) {
-                decoded_bytes += 1U;
-            } else if (codepoint <= 0x7ffU) {
-                decoded_bytes += 2U;
-            } else {
-                decoded_bytes += 3U;
             }
+            ++decoded_codepoints;
         }
-        return decoded_bytes > 0U && decoded_bytes <= maximum;
+        return decoded_codepoints > 0U && decoded_codepoints <= maximum;
     }
 
     const char *text() const { return text_; }

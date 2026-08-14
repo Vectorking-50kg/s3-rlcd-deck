@@ -14,6 +14,8 @@ This directory is the cross-end source of truth for versioned messages exchanged
 are integer basis points (`0..10000`), money is non-negative micro-units plus an uppercase
 three-letter currency, and counts are bounded by JSON's `2^53-1` safe-integer limit. All wire
 timestamps are canonical UTC RFC 3339 values ending in `Z`.
+JSON Schema `maxLength` limits and both parsers count decoded Unicode code points, not UTF-8
+bytes. Higher-minor extension names use the ASCII pattern `[a-z][a-z0-9_-]{0,31}`.
 
 Every required field is present even when its value is `null`; null is the only unknown numeric
 value and is never replaced with zero. Unknown schema majors are rejected. A higher minor may
