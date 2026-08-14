@@ -12,6 +12,7 @@ import (
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/codexappserver"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/codexobserver"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/cursorprovider"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/history"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/structuredprovider"
 )
@@ -36,6 +37,7 @@ type Config struct {
 	CodexObserver        CodexObserver
 	CursorCollector      CursorCollector
 	StructuredCollectors []StructuredCollector
+	History              *history.Store
 }
 
 // CodexCollector is intentionally narrow: the runtime can supervise normalized

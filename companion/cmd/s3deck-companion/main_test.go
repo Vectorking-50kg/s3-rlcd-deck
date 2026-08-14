@@ -56,3 +56,25 @@ func TestMalformedStructuredProviderConfigurationDoesNotDisableCompanion(t *test
 		t.Fatalf("structured Provider degradation was not isolated/redacted: %q", stderr.String())
 	}
 }
+
+func TestCorruptProviderHistoryDoesNotDisableCompanionOrLeakContents(t *testing.T) {
+	t.Setenv(managementTokenEnvironment, "not-a-valid-token")
+	directory := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(directory, "provider-history.sqlite3"),
+		[]byte("PRIVATE_HISTORY_CANARY is not sqlite"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := run([]string{"--headless", "--data-directory", directory}, &stdout, &stderr)
+	if exitCode != 2 || !bytes.Contains(stderr.Bytes(), []byte("management admin token")) {
+		t.Fatalf("run() exit=%d stderr=%q", exitCode, stderr.String())
+	}
+	if !bytes.Contains(stderr.Bytes(), []byte("Provider history is unavailable")) ||
+		bytes.Contains(stderr.Bytes(), []byte("PRIVATE_HISTORY_CANARY")) {
+		t.Fatalf("Provider history degradation was not isolated/redacted: %q", stderr.String())
+	}
+}

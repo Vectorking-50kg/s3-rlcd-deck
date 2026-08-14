@@ -3,11 +3,13 @@ package runtime
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/aisnapshot"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/cursorprovider"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/history"
 )
 
 type fakeRuntimeCursorCollector struct {
@@ -123,5 +125,57 @@ func TestRuntimeRejectsNonExperimentalCursorPublication(t *testing.T) {
 	}
 	if _, exists := application.CursorProvider(); exists {
 		t.Fatal("invalid Cursor provider entered Runtime")
+	}
+}
+
+func TestRuntimeCapturesNormalizedCursorHistoryAndIsolatesHistoryFailure(t *testing.T) {
+	historyStore, err := history.Open(context.Background(), history.Config{
+		Path: filepath.Join(t.TempDir(), "provider-history.sqlite3"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	application, err := New(Config{
+		Version: "1.2.3-test",
+		Management: ManagementConfig{
+			Address:    "127.0.0.1:0",
+			AdminToken: "management-test-token-000000000001",
+		},
+		DeviceHub: DeviceHubConfig{Address: "127.0.0.1:0"},
+		Pairing:   testPairingService(t),
+		History:   historyStore,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	used := uint16(1200)
+	provider := aisnapshot.Provider{
+		SchemaVersion: aisnapshot.SchemaVersion{Major: 1, Minor: 0},
+		ID:            "cursor",
+		DisplayName:   "Cursor",
+		Status:        aisnapshot.ProviderOK,
+		Source:        aisnapshot.ProviderSourceCursorLocal,
+		Confidence:    aisnapshot.ConfidenceInferred,
+		Experimental:  true,
+		Windows:       []aisnapshot.QuotaWindow{{Name: "billing", UsedBasisPoints: &used}},
+	}
+	if err = application.publishCursorProvider(context.Background(), provider); err != nil {
+		t.Fatalf("publishCursorProvider() error = %v", err)
+	}
+	if err = historyStore.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	records, err := historyStore.Query(context.Background(), history.Query{
+		From: now.Add(-time.Hour), Until: now.Add(time.Hour), Limit: 10,
+	})
+	if err != nil || len(records) != 1 || records[0].ProviderID != "cursor" {
+		t.Fatalf("history records = %+v, error = %v", records, err)
+	}
+	if err = historyStore.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err = application.publishCursorProvider(context.Background(), provider); err != nil {
+		t.Fatalf("history failure escaped Provider publication: %v", err)
 	}
 }

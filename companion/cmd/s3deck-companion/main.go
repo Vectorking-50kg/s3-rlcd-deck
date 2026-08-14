@@ -19,6 +19,7 @@ import (
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/desktop"
 	desktopassets "github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/desktop/assets"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/deviceidentity"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/history"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/managementtoken"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
 	companionruntime "github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/runtime"
@@ -140,6 +141,8 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		stderr,
 	)
 	defer closeProviderDefinitions()
+	providerHistory, closeProviderHistory := loadProviderHistory(resolvedDataDirectory, stderr)
+	defer closeProviderHistory()
 	codexCollector, err := codexappserver.New(codexappserver.Config{
 		AdapterVersion: codexappserver.AdapterVersion,
 		ClientVersion:  version,
@@ -169,6 +172,7 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		CodexObserver:        codexObserver,
 		CursorCollector:      cursorCollector,
 		StructuredCollectors: structuredCollectors,
+		History:              providerHistory,
 		Management: companionruntime.ManagementConfig{
 			Address:       *managementAddress,
 			AllowLAN:      *allowLANManagement,
@@ -237,6 +241,25 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+func loadProviderHistory(dataDirectory string, stderr io.Writer) (*history.Store, func()) {
+	openContext, cancelOpen := context.WithTimeout(context.Background(), 5*time.Second)
+	store, err := history.Open(openContext, history.Config{
+		Path: filepath.Join(dataDirectory, "provider-history.sqlite3"),
+	})
+	cancelOpen()
+	if err != nil {
+		// Database paths and SQLite diagnostics may contain private filesystem
+		// context. History is non-critical and degrades behind a fixed message.
+		fmt.Fprintln(stderr, "Provider history is unavailable")
+		return nil, func() {}
+	}
+	return store, func() {
+		closeContext, cancelClose := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = store.Close(closeContext)
+		cancelClose()
+	}
 }
 
 func defaultDataDirectory() (string, error) {
