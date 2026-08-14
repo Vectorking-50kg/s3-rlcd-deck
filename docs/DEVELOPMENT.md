@@ -380,6 +380,20 @@ V1 不接管用户的 Codex Desktop、IDE 或 CLI 会话，因此另启的 App S
 - 不上传 Prompt、回复、命令输出、工具参数或绝对路径。
 - 会话标题默认隐藏；屏幕只显示用户别名或工程目录最后一级。
 
+外部 Codex 会话观察器是独立的只读深模块：它不启动、恢复、附加、接管或向用户会话
+发送信号。进程身份必须包含 PID 与启动时间；只有 macOS 上唯一进程与唯一文件的强映射，
+并且同一身份下连续两次观察到文件增长，才允许输出 Running。首次观察、PID 复用、轮转、
+重复 Session ID、多候选或 Windows 弱映射都不能继承 Running。文件停止增长只能变为
+Recent/Unknown，失去 owner 且超过 recency 窗口后才变为 Ended。
+
+扫描只读取一个完整且不超过 64 KiB 的 `session_meta` 首行，只提取上游 ID 做单向匿名化；
+文件正文、文件名、绝对路径、进程名和所有原始 JSON 都不能越过观察器边界。目录遍历、候选
+数量和保留窗口必须有界；macOS/Windows 必须从固定目录句柄相对 no-follow 打开后代，拒绝
+symlink。平台进程枚举、辅助进程执行时间与输出同样必须有界，且不得把 Session 绝对路径放入
+辅助进程 argv；权限错误、截断、轮转、partial JSON 或平台发现失败
+只清空 inferred sessions 并重试，不能阻塞或覆盖官方 App Server 的额度、用量和 Verified
+State。两源匿名 ID 相同时，Runtime 必须让 Verified State 胜出，总数仍受 16 项上限约束。
+
 ### 7.3 Cursor
 
 个人 Cursor 用量没有公开稳定的官方 API。V1 适配器遵循：

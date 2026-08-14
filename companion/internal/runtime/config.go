@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/codexappserver"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/codexobserver"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
 )
 
@@ -30,6 +31,7 @@ type Config struct {
 	DeviceHub      DeviceHubConfig
 	Pairing        *pairing.Service
 	CodexCollector CodexCollector
+	CodexObserver  CodexObserver
 }
 
 // CodexCollector is intentionally narrow: the runtime can supervise normalized
@@ -38,6 +40,12 @@ type Config struct {
 type CodexCollector interface {
 	Run(context.Context, codexappserver.Publisher) error
 	LoadThread(context.Context, string) error
+}
+
+// CodexObserver is deliberately publish-only. It cannot load, resume, or
+// otherwise take ownership of a user session.
+type CodexObserver interface {
+	Run(context.Context, codexobserver.Publisher) error
 }
 
 type ManagementConfig struct {

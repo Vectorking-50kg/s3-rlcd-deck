@@ -27,6 +27,15 @@ timeouts, process exits, authentication failures, permission failures, and schem
 Codex independently while the rest of Companion stays available. The adapter does not read or
 write Codex authentication files.
 
+Independently owned Codex sessions are observed by a separate read-only process/JSONL adapter. It
+never starts or takes over a session and exposes only anonymous `Running`, `Recent`, `Ended`, or
+`Unknown` DTOs with `confidence=inferred`. Running requires a unique macOS process/file mapping and
+observed growth under the same PID-plus-start-time identity. Windows weak mapping, PID reuse,
+multiple candidates, rotation, partial JSON, and permission failures fail closed. Only one bounded
+`session_meta` line is inspected; titles, prompts, replies, filenames, paths, commands, and tool
+arguments never leave the adapter. Observer failure clears only inferred sessions and cannot block
+the official Codex quota collector.
+
 Provider credentials and raw private content must never be sent to a Deck.
 
 ## Run

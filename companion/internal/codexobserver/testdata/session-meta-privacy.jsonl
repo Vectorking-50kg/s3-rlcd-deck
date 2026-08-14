@@ -1,0 +1,2 @@
+{"type":"session_meta","payload":{"id":"privacy-upstream-id","cwd":"/Users/alice/private-project","title":"PRIVATE_TITLE_CANARY","prompt":"PRIVATE_PROMPT_CANARY","command":"PRIVATE_COMMAND_CANARY","tool_args":"PRIVATE_TOOL_ARGUMENT_CANARY"}}
+{"type":"event_msg","payload":{"message":"PRIVATE_EVENT_CANARY"}}

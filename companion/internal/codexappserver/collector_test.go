@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/aisnapshot"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/sessionidentity"
 )
 
 var testNow = time.Date(2026, 8, 14, 2, 0, 0, 0, time.UTC)
@@ -550,6 +551,9 @@ func TestOnlyThreadsLoadedByThisConnectionBecomeVerified(t *testing.T) {
 		session.Confidence != aisnapshot.ConfidenceVerified ||
 		session.State != aisnapshot.SessionWaitingApproval || session.DisplayName != nil {
 		t.Fatalf("verified session = %+v", session)
+	}
+	if session.ID != sessionidentity.Codex(owned) {
+		t.Fatalf("session id = %q, want shared anonymous identity", session.ID)
 	}
 	encoded, err := json.Marshal(verified)
 	if err != nil {

@@ -2,8 +2,6 @@ package codexappserver
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/aisnapshot"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/sessionidentity"
 )
 
 const (
@@ -343,7 +342,7 @@ func (collector *Collector) acceptThreadStatus(
 		return false, Update{}, err
 	}
 	lastActivity := canonicalTime(collector.config.Now())
-	identifier := anonymousThreadID(event.ThreadID)
+	identifier := sessionidentity.Codex(event.ThreadID)
 	collector.sessions[event.ThreadID] = aisnapshot.Session{
 		SchemaVersion:  aisnapshot.SchemaVersion{Major: 1, Minor: 0},
 		ID:             identifier,
@@ -387,11 +386,6 @@ func normalizeThreadState(status rawThreadStatus) (aisnapshot.SessionState, erro
 	default:
 		return "", ErrSchemaChanged
 	}
-}
-
-func anonymousThreadID(threadID string) string {
-	digest := sha256.Sum256([]byte(threadID))
-	return "codex_" + hex.EncodeToString(digest[:8])
 }
 
 func (collector *Collector) updateLocked() Update {
