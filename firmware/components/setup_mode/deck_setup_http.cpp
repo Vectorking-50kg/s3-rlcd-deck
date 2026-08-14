@@ -274,6 +274,30 @@ deck_setup_http_route_t deck_setup_http_route(const char *method, const char *pa
     return DECK_SETUP_HTTP_NOT_FOUND;
 }
 
+bool deck_setup_http_address_is_setup_gateway(
+    const uint8_t *local_address,
+    size_t local_address_size
+)
+{
+    if (local_address == nullptr) {
+        return false;
+    }
+    const uint8_t *local_ipv4 = local_address;
+    if (local_address_size == 16) {
+        constexpr uint8_t kIpv4MappedPrefix[12] = {
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff,
+        };
+        if (std::memcmp(local_address, kIpv4MappedPrefix, sizeof(kIpv4MappedPrefix)) != 0) {
+            return false;
+        }
+        local_ipv4 += sizeof(kIpv4MappedPrefix);
+    } else if (local_address_size != 4) {
+        return false;
+    }
+    constexpr uint8_t kSetupGateway[] = {192, 168, 4, 1};
+    return std::memcmp(local_ipv4, kSetupGateway, sizeof(kSetupGateway)) == 0;
+}
+
 bool deck_setup_http_convert_scan_results(
     const deck_setup_scan_observation_t *observations,
     size_t observation_count,

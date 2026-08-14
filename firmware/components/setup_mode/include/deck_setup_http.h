@@ -81,6 +81,10 @@ typedef enum {
 
 const deck_setup_http_route_spec_t *deck_setup_http_routes(size_t *route_count);
 deck_setup_http_route_t deck_setup_http_route(const char *method, const char *path);
+bool deck_setup_http_address_is_setup_gateway(
+    const uint8_t *local_address,
+    size_t local_address_size
+);
 bool deck_setup_http_convert_scan_results(
     const deck_setup_scan_observation_t *observations,
     size_t observation_count,

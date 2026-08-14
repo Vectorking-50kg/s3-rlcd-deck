@@ -24,6 +24,11 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+try:
+    import termios
+except ImportError:  # pragma: no cover - M1 hardware execution is macOS-only.
+    termios = None
 from typing import Any, Callable
 
 
@@ -407,13 +412,14 @@ class SerialEvidence:
 
     @staticmethod
     def open_connection(serial_module: Any, port: str, timeout: float) -> Any:
+        platform_serial_error = termios.error if termios is not None else OSError
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
                 return serial_module.Serial(
                     port=port, baudrate=115200, timeout=0.25, write_timeout=0.25
                 )
-            except (OSError, serial_module.SerialException):
+            except (OSError, platform_serial_error, serial_module.SerialException):
                 time.sleep(0.25)
         raise AcceptanceFailure("Deck serial port did not enumerate after app flash")
 
@@ -422,9 +428,66 @@ class SerialEvidence:
         self._output.close()
 
     def reopen(self, serial_module: Any, port: str, timeout: float) -> None:
-        self._connection.close()
+        platform_serial_error = termios.error if termios is not None else OSError
+        try:
+            self._connection.close()
+        except (OSError, platform_serial_error, self._serial_exception):
+            pass
         time.sleep(0.75)
         self._connection = self.open_connection(serial_module, port, timeout)
+
+    def event_after_reenumeration(
+        self,
+        serial_module: Any,
+        port: str,
+        predicate: Callable[[dict[str, Any]], bool],
+        stage: str,
+        timeout: float,
+    ) -> dict[str, Any]:
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AcceptanceTimeout(f"{stage}: USB re-enumeration timed out")
+            self.reopen(serial_module, port, remaining)
+            try:
+                event_budget = deadline - time.monotonic()
+                if event_budget <= 0:
+                    raise AcceptanceTimeout(
+                        f"{stage}: USB re-enumeration timed out"
+                    )
+                return self.event(
+                    predicate,
+                    stage,
+                    min(3.0, event_budget),
+                )
+            except (SerialDisconnected, AcceptanceTimeout):
+                # macOS may briefly reopen the stale pre-reset CDC device
+                # before publishing the new endpoint. A stale endpoint can
+                # either detach or remain readable but silent, so retry both
+                # outcomes inside one deadline and never request another reset.
+                continue
+
+    def restart_and_wait(
+        self,
+        serial_module: Any,
+        port: str,
+        timeout: float,
+        stage: str,
+    ) -> dict[str, Any]:
+        self.command(b"DECK_RESTART\n")
+        self.event(
+            lambda event: event.get("type") == "restart_ack",
+            f"{stage}: restart acknowledgement",
+            min(3.0, timeout),
+        )
+        return self.event_after_reenumeration(
+            serial_module,
+            port,
+            lambda event: accept_boot_event(event, stage),
+            stage,
+            timeout,
+        )
 
     def command(self, command: bytes) -> None:
         try:
@@ -440,11 +503,12 @@ class SerialEvidence:
         try:
             self.command(HIL_READY)
         except SerialDisconnected:
-            self.reopen(serial_module, port, timeout)
-            return self.event(
+            return self.event_after_reenumeration(
+                serial_module,
+                port,
                 lambda event: accept_boot_event(event, "post-flash boot"),
                 "post-flash reenumerated boot",
-                30.0,
+                timeout,
             )
         try:
             return self.event(
@@ -457,19 +521,19 @@ class SerialEvidence:
             # an app-only JTAG flash so the host cannot retain OpenOCD's stale
             # CDC endpoint. Reopen the newly enumerated endpoint and preserve
             # this boot; another reset would discard the evidence we need.
-            self.reopen(serial_module, port, timeout)
-            return self.event(
+            return self.event_after_reenumeration(
+                serial_module,
+                port,
                 lambda event: accept_boot_event(event, "post-flash boot"),
                 "post-flash reenumerated boot",
-                30.0,
+                timeout,
             )
         except AcceptanceTimeout:
-            self.command(b"DECK_RESTART\n")
-            self.reopen(serial_module, port, timeout)
-            return self.event(
-                lambda event: accept_boot_event(event, "post-flash boot"),
+            return self.restart_and_wait(
+                serial_module,
+                port,
+                timeout,
                 "post-flash fresh boot",
-                30.0,
             )
 
     def event(
@@ -510,12 +574,29 @@ class SerialEvidence:
         raise AcceptanceTimeout(f"{stage}: timed out waiting for Deck state")
 
 
+def direct_opener(*handlers: Any) -> urllib.request.OpenerDirector:
+    """Create an opener that cannot inherit proxy settings for private endpoints."""
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), *handlers)
+
+
+def open_direct(
+    request: urllib.request.Request,
+    *,
+    timeout: float,
+    context: ssl.SSLContext | None = None,
+) -> Any:
+    handlers: tuple[Any, ...] = (
+        (urllib.request.HTTPSHandler(context=context),) if context is not None else ()
+    )
+    return direct_opener(*handlers).open(request, timeout=timeout)
+
+
 class ManagementClient:
     def __init__(self, address: str, token: str) -> None:
         self.address = address
         self.origin = f"http://{address}"
         self.cookie_jar = http.cookiejar.CookieJar()
-        self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.cookie_jar))
+        self.opener = direct_opener(urllib.request.HTTPCookieProcessor(self.cookie_jar))
         status, login = self.request("POST", "/api/v1/login", {"token": token}, authenticated=False)
         if status != 200 or type(login.get("csrf_token")) is not str:
             raise AcceptanceFailure("management login failed")
@@ -658,7 +739,7 @@ def http_form(base: str, path: str, fields: dict[str, str]) -> int:
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=4) as response:
+        with open_direct(request, timeout=4) as response:
             response.read()
             return response.status
     except urllib.error.HTTPError as error:
@@ -676,7 +757,7 @@ def http_form_json(
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=4) as response:
+        with open_direct(request, timeout=4) as response:
             body = response.read()
             return response.status, json.loads(body) if body else {}
     except urllib.error.HTTPError as error:
@@ -718,7 +799,7 @@ def submit_pairing(setup_base: str, hub_address: str, code: str) -> None:
 def setup_json(base: str, path: str = "/api/status") -> tuple[int, dict[str, Any]]:
     request = urllib.request.Request(base.rstrip("/") + path, method="GET")
     try:
-        with urllib.request.urlopen(request, timeout=4) as response:
+        with open_direct(request, timeout=4) as response:
             body = response.read()
             return response.status, json.loads(body) if body else {}
     except urllib.error.HTTPError as error:
@@ -810,7 +891,7 @@ def device_hub_json(
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
     try:
-        with urllib.request.urlopen(request, timeout=3, context=context) as response:
+        with open_direct(request, timeout=3, context=context) as response:
             body = response.read()
             return response.status, json.loads(body) if body else {}
     except urllib.error.HTTPError as error:
@@ -821,7 +902,7 @@ def device_hub_json(
 def plain_http_status(origin: str, path: str) -> int:
     request = urllib.request.Request(origin.rstrip("/") + path, method="GET")
     try:
-        with urllib.request.urlopen(request, timeout=3) as response:
+        with open_direct(request, timeout=3) as response:
             response.read()
             return response.status
     except urllib.error.HTTPError as error:
@@ -853,10 +934,22 @@ def connect_wifi(
     # after a previous failed association. Keep this bounded but allow the
     # platform to complete its own retry cycle.
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
     except subprocess.TimeoutExpired as error:
         raise AcceptanceFailure("Mac Wi-Fi association timed out") from error
-    if result.returncode != 0:
+    diagnostic = "".join(
+        value for value in (result.stdout, result.stderr) if isinstance(value, str)
+    ).lower()
+    false_success = any(
+        marker in diagnostic
+        for marker in ("could not find network", "failed to join network", "couldn't join")
+    )
+    if result.returncode != 0 or false_success:
         raise AcceptanceFailure("cannot switch the Mac Wi-Fi network")
 
 
@@ -960,10 +1053,14 @@ def connect_wifi_for_host(
     # interface and must never satisfy this transaction.
     # macOS can leave CoreWLAN in a state where networksetup either blocks or
     # reports success while retaining the old association. A power cycle before
-    # each of the two bounded attempts is the reliable transition observed on
-    # the real acceptance host. Both attempts still share the caller deadline.
-    recovery_reserve = min(30.0, timeout / 2)
-    for attempt in range(2):
+    # each bounded attempt is the reliable transition observed on the real
+    # acceptance host. Three scans absorb CoreWLAN's occasional false-success
+    # "network not found" result while all work shares the caller deadline.
+    for attempt in range(3):
+        later_attempt_reserve = min(
+            max(0.0, deadline - time.monotonic()) / 2,
+            30.0 if attempt == 0 else 15.0 if attempt == 1 else 0.0,
+        )
         powered_off = False
         try:
             # Reserve the complete power-on budget before turning the interface
@@ -975,31 +1072,36 @@ def connect_wifi_for_host(
             if powered_off:
                 set_wifi_power(True, remaining_timeout(deadline, 10))
         time.sleep(min(3, remaining_timeout(deadline, 3)))
-        try:
-            connect_wifi(
-                ssid,
-                password,
-                remaining_timeout(
-                    deadline,
-                    20 if attempt == 0 else 60,
-                    reserve=recovery_reserve if attempt == 0 else 0,
-                ),
+        for association_attempt in range(3):
+            try:
+                connect_wifi(
+                    ssid,
+                    password,
+                    remaining_timeout(
+                        deadline,
+                        12 if attempt < 2 else 20,
+                        reserve=later_attempt_reserve,
+                    ),
+                )
+            except AcceptanceFailure:
+                # networksetup is not authoritative: on macOS it can report
+                # failure after CoreWLAN has already joined the requested AP.
+                # We did attempt the requested SSID above; the source-bound
+                # en0 address/route/host proof below decides the actual state.
+                pass
+            settle_budget = max(
+                0.0, deadline - later_attempt_reserve - time.monotonic()
             )
-        except AcceptanceFailure:
-            if attempt == 0:
-                continue
-            raise
-        settle_budget = (
-            max(0.0, deadline - recovery_reserve - time.monotonic())
-            if attempt == 0
-            else max(0.0, deadline - time.monotonic())
-        )
-        if wait_for_wifi_host(
-            host,
-            deadline,
-            min(10.0, settle_budget) if attempt == 0 else settle_budget,
-        ):
-            return
+            if wait_for_wifi_host(
+                host,
+                deadline,
+                min(6.0, settle_budget) if attempt < 2 else settle_budget,
+            ):
+                return
+            if association_attempt < 2:
+                time.sleep(min(1, remaining_timeout(
+                    deadline, 1, reserve=later_attempt_reserve
+                )))
     raise AcceptanceFailure(f"network host {host} did not become reachable")
 
 
@@ -1088,12 +1190,8 @@ def close_setup_by_restart(
     timeout: float,
     cleanup: CleanupTransaction,
 ) -> None:
-    serial_evidence.command(b"DECK_RESTART\n")
-    serial_evidence.reopen(serial_module, port, timeout)
-    serial_evidence.event(
-        lambda event: accept_boot_event(event, "Setup close restart"),
-        "Setup close restart",
-        30,
+    serial_evidence.restart_and_wait(
+        serial_module, port, timeout, "Setup close restart"
     )
     serial_evidence.event(
         lambda event: event.get("type") == "setup_state"
@@ -1296,12 +1394,11 @@ def main() -> int:
         deck_error_count = max(deck_error_count, int(online["error_count"]))
         link_error_generation = int(online["error_generation"])
 
-        serial_evidence.command(b"DECK_RESTART\n")
-        serial_evidence.reopen(serial, arguments.port, arguments.stage_timeout)
-        serial_evidence.event(
-            lambda event: accept_boot_event(event, "Deck reboot"),
+        serial_evidence.restart_and_wait(
+            serial,
+            arguments.port,
+            arguments.stage_timeout,
             "Deck reboot",
-            30,
         )
         online = serial_evidence.event(lambda event: event.get("type") == "companion_link_state" and event.get("state") == "online", "reconnect after Deck reboot", 60)
         reconnect_count += 1
@@ -1448,7 +1545,7 @@ def main() -> int:
         unauthorized_management.address = "127.0.0.1:7777"
         unauthorized_management.origin = "http://127.0.0.1:7777"
         unauthorized_management.cookie_jar = http.cookiejar.CookieJar()
-        unauthorized_management.opener = urllib.request.build_opener(
+        unauthorized_management.opener = direct_opener(
             urllib.request.HTTPCookieProcessor(unauthorized_management.cookie_jar)
         )
         login_status, _ = unauthorized_management.request(

@@ -171,6 +171,32 @@ void explicit_stop_clears_ephemeral_credentials()
 
 void http_contract_exposes_profile_pairing_without_secrets()
 {
+    const uint8_t setup_gateway[] = {192, 168, 4, 1};
+    const uint8_t normal_lan_address[] = {192, 168, 31, 72};
+    const uint8_t mapped_setup_gateway[] = {
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 192, 168, 4, 1,
+    };
+    const uint8_t native_ipv6_client[] = {
+        0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
+    };
+    assert(deck_setup_http_address_is_setup_gateway(
+        setup_gateway,
+        sizeof(setup_gateway)
+    ));
+    assert(deck_setup_http_address_is_setup_gateway(
+        mapped_setup_gateway,
+        sizeof(mapped_setup_gateway)
+    ));
+    assert(!deck_setup_http_address_is_setup_gateway(
+        normal_lan_address,
+        sizeof(normal_lan_address)
+    ));
+    assert(!deck_setup_http_address_is_setup_gateway(
+        native_ipv6_client,
+        sizeof(native_ipv6_client)
+    ));
+    assert(!deck_setup_http_address_is_setup_gateway(nullptr, 0));
+
     size_t route_count = 0;
     const deck_setup_http_route_spec_t *routes = deck_setup_http_routes(&route_count);
     assert(routes != nullptr);

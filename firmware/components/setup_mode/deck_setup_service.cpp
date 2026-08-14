@@ -934,19 +934,32 @@ esp_err_t companion_revoke_handler(httpd_req_t *request)
     return companion_profile_handler(request, true);
 }
 
-esp_err_t accept_ap_session(httpd_handle_t, int socket_fd)
+esp_err_t accept_ap_session(httpd_handle_t server, int socket_fd)
 {
+    (void)server;
     sockaddr_storage local_address{};
-    socklen_t address_size = sizeof(local_address);
+    socklen_t local_address_size = sizeof(local_address);
     if (getsockname(
             socket_fd,
             reinterpret_cast<sockaddr *>(&local_address),
-            &address_size
-        ) != 0 || local_address.ss_family != AF_INET) {
+            &local_address_size
+        ) != 0) {
         return ESP_FAIL;
     }
-    const auto *ipv4 = reinterpret_cast<const sockaddr_in *>(&local_address);
-    return ipv4->sin_addr.s_addr == inet_addr("192.168.4.1") ? ESP_OK : ESP_FAIL;
+    const uint8_t *address = nullptr;
+    size_t address_size = 0;
+    if (local_address.ss_family == AF_INET) {
+        const auto *local = reinterpret_cast<const sockaddr_in *>(&local_address);
+        address = reinterpret_cast<const uint8_t *>(&local->sin_addr.s_addr);
+        address_size = sizeof(local->sin_addr.s_addr);
+    } else if (local_address.ss_family == AF_INET6) {
+        const auto *local = reinterpret_cast<const sockaddr_in6 *>(&local_address);
+        address = reinterpret_cast<const uint8_t *>(&local->sin6_addr);
+        address_size = sizeof(local->sin6_addr);
+    }
+    return deck_setup_http_address_is_setup_gateway(address, address_size)
+               ? ESP_OK
+               : ESP_FAIL;
 }
 
 using HttpHandler = esp_err_t (*)(httpd_req_t *);

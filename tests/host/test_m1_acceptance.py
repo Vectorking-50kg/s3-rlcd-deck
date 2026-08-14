@@ -5,6 +5,7 @@ import importlib.util
 import json
 import pathlib
 import tempfile
+import urllib.request
 from unittest import mock
 
 
@@ -13,6 +14,15 @@ SPEC = importlib.util.spec_from_file_location("m1_acceptance", ROOT / "tools/m1_
 assert SPEC and SPEC.loader
 m1 = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(m1)
+
+
+def test_private_acceptance_endpoints_never_inherit_system_proxies() -> None:
+    marker = object()
+    with mock.patch.object(m1.urllib.request, "build_opener", return_value=marker) as build:
+        assert m1.direct_opener() is marker
+    proxy_handler = build.call_args.args[0]
+    assert isinstance(proxy_handler, urllib.request.ProxyHandler)
+    assert proxy_handler.proxies == {}
 
 
 def test_serial_evidence_keeps_redacted_link_state_and_drops_setup_secret() -> None:
@@ -282,23 +292,20 @@ def test_pairing_closes_setup_only_after_client_acknowledges_the_202_body() -> N
 def test_post_flash_monitor_requests_a_fresh_boot_after_ready_handshake() -> None:
     evidence = m1.SerialEvidence.__new__(m1.SerialEvidence)
     commands: list[bytes] = []
-    reopens: list[tuple[object, str, float]] = []
     evidence.command = commands.append
-    evidence.reopen = lambda module, port, timeout: reopens.append((module, port, timeout))
-    evidence.event = mock.Mock(
-        side_effect=[m1.AcceptanceTimeout("missed"), {"type": "boot_ok"}]
-    )
+    evidence.event = mock.Mock(side_effect=m1.AcceptanceTimeout("missed"))
+    evidence.restart_and_wait = mock.Mock(return_value={"type": "boot_ok"})
     marker = object()
     assert evidence.fresh_boot(marker, "/dev/cu.Deck", 12.0) == {"type": "boot_ok"}
-    assert commands == [m1.HIL_READY, b"DECK_RESTART\n"]
-    assert reopens == [(marker, "/dev/cu.Deck", 12.0)]
+    assert commands == [m1.HIL_READY]
+    evidence.restart_and_wait.assert_called_once_with(
+        marker, "/dev/cu.Deck", 12.0, "post-flash fresh boot"
+    )
 
     commands.clear()
-    reopens.clear()
     evidence.event = mock.Mock(return_value={"type": "boot_ok"})
     assert evidence.fresh_boot(marker, "/dev/cu.Deck", 12.0) == {"type": "boot_ok"}
     assert commands == [m1.HIL_READY]
-    assert reopens == []
 
 
 def test_boot_gate_accepts_only_the_expected_software_reset() -> None:
@@ -334,19 +341,16 @@ def test_boot_gate_accepts_only_the_expected_software_reset() -> None:
 def test_post_flash_usb_reenumeration_reopens_without_a_second_reset() -> None:
     evidence = m1.SerialEvidence.__new__(m1.SerialEvidence)
     commands: list[bytes] = []
-    reopens: list[tuple[object, str, float]] = []
     serial_module = mock.Mock(SerialException=OSError)
     evidence.command = commands.append
-    evidence.reopen = lambda module, port, timeout: reopens.append((module, port, timeout))
-    evidence.event = mock.Mock(
-        side_effect=[m1.SerialDisconnected("USB endpoint detached"), {"type": "boot_ok"}]
-    )
+    evidence.event = mock.Mock(side_effect=m1.SerialDisconnected("USB endpoint detached"))
+    evidence.event_after_reenumeration = mock.Mock(return_value={"type": "boot_ok"})
 
     assert evidence.fresh_boot(serial_module, "/dev/cu.Deck", 12.0) == {
         "type": "boot_ok"
     }
     assert commands == [m1.HIL_READY]
-    assert reopens == [(serial_module, "/dev/cu.Deck", 12.0)]
+    evidence.event_after_reenumeration.assert_called_once()
 
 
 def test_post_flash_usb_reenumeration_can_interrupt_the_ready_write() -> None:
@@ -355,14 +359,54 @@ def test_post_flash_usb_reenumeration_can_interrupt_the_ready_write() -> None:
     evidence.command = mock.Mock(
         side_effect=m1.SerialDisconnected("USB endpoint detached")
     )
-    evidence.reopen = mock.Mock()
-    evidence.event = mock.Mock(return_value={"type": "boot_ok"})
+    evidence.event_after_reenumeration = mock.Mock(return_value={"type": "boot_ok"})
 
     assert evidence.fresh_boot(serial_module, "/dev/cu.Deck", 12.0) == {
         "type": "boot_ok"
     }
-    evidence.reopen.assert_called_once_with(serial_module, "/dev/cu.Deck", 12.0)
-    evidence.event.assert_called_once()
+    evidence.event_after_reenumeration.assert_called_once()
+
+
+def test_reenumerated_boot_skips_a_stale_endpoint_within_one_deadline() -> None:
+    evidence = m1.SerialEvidence.__new__(m1.SerialEvidence)
+    evidence.reopen = mock.Mock()
+    evidence.event = mock.Mock(
+        side_effect=[m1.SerialDisconnected("stale endpoint"), {"type": "boot_ok"}]
+    )
+    serial_module = mock.Mock(SerialException=OSError)
+    with mock.patch.object(
+        m1.time,
+        "monotonic",
+        side_effect=[0.0, 0.1, 0.2, 0.3, 0.4],
+    ):
+        observed = evidence.event_after_reenumeration(
+            serial_module,
+            "/dev/cu.Deck",
+            lambda event: event.get("type") == "boot_ok",
+            "boot",
+            10.0,
+        )
+    assert observed == {"type": "boot_ok"}
+    assert evidence.reopen.call_count == 2
+
+
+def test_reenumerated_boot_reopens_a_silent_stale_endpoint() -> None:
+    evidence = m1.SerialEvidence.__new__(m1.SerialEvidence)
+    evidence.reopen = mock.Mock()
+    evidence.event = mock.Mock(
+        side_effect=[m1.AcceptanceTimeout("stale endpoint"), {"type": "boot_ok"}]
+    )
+    serial_module = mock.Mock(SerialException=OSError)
+    with mock.patch.object(m1.time, "monotonic", side_effect=lambda: 1.0):
+        observed = evidence.event_after_reenumeration(
+            serial_module,
+            "/dev/cu.Deck",
+            lambda event: event.get("type") == "boot_ok",
+            "boot",
+            10.0,
+        )
+    assert observed == {"type": "boot_ok"}
+    assert evidence.reopen.call_count == 2
 
 
 def test_initial_serial_open_waits_for_usb_reenumeration() -> None:
@@ -386,6 +430,24 @@ def test_initial_serial_open_waits_for_usb_reenumeration() -> None:
         )
     assert evidence._connection is connection
     assert serial_module.Serial.call_count == 3
+
+
+def test_initial_serial_open_retries_macos_termios_detach() -> None:
+    class TermiosDetached(Exception):
+        pass
+
+    connection = object()
+    serial_module = mock.Mock(SerialException=OSError)
+    serial_module.Serial.side_effect = [TermiosDetached("Device not configured"), connection]
+    evidence = m1.SerialEvidence.__new__(m1.SerialEvidence)
+
+    with mock.patch.object(m1.termios, "error", TermiosDetached), mock.patch.object(
+        m1.time, "sleep"
+    ), mock.patch.object(m1.time, "monotonic", side_effect=[0.0, 0.0, 0.1]):
+        evidence._connection = m1.SerialEvidence.open_connection(
+            serial_module, "/dev/cu.Deck", 1.0
+        )
+    assert evidence._connection is connection
 
 
 def test_initial_serial_open_timeout_fails_closed() -> None:
@@ -449,11 +511,44 @@ def test_serial_command_never_calls_unbounded_flush() -> None:
     assert evidence._connection.writes == [b"DECK_SETUP\n"]
 
 
+def test_restart_waits_for_device_ack_before_closing_the_endpoint() -> None:
+    evidence = m1.SerialEvidence.__new__(m1.SerialEvidence)
+    operations: list[str] = []
+    evidence.command = lambda value: operations.append(f"command:{value.decode().strip()}")
+
+    def event(predicate, _stage, _timeout):
+        operations.append("ack")
+        observed = {"type": "restart_ack"}
+        assert predicate(observed)
+        return observed
+
+    evidence.event = event
+    evidence.event_after_reenumeration = mock.Mock(
+        side_effect=lambda *_args: operations.append("reopen") or {"type": "boot_ok"}
+    )
+    observed = evidence.restart_and_wait(object(), "/dev/cu.Deck", 12, "restart")
+    assert observed == {"type": "boot_ok"}
+    assert operations == ["command:DECK_RESTART", "ack", "reopen"]
+
+
+def test_restart_ack_is_emitted_before_the_firmware_resets() -> None:
+    source = (m1.REPOSITORY_ROOT / "firmware/main/app_main.cpp").read_text(
+        encoding="utf-8"
+    )
+    command = source.index('std::strcmp(line, "DECK_RESTART")')
+    acknowledgement = source.index('"{\\\"type\\\":\\\"restart_ack\\\"}\\n"', command)
+    reset = source.index("esp_restart()", acknowledgement)
+    assert command < acknowledgement < reset
+
+
 def test_wifi_switch_allows_slow_macos_association() -> None:
     result = mock.Mock(returncode=0)
     with mock.patch.object(m1.subprocess, "run", return_value=result) as run:
         m1.connect_wifi("Setup", "password")
     assert run.call_args.kwargs["timeout"] >= 45
+    assert run.call_args.args[0] == [
+        "networksetup", "-setairportnetwork", "en0", "Setup", "password"
+    ]
 
 
 def test_wifi_switch_timeout_never_exposes_the_password() -> None:
@@ -469,6 +564,45 @@ def test_wifi_switch_timeout_never_exposes_the_password() -> None:
             assert "timed out" in str(error)
         else:
             raise AssertionError("association timeout must fail")
+
+
+def test_wifi_switch_rejects_networksetup_false_success() -> None:
+    result = mock.Mock(
+        returncode=0,
+        stdout="Could not find network Setup.\n",
+        stderr="",
+    )
+    with mock.patch.object(m1.subprocess, "run", return_value=result):
+        try:
+            m1.connect_wifi("Setup", "secret")
+        except m1.AcceptanceFailure as error:
+            assert "cannot switch" in str(error)
+            assert "secret" not in str(error)
+        else:
+            raise AssertionError("networksetup false success must be rejected")
+
+
+def test_reachable_target_wins_over_networksetup_false_failure() -> None:
+    operations: list[str] = []
+    with mock.patch.object(
+        m1,
+        "connect_wifi",
+        side_effect=m1.AcceptanceFailure("cannot switch the Mac Wi-Fi network"),
+    ), mock.patch.object(
+        m1,
+        "wait_for_wifi_host",
+        side_effect=lambda *_args: operations.append("prove") or True,
+    ), mock.patch.object(
+        m1,
+        "set_wifi_power",
+        side_effect=lambda enabled, _timeout: operations.append(
+            "power-on" if enabled else "power-off"
+        ),
+    ), mock.patch.object(m1.time, "sleep"), mock.patch.object(
+        m1.time, "monotonic", side_effect=lambda: 1.0
+    ):
+        m1.connect_wifi_for_host("Setup", "password", "192.168.4.1", 60)
+    assert operations == ["power-off", "power-on", "prove"]
 
 
 def test_dev_setup_window_outlives_slow_association() -> None:
@@ -526,9 +660,6 @@ def test_setup_wifi_recovery_survives_the_initial_association_timeout() -> None:
         m1.connect_wifi_for_host("Setup", "password", "192.168.4.1", 60)
 
     assert operations == [
-        "power-off",
-        "power-on",
-        "connect",
         "power-off",
         "power-on",
         "connect",
@@ -724,14 +855,12 @@ def test_setup_restart_requires_explicit_inactive_observation() -> None:
     cleanup = m1.CleanupTransaction()
     cleanup.begin_setup()
     evidence = mock.Mock()
-    evidence.event.side_effect = [
-        {"type": "boot_ok"},
-        {"type": "setup_state", "active": False},
-    ]
+    evidence.restart_and_wait.return_value = {"type": "boot_ok"}
+    evidence.event.return_value = {"type": "setup_state", "active": False}
     m1.close_setup_by_restart(evidence, object(), "/dev/cu.Deck", 12.0, cleanup)
     assert cleanup.restored()
-    assert evidence.event.call_args_list[1].args[0]({"type": "boot_ok"}) is False
-    assert evidence.event.call_args_list[1].args[0](
+    assert evidence.event.call_args.args[0]({"type": "boot_ok"}) is False
+    assert evidence.event.call_args.args[0](
         {"type": "setup_state", "active": False}
     ) is True
 
@@ -799,6 +928,7 @@ def test_preflight_uses_the_users_zsh_for_idf_activation() -> None:
 
 
 if __name__ == "__main__":
+    test_private_acceptance_endpoints_never_inherit_system_proxies()
     test_serial_evidence_keeps_redacted_link_state_and_drops_setup_secret()
     test_summary_passes_only_with_every_real_gate_and_hashes_redacted_log()
     test_evidence_redaction_gate_rejects_every_secret_field()
@@ -815,13 +945,20 @@ if __name__ == "__main__":
     test_boot_gate_accepts_only_the_expected_software_reset()
     test_post_flash_usb_reenumeration_reopens_without_a_second_reset()
     test_post_flash_usb_reenumeration_can_interrupt_the_ready_write()
+    test_reenumerated_boot_skips_a_stale_endpoint_within_one_deadline()
+    test_reenumerated_boot_reopens_a_silent_stale_endpoint()
     test_initial_serial_open_waits_for_usb_reenumeration()
+    test_initial_serial_open_retries_macos_termios_detach()
     test_initial_serial_open_timeout_fails_closed()
     test_evidence_write_failure_is_not_mistaken_for_usb_reenumeration()
     test_fatal_boot_evidence_is_not_retried()
     test_serial_command_never_calls_unbounded_flush()
+    test_restart_waits_for_device_ack_before_closing_the_endpoint()
+    test_restart_ack_is_emitted_before_the_firmware_resets()
     test_wifi_switch_allows_slow_macos_association()
     test_wifi_switch_timeout_never_exposes_the_password()
+    test_wifi_switch_rejects_networksetup_false_success()
+    test_reachable_target_wins_over_networksetup_false_failure()
     test_dev_setup_window_outlives_slow_association()
     test_setup_wifi_recovery_requires_the_target_host_to_be_reachable()
     test_setup_wifi_recovery_survives_the_initial_association_timeout()

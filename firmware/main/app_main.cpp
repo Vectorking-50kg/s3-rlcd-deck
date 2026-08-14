@@ -546,6 +546,10 @@ void handle_diagnostic_control_line(char *line)
         return;
     }
     if (std::strcmp(line, "DECK_RESTART") == 0) {
+        static constexpr char acknowledgement[] =
+            "{\"type\":\"restart_ack\"}\n";
+        write_stdout(nullptr, acknowledgement, sizeof(acknowledgement) - 1);
+        vTaskDelay(pdMS_TO_TICKS(100));
         esp_restart();
         return;
     }
