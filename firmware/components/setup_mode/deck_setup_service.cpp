@@ -699,6 +699,11 @@ esp_err_t wifi_clear_confirm_handler(httpd_req_t *request)
     }
 }
 
+bool extract_ipv4_address(
+    const sockaddr_storage &socket_address,
+    uint8_t ipv4[4]
+);
+
 esp_err_t companion_pair_handler(httpd_req_t *request)
 {
     auto *service = static_cast<deck_setup_service_t *>(request->user_ctx);
@@ -740,6 +745,7 @@ esp_err_t companion_pair_handler(httpd_req_t *request)
     const int socket_fd = httpd_req_to_sockfd(request);
     uint16_t hub_port = 0;
     char peer_ip[INET_ADDRSTRLEN]{};
+    uint8_t peer_ipv4[4]{};
     const bool peer_valid =
         socket_fd >= 0 &&
         getpeername(
@@ -747,10 +753,10 @@ esp_err_t companion_pair_handler(httpd_req_t *request)
             reinterpret_cast<sockaddr *>(&peer_address),
             &peer_size
         ) == 0 &&
-        peer_address.ss_family == AF_INET &&
+        extract_ipv4_address(peer_address, peer_ipv4) &&
         inet_ntop(
             AF_INET,
-            &reinterpret_cast<sockaddr_in *>(&peer_address)->sin_addr,
+            peer_ipv4,
             peer_ip,
             sizeof(peer_ip)
         ) != nullptr &&
@@ -778,9 +784,11 @@ esp_err_t companion_pair_handler(httpd_req_t *request)
     command.companion_pair = pair_request;
     uint8_t response_ack[DECK_SETUP_RESPONSE_ACK_SIZE];
     fill_random(nullptr, response_ack, sizeof(response_ack));
+    uint32_t peer_id = 0;
+    std::memcpy(&peer_id, peer_ipv4, sizeof(peer_id));
     command.response_generation = deck_setup_response_barrier_issue(
         service->pair_response_barrier,
-        reinterpret_cast<sockaddr_in *>(&peer_address)->sin_addr.s_addr,
+        peer_id,
         response_ack
     );
     const bool queued = command.response_generation != 0 &&
@@ -852,13 +860,13 @@ esp_err_t companion_pair_ack_handler(httpd_req_t *request)
     sockaddr_storage peer_address{};
     socklen_t peer_size = sizeof(peer_address);
     const int socket_fd = httpd_req_to_sockfd(request);
+    uint8_t peer_ipv4[4]{};
     if (socket_fd < 0 ||
         getpeername(
             socket_fd,
             reinterpret_cast<sockaddr *>(&peer_address),
             &peer_size
-        ) != 0 ||
-        peer_address.ss_family != AF_INET) {
+        ) != 0) {
         secure_clear(
             reinterpret_cast<char *>(response_ack),
             sizeof(response_ack)
@@ -866,9 +874,19 @@ esp_err_t companion_pair_ack_handler(httpd_req_t *request)
         httpd_resp_set_status(request, "400 Bad Request");
         return send_json(request, "{\"accepted\":false,\"error\":\"invalid_peer\"}");
     }
+    if (!extract_ipv4_address(peer_address, peer_ipv4)) {
+        secure_clear(
+            reinterpret_cast<char *>(response_ack),
+            sizeof(response_ack)
+        );
+        httpd_resp_set_status(request, "400 Bad Request");
+        return send_json(request, "{\"accepted\":false,\"error\":\"invalid_peer\"}");
+    }
+    uint32_t peer_id = 0;
+    std::memcpy(&peer_id, peer_ipv4, sizeof(peer_id));
     if (!deck_setup_response_barrier_acknowledge(
             service->pair_response_barrier,
-            reinterpret_cast<sockaddr_in *>(&peer_address)->sin_addr.s_addr,
+            peer_id,
             response_ack
         )) {
         secure_clear(
@@ -934,6 +952,27 @@ esp_err_t companion_revoke_handler(httpd_req_t *request)
     return companion_profile_handler(request, true);
 }
 
+bool extract_ipv4_address(
+    const sockaddr_storage &socket_address,
+    uint8_t ipv4[4]
+)
+{
+    const uint8_t *address = nullptr;
+    size_t address_size = 0;
+    if (socket_address.ss_family == AF_INET) {
+        const auto *ipv4_address =
+            reinterpret_cast<const sockaddr_in *>(&socket_address);
+        address = reinterpret_cast<const uint8_t *>(&ipv4_address->sin_addr.s_addr);
+        address_size = sizeof(ipv4_address->sin_addr.s_addr);
+    } else if (socket_address.ss_family == AF_INET6) {
+        const auto *ipv6_address =
+            reinterpret_cast<const sockaddr_in6 *>(&socket_address);
+        address = reinterpret_cast<const uint8_t *>(&ipv6_address->sin6_addr);
+        address_size = sizeof(ipv6_address->sin6_addr);
+    }
+    return deck_setup_http_extract_ipv4(address, address_size, ipv4);
+}
+
 esp_err_t accept_ap_session(httpd_handle_t server, int socket_fd)
 {
     (void)server;
@@ -946,20 +985,13 @@ esp_err_t accept_ap_session(httpd_handle_t server, int socket_fd)
         ) != 0) {
         return ESP_FAIL;
     }
-    const uint8_t *address = nullptr;
-    size_t address_size = 0;
-    if (local_address.ss_family == AF_INET) {
-        const auto *local = reinterpret_cast<const sockaddr_in *>(&local_address);
-        address = reinterpret_cast<const uint8_t *>(&local->sin_addr.s_addr);
-        address_size = sizeof(local->sin_addr.s_addr);
-    } else if (local_address.ss_family == AF_INET6) {
-        const auto *local = reinterpret_cast<const sockaddr_in6 *>(&local_address);
-        address = reinterpret_cast<const uint8_t *>(&local->sin6_addr);
-        address_size = sizeof(local->sin6_addr);
-    }
-    return deck_setup_http_address_is_setup_gateway(address, address_size)
-               ? ESP_OK
-               : ESP_FAIL;
+    uint8_t local_ipv4[4]{};
+    return extract_ipv4_address(local_address, local_ipv4) &&
+                   deck_setup_http_address_is_setup_gateway(
+                       local_ipv4,
+                       sizeof(local_ipv4)
+                   )
+               ? ESP_OK : ESP_FAIL;
 }
 
 using HttpHandler = esp_err_t (*)(httpd_req_t *);

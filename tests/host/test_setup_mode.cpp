@@ -196,6 +196,18 @@ void http_contract_exposes_profile_pairing_without_secrets()
         sizeof(native_ipv6_client)
     ));
     assert(!deck_setup_http_address_is_setup_gateway(nullptr, 0));
+    uint8_t extracted[4]{};
+    assert(deck_setup_http_extract_ipv4(
+        mapped_setup_gateway,
+        sizeof(mapped_setup_gateway),
+        extracted
+    ));
+    assert(std::memcmp(extracted, setup_gateway, sizeof(extracted)) == 0);
+    assert(!deck_setup_http_extract_ipv4(
+        native_ipv6_client,
+        sizeof(native_ipv6_client),
+        extracted
+    ));
 
     size_t route_count = 0;
     const deck_setup_http_route_spec_t *routes = deck_setup_http_routes(&route_count);

@@ -274,24 +274,42 @@ deck_setup_http_route_t deck_setup_http_route(const char *method, const char *pa
     return DECK_SETUP_HTTP_NOT_FOUND;
 }
 
+bool deck_setup_http_extract_ipv4(
+    const uint8_t *address,
+    size_t address_size,
+    uint8_t ipv4[4]
+)
+{
+    if (address == nullptr || ipv4 == nullptr) {
+        return false;
+    }
+    const uint8_t *source = address;
+    if (address_size == 16) {
+        constexpr uint8_t kIpv4MappedPrefix[12] = {
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff,
+        };
+        if (std::memcmp(address, kIpv4MappedPrefix, sizeof(kIpv4MappedPrefix)) != 0) {
+            return false;
+        }
+        source += sizeof(kIpv4MappedPrefix);
+    } else if (address_size != 4) {
+        return false;
+    }
+    std::memcpy(ipv4, source, 4);
+    return true;
+}
+
 bool deck_setup_http_address_is_setup_gateway(
     const uint8_t *local_address,
     size_t local_address_size
 )
 {
-    if (local_address == nullptr) {
-        return false;
-    }
-    const uint8_t *local_ipv4 = local_address;
-    if (local_address_size == 16) {
-        constexpr uint8_t kIpv4MappedPrefix[12] = {
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff,
-        };
-        if (std::memcmp(local_address, kIpv4MappedPrefix, sizeof(kIpv4MappedPrefix)) != 0) {
-            return false;
-        }
-        local_ipv4 += sizeof(kIpv4MappedPrefix);
-    } else if (local_address_size != 4) {
+    uint8_t local_ipv4[4]{};
+    if (!deck_setup_http_extract_ipv4(
+            local_address,
+            local_address_size,
+            local_ipv4
+        )) {
         return false;
     }
     constexpr uint8_t kSetupGateway[] = {192, 168, 4, 1};

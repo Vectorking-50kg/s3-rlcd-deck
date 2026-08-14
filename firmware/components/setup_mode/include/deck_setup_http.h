@@ -85,6 +85,11 @@ bool deck_setup_http_address_is_setup_gateway(
     const uint8_t *local_address,
     size_t local_address_size
 );
+bool deck_setup_http_extract_ipv4(
+    const uint8_t *address,
+    size_t address_size,
+    uint8_t ipv4[4]
+);
 bool deck_setup_http_convert_scan_results(
     const deck_setup_scan_observation_t *observations,
     size_t observation_count,
