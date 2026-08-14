@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/codexappserver"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/desktop"
 	desktopassets "github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/desktop/assets"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/deviceidentity"
@@ -130,8 +131,17 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "cannot configure pairing: %v\n", err)
 		return 2
 	}
+	codexCollector, err := codexappserver.New(codexappserver.Config{
+		AdapterVersion: codexappserver.AdapterVersion,
+		ClientVersion:  version,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "cannot configure Codex collection: %v\n", err)
+		return 2
+	}
 	config := companionruntime.Config{
-		Version: version,
+		Version:        version,
+		CodexCollector: codexCollector,
 		Management: companionruntime.ManagementConfig{
 			Address:       *managementAddress,
 			AllowLAN:      *allowLANManagement,

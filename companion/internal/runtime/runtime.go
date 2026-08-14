@@ -10,13 +10,17 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/codexappserver"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/devicelink"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
 )
 
 const shutdownTimeout = 5 * time.Second
 
-var ErrAlreadyRun = errors.New("companion runtime can only be run once")
+var (
+	ErrAlreadyRun       = errors.New("companion runtime can only be run once")
+	ErrCodexUnavailable = errors.New("Codex collector is unavailable")
+)
 
 type State string
 
@@ -47,10 +51,13 @@ type Runtime struct {
 	consoleAccess     *consoleAccessGrants
 	pairing           *pairing.Service
 	deviceLink        *devicelink.Hub
+	codexCollector    CodexCollector
 
-	mu      sync.RWMutex
-	status  Status
-	started bool
+	mu             sync.RWMutex
+	status         Status
+	started        bool
+	codexUpdate    codexappserver.Update
+	hasCodexUpdate bool
 }
 
 func New(config Config) (*Runtime, error) {
@@ -83,6 +90,7 @@ func New(config Config) (*Runtime, error) {
 		consoleAccess:   &consoleAccessGrants{},
 		pairing:         normalized.Pairing,
 		deviceLink:      deviceLink,
+		codexCollector:  normalized.CodexCollector,
 		status:          status,
 	}, nil
 }
@@ -93,6 +101,24 @@ func (application *Runtime) Status() Status {
 	application.mu.RUnlock()
 	status.ConnectedDecks = application.deviceLink.ConnectedDecks()
 	return status
+}
+
+// CodexUpdate returns the latest normalized, independently owned adapter DTO.
+// Raw App Server responses never enter Runtime.
+func (application *Runtime) CodexUpdate() (codexappserver.Update, bool) {
+	application.mu.RLock()
+	defer application.mu.RUnlock()
+	if !application.hasCodexUpdate {
+		return codexappserver.Update{}, false
+	}
+	return application.codexUpdate.Clone(), true
+}
+
+func (application *Runtime) LoadCodexThread(ctx context.Context, threadID string) error {
+	if application.codexCollector == nil {
+		return ErrCodexUnavailable
+	}
+	return application.codexCollector.LoadThread(ctx, threadID)
 }
 
 func (application *Runtime) Run(ctx context.Context) error {
@@ -171,6 +197,17 @@ func (application *Runtime) Run(ctx context.Context) error {
 	go func() {
 		serveResults <- serveResult{name: "Device Hub", err: deviceHubServer.Serve(deviceHubListener)}
 	}()
+	collectorContext, stopCollector := context.WithCancel(ctx)
+	var collectorDone chan error
+	if application.codexCollector != nil {
+		collectorDone = make(chan error, 1)
+		go func() {
+			collectorDone <- application.codexCollector.Run(
+				collectorContext,
+				application.publishCodexUpdate,
+			)
+		}()
+	}
 
 	var trigger serveResult
 	select {
@@ -178,11 +215,20 @@ func (application *Runtime) Run(ctx context.Context) error {
 	case <-ctx.Done():
 		trigger = serveResult{name: "context", err: http.ErrServerClosed}
 	}
+	stopCollector()
 
 	shutdownContext, cancel := context.WithTimeout(context.Background(), application.shutdownTimeout)
 	defer cancel()
 	application.deviceLink.Close()
 	shutdownErrors := shutdownServers(shutdownContext, managementServer, deviceHubServer)
+	if collectorDone != nil {
+		select {
+		case <-collectorDone:
+		case <-shutdownContext.Done():
+			// Collector failure and latency remain scoped to the Codex Provider.
+			// Listener shutdown must not inherit that failure mode.
+		}
+	}
 	application.setState(StateStopped, managementListener.Addr().String(), deviceHubListener.Addr().String())
 
 	if trigger.name != "context" && !errors.Is(trigger.err, http.ErrServerClosed) {
@@ -191,6 +237,17 @@ func (application *Runtime) Run(ctx context.Context) error {
 	if shutdownErrors != nil {
 		return fmt.Errorf("shut down Companion listeners: %w", shutdownErrors)
 	}
+	return nil
+}
+
+func (application *Runtime) publishCodexUpdate(
+	_ context.Context,
+	update codexappserver.Update,
+) error {
+	application.mu.Lock()
+	application.codexUpdate = update.Clone()
+	application.hasCodexUpdate = true
+	application.mu.Unlock()
 	return nil
 }
 

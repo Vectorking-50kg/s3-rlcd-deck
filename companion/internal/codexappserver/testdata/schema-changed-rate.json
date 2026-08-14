@@ -1,0 +1,20 @@
+{
+  "rateLimits": {
+    "credits": null,
+    "individualLimit": null,
+    "limitId": "codex",
+    "limitName": "Codex",
+    "planType": null,
+    "primary": {
+      "resetsAt": 1786698000,
+      "usedPercent": 20,
+      "windowDurationMins": 300,
+      "newPrivateField": "/Users/example/private"
+    },
+    "rateLimitReachedType": null,
+    "secondary": null,
+    "spendControlReached": false
+  },
+  "rateLimitsByLimitId": null,
+  "rateLimitResetCredits": null
+}

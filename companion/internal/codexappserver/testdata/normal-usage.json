@@ -1,0 +1,15 @@
+{
+  "dailyUsageBuckets": [
+    {
+      "startDate": "2026-08-14",
+      "tokens": 321
+    }
+  ],
+  "summary": {
+    "currentStreakDays": 3,
+    "lifetimeTokens": 123456,
+    "longestRunningTurnSec": 120,
+    "longestStreakDays": 7,
+    "peakDailyTokens": 4567
+  }
+}

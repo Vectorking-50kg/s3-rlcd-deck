@@ -359,6 +359,11 @@ Companion 使用 Codex App Server 的结构化能力：
 - `account/usage/read`：Token 活动和聚合统计。
 - `thread/*`、`turn/*`：只对同一 App Server 实例拥有或加载的线程提供准确事件。
 
+App Server 由版本化私有适配器以 `codex app-server --stdio` 启动。JSONL、初始化、请求
+关联、通知和重连都封装在适配器内部；原始响应不得进入 Runtime、持久化或日志。额度通知
+只触发重新读取额度与用量，不能单独覆盖当前快照。连接重建后必须清空此前的 thread
+所有权；只有同一连接成功 `thread/resume` 的 thread 才能产生 Verified State。
+
 V1 不接管用户的 Codex Desktop、IDE 或 CLI 会话，因此另启的 App Server 不能被描述为全局任务注册表。会话状态分级：
 
 | source | confidence | 允许显示的状态 |
