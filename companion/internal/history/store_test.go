@@ -536,6 +536,31 @@ func TestConcurrentCaptureAndBoundedQueries(t *testing.T) {
 	}
 }
 
+func TestCallerCanceledQueryDoesNotDegradeHistory(t *testing.T) {
+	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	store, err := history.Open(context.Background(), history.Config{
+		Path: filepath.Join(t.TempDir(), "provider-history.sqlite3"),
+		Now:  func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(context.Background())
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	query := history.Query{From: now.Add(-time.Hour), Until: now.Add(time.Hour), Limit: 10}
+	if _, err = store.Query(canceled, query); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Query(canceled) error = %v, want context.Canceled", err)
+	}
+	if !store.Available() {
+		t.Fatal("caller cancellation degraded healthy history")
+	}
+	if _, err = store.Query(context.Background(), query); err != nil {
+		t.Fatalf("Query(after caller cancellation) error = %v", err)
+	}
+}
+
 func TestDatabaseNeverReceivesDisplayOrNonHistoryProviderFields(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "provider-history.sqlite3")
 	store, err := history.Open(context.Background(), history.Config{Path: databasePath})

@@ -190,6 +190,11 @@ func (store *Store) Capture(ctx context.Context, provider aisnapshot.Provider, o
 	if store == nil {
 		return ErrClosed
 	}
+	// This is the capture admission linearization point. It intentionally
+	// precedes caller-context checks, DTO validation, and cloning so a clear or
+	// enable-state barrier that completes while any of those steps run makes
+	// the eventual command stale.
+	admissionGeneration := store.generation.Load()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -210,7 +215,7 @@ func (store *Store) Capture(ctx context.Context, provider aisnapshot.Provider, o
 		kind:       commandCapture,
 		provider:   provider.Clone(),
 		observedAt: observedAt,
-		generation: store.generation.Load(),
+		generation: admissionGeneration,
 	}
 	select {
 	case store.commands <- command:
@@ -513,8 +518,7 @@ FROM selected
 LEFT JOIN quota_hours USING (provider_id, hour_utc_ms)
 ORDER BY selected.hour_utc_ms ASC, selected.provider_id ASC, quota_hours.ordinal ASC`, arguments...)
 	if err != nil {
-		store.available.Store(false)
-		return nil, classifyDatabaseError(err)
+		return nil, store.classifyQueryError(ctx, err)
 	}
 	defer rows.Close()
 	records := make([]Record, 0, min(query.Limit, 256))
@@ -532,8 +536,7 @@ ORDER BY selected.hour_utc_ms ASC, selected.provider_id ASC, quota_hours.ordinal
 			&tokenReasoning, &tokenTotal, &ordinal, &name, &used, &remaining,
 			&minutes, &resetMS,
 		); err != nil {
-			store.available.Store(false)
-			return nil, classifyDatabaseError(err)
+			return nil, store.classifyQueryError(ctx, err)
 		}
 		if current == nil || current.ProviderID != providerID || current.HourUTC.UnixMilli() != hourMS {
 			records = append(records, recordFromRow(
@@ -547,10 +550,19 @@ ORDER BY selected.hour_utc_ms ASC, selected.provider_id ASC, quota_hours.ordinal
 		}
 	}
 	if err = rows.Err(); err != nil {
-		store.available.Store(false)
-		return nil, classifyDatabaseError(err)
+		return nil, store.classifyQueryError(ctx, err)
 	}
 	return records, nil
+}
+
+func (store *Store) classifyQueryError(callerContext context.Context, err error) error {
+	classified := classifyDatabaseError(err)
+	callerCanceled := callerContext.Err() != nil &&
+		(errors.Is(classified, context.Canceled) || errors.Is(classified, context.DeadlineExceeded))
+	if !callerCanceled {
+		store.available.Store(false)
+	}
+	return classified
 }
 
 type databaseExecer interface {
