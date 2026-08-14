@@ -11,6 +11,7 @@ import (
 
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/codexappserver"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/codexobserver"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/cursorprovider"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
 )
 
@@ -26,12 +27,13 @@ var (
 )
 
 type Config struct {
-	Version        string
-	Management     ManagementConfig
-	DeviceHub      DeviceHubConfig
-	Pairing        *pairing.Service
-	CodexCollector CodexCollector
-	CodexObserver  CodexObserver
+	Version         string
+	Management      ManagementConfig
+	DeviceHub       DeviceHubConfig
+	Pairing         *pairing.Service
+	CodexCollector  CodexCollector
+	CodexObserver   CodexObserver
+	CursorCollector CursorCollector
 }
 
 // CodexCollector is intentionally narrow: the runtime can supervise normalized
@@ -46,6 +48,12 @@ type CodexCollector interface {
 // otherwise take ownership of a user session.
 type CodexObserver interface {
 	Run(context.Context, codexobserver.Publisher) error
+}
+
+// CursorCollector is publish-only. The runtime cannot read raw Cursor state,
+// access credentials, or invoke the private endpoint itself.
+type CursorCollector interface {
+	Run(context.Context, cursorprovider.Publisher) error
 }
 
 type ManagementConfig struct {

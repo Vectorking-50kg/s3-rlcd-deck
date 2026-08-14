@@ -36,6 +36,16 @@ multiple candidates, rotation, partial JSON, and permission failures fail closed
 arguments never leave the adapter. Observer failure clears only inferred sessions and cannot block
 the official Codex quota collector.
 
+The experimental Cursor Provider opens Cursor's `state.vscdb` through a pure-Go SQLite driver in
+`mode=ro` plus `query_only`, and queries only `cursorAuth/accessToken`. Every private usage request
+re-reads that access token; the adapter never queries the refresh-token key, refreshes a token, or
+writes Cursor's database or platform credential store. The pinned private endpoint and its strict
+response schema are versioned independently, limited to 64 KiB, and bounded by a five-second
+request timeout. Authentication, permission, locked-database, timeout, oversized-response, and
+schema failures update only the experimental Cursor Provider. A previously valid Cursor quota page
+is retained as `degraded`; otherwise Cursor is `unavailable`. Raw responses, account fields, and
+credentials never enter Runtime or logs.
+
 Provider credentials and raw private content must never be sent to a Deck.
 
 ## Run
@@ -143,4 +153,14 @@ responses:
 ```bash
 cd companion
 S3DECK_TEST_CODEX_APP_SERVER=1 go test -run TestInstalledCodexAppServer ./internal/codexappserver
+```
+
+A developer with a personal Cursor login can run the separately gated real adapter smoke. It emits
+only pass/fail and never persists or prints the access token, account fields, or raw private
+response. Run it once on both a real macOS 13+ installation and a real Windows 11 installation;
+fixture tests and cross-compilation do not replace those two evidence gates.
+
+```bash
+cd companion
+S3DECK_TEST_CURSOR_PERSONAL=1 go test -run TestInstalledCursorPersonalUsage ./internal/cursorprovider
 ```

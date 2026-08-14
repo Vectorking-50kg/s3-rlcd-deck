@@ -138,6 +138,54 @@ type Provider struct {
 	Error             *ProviderError `json:"error"`
 }
 
+// Clone returns an independently owned Provider suitable for crossing an
+// in-memory publisher boundary.
+func (provider Provider) Clone() Provider {
+	cloned := provider
+	cloned.UpdatedAt = clonePointer(provider.UpdatedAt)
+	cloned.UpdatedAtUnixMS = clonePointer(provider.UpdatedAtUnixMS)
+	cloned.StaleAfterSeconds = clonePointer(provider.StaleAfterSeconds)
+	if provider.Balance != nil {
+		balance := *provider.Balance
+		cloned.Balance = &balance
+	}
+	if provider.Windows != nil {
+		cloned.Windows = make([]QuotaWindow, len(provider.Windows))
+		copy(cloned.Windows, provider.Windows)
+	}
+	for index := range cloned.Windows {
+		window := &cloned.Windows[index]
+		source := provider.Windows[index]
+		window.UsedBasisPoints = clonePointer(source.UsedBasisPoints)
+		window.RemainingBasisPoints = clonePointer(source.RemainingBasisPoints)
+		window.WindowMinutes = clonePointer(source.WindowMinutes)
+		window.ResetsAt = clonePointer(source.ResetsAt)
+		window.ResetsAtUnixMS = clonePointer(source.ResetsAtUnixMS)
+	}
+	if provider.Tokens != nil {
+		tokens := *provider.Tokens
+		tokens.Input = clonePointer(provider.Tokens.Input)
+		tokens.CachedInput = clonePointer(provider.Tokens.CachedInput)
+		tokens.Output = clonePointer(provider.Tokens.Output)
+		tokens.Reasoning = clonePointer(provider.Tokens.Reasoning)
+		tokens.Total = clonePointer(provider.Tokens.Total)
+		cloned.Tokens = &tokens
+	}
+	if provider.Error != nil {
+		problem := *provider.Error
+		cloned.Error = &problem
+	}
+	return cloned
+}
+
+func clonePointer[T any](value *T) *T {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
 type SessionState string
 
 const (
