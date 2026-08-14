@@ -71,6 +71,21 @@ func (application *Runtime) managementRoutes() http.Handler {
 	mux.HandleFunc("GET /api/v1/history/settings", application.requireManagementSession(application.handleHistorySettings))
 	mux.HandleFunc("PUT /api/v1/history/settings", application.requireManagementWrite(application.handleHistorySettingsUpdate))
 	mux.HandleFunc("DELETE /api/v1/history", application.requireManagementWrite(application.handleHistoryClear))
+	mux.HandleFunc("POST /api/v1/backups/export", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.requireManagementWrite(application.handleBackupExport),
+	))
+	mux.HandleFunc("POST /api/v1/backups/preview", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.requireManagementWrite(application.handleBackupPreview),
+	))
+	mux.HandleFunc("POST /api/v1/backups/import", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.requireManagementWrite(application.handleBackupImport),
+	))
 	mux.HandleFunc("POST /api/v1/logout", limitManagementRequests(
 		sensitiveRateLimiter,
 		limits.SensitiveRateWindow,
@@ -313,16 +328,28 @@ func (application *Runtime) managementOriginValid(request *http.Request) bool {
 }
 
 func decodeManagementJSON(response http.ResponseWriter, request *http.Request, destination any) error {
+	return decodeManagementJSONLimit(
+		response, request, destination, managementLoginMaxBytes,
+	)
+}
+
+func decodeManagementJSONLimit(
+	response http.ResponseWriter,
+	request *http.Request,
+	destination any,
+	maximumBytes int,
+) error {
 	mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/json" {
 		return errors.New("content type must be application/json")
 	}
-	request.Body = http.MaxBytesReader(response, request.Body, managementLoginMaxBytes)
+	request.Body = http.MaxBytesReader(response, request.Body, int64(maximumBytes))
 	message, err := io.ReadAll(request.Body)
 	if err != nil {
 		return err
 	}
-	return protocol.DecodeStrictDocument(message, destination)
+	defer clear(message)
+	return protocol.DecodeStrictDocumentLimit(message, maximumBytes, destination)
 }
 
 func writeManagementJSON(response http.ResponseWriter, document any) {

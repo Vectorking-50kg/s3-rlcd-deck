@@ -2,10 +2,29 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
+
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/protectedfile"
 )
+
+type backupFileExporterStub struct {
+	path       string
+	passphrase []byte
+}
+
+func (exporter *backupFileExporterStub) ExportFile(
+	_ context.Context,
+	path string,
+	passphrase []byte,
+) error {
+	exporter.path = path
+	exporter.passphrase = append([]byte(nil), passphrase...)
+	return nil
+}
 
 func TestVersionFlagPrintsBuildIdentity(t *testing.T) {
 	var stdout bytes.Buffer
@@ -76,5 +95,28 @@ func TestCorruptProviderHistoryDoesNotDisableCompanionOrLeakContents(t *testing.
 	if !bytes.Contains(stderr.Bytes(), []byte("Provider history is unavailable")) ||
 		bytes.Contains(stderr.Bytes(), []byte("PRIVATE_HISTORY_CANARY")) {
 		t.Fatalf("Provider history degradation was not isolated/redacted: %q", stderr.String())
+	}
+}
+
+func TestBackupFileExportReadsOnlyAPrivatePassphraseFile(t *testing.T) {
+	directory := t.TempDir()
+	passphrasePath := filepath.Join(directory, "passphrase")
+	if committed, err := protectedfile.Replace(
+		passphrasePath, []byte("correct horse battery staple"),
+	); err != nil || !committed {
+		t.Fatalf("passphrase file committed=%v err=%v", committed, err)
+	}
+	exporter := &backupFileExporterStub{}
+	exportPath := filepath.Join(directory, "deck.age")
+	if err := exportBackupFile(exporter, exportPath, passphrasePath); err != nil {
+		t.Fatal(err)
+	}
+	if exporter.path != exportPath || string(exporter.passphrase) != "correct horse battery staple" {
+		t.Fatalf("export path=%q passphrase=%q", exporter.path, exporter.passphrase)
+	}
+	if err := os.Chmod(passphrasePath, 0o644); runtime.GOOS != "windows" && err == nil {
+		if err = exportBackupFile(exporter, exportPath, passphrasePath); err == nil {
+			t.Fatal("world-readable passphrase file was accepted")
+		}
 	}
 }

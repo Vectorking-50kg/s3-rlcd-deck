@@ -619,6 +619,25 @@ Companion 使用本地 SQLite 保存最近 90 天的小时级用量、余额和�
 - 导入前脱敏预览。
 - 错误密码、损坏文件或不支持的 schema 必须安全失败，不产生半导入状态。
 
+实现约束：
+
+- Backup Archive 是显式版本化 DTO，不复制任何 live store；`age` scrypt 二进制密文上限
+  8 MiB，认证后的 JSON 明文上限 4 MiB，未知字段和未知 major 均拒绝。
+- Preview 不返回 URL、header、request body、Secret Reference 或 secret value；它签发绑定
+  archive digest、mode 和当前配置 digest 的 10 分钟单次 receipt。没有 Preview、receipt
+  过期/重放或 Preview 后配置变化都不能 Import。
+- Import 在 staging 内完成 schema、Provider、顺序、设置、设备资料、容量和逐项冲突决定验证；
+  所有新 Secret Reference 先进入持久 cleanup journal，再写 Vault。只有一次受保护配置文件
+  replacement 会激活完整结果并记录 retired references。
+- commit 前失败会补偿全部 staged secrets；commit 后 Vault cleanup 失败保留 journal 并在启动时
+  幂等重试。导入后的 listener/collector/settings graph 在 Companion 重启后一次生效。
+- `POST /api/v1/backups/export` 返回 `application/vnd.age`；
+  `POST /api/v1/backups/preview` 返回脱敏 Preview；`POST /api/v1/backups/import` 只接受该
+  Preview receipt。三者都要求 management session、精确 Origin、CSRF 和敏感操作限流。
+- 导出路径使用 owner-only `0600`（macOS）或 current-user-only DACL（Windows）的原子替换；
+  导出 CLI 只从 owner-only passphrase file 读取密码，不把密码放入 argv/env，也不修改目标父目录
+  的 mode/DACL。导入读取拒绝 symlink/reparse point、非普通文件、路径与 handle 身份变化及超限文件。
+
 ## 9. 多 Companion 与配对
 
 ### 9.1 配对流程

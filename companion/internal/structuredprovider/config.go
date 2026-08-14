@@ -283,6 +283,31 @@ func normalizeDraftHeaders(source []Header) ([]Header, error) {
 	return normalized, nil
 }
 
+// NormalizeBackupDefinition validates and canonicalizes a decrypted Provider
+// draft without permitting any persisted Secret Reference. Backup owns the
+// secret bytes and binds them to fresh references only during commit.
+func NormalizeBackupDefinition(definition Definition) (Definition, error) {
+	draft := cloneDefinition(definition)
+	headers, err := normalizeDraftHeaders(draft.Request.Headers)
+	if err != nil {
+		return Definition{}, err
+	}
+	draft.Request.Headers = headers
+	placeholder := secretstore.Reference("secret-00000000000000000000000000000000")
+	for index := range draft.Request.Headers {
+		draft.Request.Headers[index].SecretReference = placeholder
+	}
+	normalized, err := normalizeConfig(Config{Definition: draft})
+	if err != nil {
+		return Definition{}, err
+	}
+	result := cloneDefinition(normalized.Definition)
+	for index := range result.Request.Headers {
+		result.Request.Headers[index].SecretReference = ""
+	}
+	return result, nil
+}
+
 func allowedSecretPrefix(name, prefix string) bool {
 	if prefix == "" {
 		return true

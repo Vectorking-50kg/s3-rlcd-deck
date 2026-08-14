@@ -90,7 +90,33 @@ replacement activates them and journals references retired by an update or delet
 deletes clear the journal, while failed cleanup remains durable and is retried at every Companion
 startup. Startup also reconciles vault metadata against active and pending references, recovering a
 crash after collision-free placeholder reservation but before the journal commit. The file contains
-definitions and opaque references only—never credential bytes.
+only non-secret restorable configuration and opaque references—never credential bytes.
+
+Encrypted configuration migration is owned by `internal/backup`. A Backup Archive uses the binary
+`age` v1 scrypt format and contains only user-entered Structured HTTP Provider definitions and
+credentials, their explicit display order and polling interval, management Web settings, Companion
+application settings, and the non-secret Device Profile cache. It cannot represent Codex/Cursor
+OAuth/Cookie/tokens, Pairing trust or Tokens, Web sessions, SQLite Provider Hours, raw responses, or
+serial buffers. The encrypted/plaintext limits are 8 MiB/4 MiB.
+
+The authenticated management flow is `POST /api/v1/backups/export`, then for import
+`POST /api/v1/backups/preview` followed by `POST /api/v1/backups/import`. Preview contains only safe
+labels, counts, exclusions, conflict keys, and a short-lived single-use receipt bound to the archive,
+mode, and current configuration. Import stages fresh Vault references, publishes the entire
+non-secret configuration with one protected-file replacement, and then idempotently cleans retired
+references. Imported collectors/listeners/settings take effect after restart. Direct import,
+incomplete per-item conflict decisions, stale/replayed Preview, wrong password, tampering, unknown
+schema, and capacity violations fail closed.
+
+A native file export never places the passphrase in argv or an environment variable. Supply its
+exact bytes through an existing owner-only file; the command atomically creates only the selected
+backup file and does not change its parent directory permissions:
+
+```sh
+s3deck-companion --data-directory "$DATA_DIR" \
+  --backup-export-file "$DESTINATION.age" \
+  --backup-passphrase-file "$PRIVATE_PASSPHRASE_FILE"
+```
 
 Provider history is owned by `internal/history`. Runtime transfers only a validated Provider DTO
 into its bounded queue; no Session DTO or upstream response can be represented at that seam. One
@@ -166,7 +192,7 @@ Only one Companion may own a data directory. A repeated launch fails with an
 explicit `already running` error instead of competing for listeners or trust
 files. Login-start installation is deliberately deferred to M5.
 
-The authenticated management API issues codes at `POST /api/v1/pairing/codes`, issues a device-bound rotation code at `POST /api/v1/devices/{device_id}/rotate`, and revokes trust at `DELETE /api/v1/devices/{device_id}`. Provider Hour data is read from `GET /api/v1/history`, exported from `GET /api/v1/history/export.csv`, enabled or disabled through `/api/v1/history/settings`, and cleared with `DELETE /api/v1/history`. A Deck redeems a code once at the rate-limited Device Hub route `POST /api/v1/pairing/redeem`. Management writes require the login session, exact Origin, and CSRF token described above; a successful redeem response is the only place a plaintext device Token is returned. Device requests authenticate the complete Device ID + Token + identity + protocol-version binding.
+The authenticated management API issues codes at `POST /api/v1/pairing/codes`, issues a device-bound rotation code at `POST /api/v1/devices/{device_id}/rotate`, and revokes trust at `DELETE /api/v1/devices/{device_id}`. Provider Hour data is read from `GET /api/v1/history`, exported from `GET /api/v1/history/export.csv`, enabled or disabled through `/api/v1/history/settings`, and cleared with `DELETE /api/v1/history`. Encrypted migration uses `/api/v1/backups/export`, `/api/v1/backups/preview`, and `/api/v1/backups/import`. A Deck redeems a code once at the rate-limited Device Hub route `POST /api/v1/pairing/redeem`. Management writes require the login session, exact Origin, and CSRF token described above; a successful redeem response is the only place a plaintext device Token is returned. Device requests authenticate the complete Device ID + Token + identity + protocol-version binding.
 
 The Device Link endpoint is `GET /api/v1/device/link` with WebSocket subprotocol
 `s3-rlcd-deck.v1`. An authenticated Deck must send `device.hello` first and continue with

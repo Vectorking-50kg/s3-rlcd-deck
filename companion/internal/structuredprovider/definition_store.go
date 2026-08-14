@@ -11,13 +11,14 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/configmodel"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/protectedfile"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/protocol"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/secretstore"
 )
 
 const (
-	definitionStoreSchemaVersion = 1
+	definitionStoreSchemaVersion = 2
 	maximumStoredDefinitions     = 6
 	maximumPendingCleanup        = 512
 	maximumDefinitionStoreBytes  = 512 << 10
@@ -25,18 +26,49 @@ const (
 )
 
 type definitionStoreState struct {
+	SchemaVersion                   int                             `json:"schema_version"`
+	Definitions                     []Definition                    `json:"definitions"`
+	WebSettings                     configmodel.WebSettings         `json:"web_settings"`
+	ApplicationSettings             configmodel.ApplicationSettings `json:"application_settings"`
+	ApplyApplicationSettingsOnStart bool                            `json:"apply_application_settings_on_start"`
+	DeviceProfiles                  []configmodel.DeviceProfile     `json:"device_profiles"`
+	PendingSecretDeletes            []secretstore.Reference         `json:"pending_secret_deletes"`
+}
+
+type definitionStoreStateV1 struct {
 	SchemaVersion        int                     `json:"schema_version"`
 	Definitions          []Definition            `json:"definitions"`
 	PendingSecretDeletes []secretstore.Reference `json:"pending_secret_deletes"`
 }
 
-// DefinitionStore owns the atomic non-secret Provider configuration and its
-// durable secret-cleanup journal. It deliberately cannot read secret values.
+// RestorableConfiguration is the complete non-secret state published by one
+// protected-file replacement. Definition order is Provider display order.
+type RestorableConfiguration struct {
+	Definitions         []Definition
+	WebSettings         configmodel.WebSettings
+	ApplicationSettings configmodel.ApplicationSettings
+	DeviceProfiles      []configmodel.DeviceProfile
+}
+
+type ReplaceConfigurationResult struct {
+	Committed bool
+	Retired   []secretstore.Reference
+}
+
+// DefinitionStore owns the atomic backup-restorable Companion configuration
+// and its durable Provider secret-cleanup journal. It deliberately cannot read
+// secret values. The historical name is retained for file/API migration.
 type DefinitionStore struct {
 	mutex sync.RWMutex
 	path  string
 	state definitionStoreState
 	lock  *protectedfile.Lock
+}
+
+type ConfigurationStore = DefinitionStore
+
+func OpenConfigurationStore(path string) (*ConfigurationStore, error) {
+	return OpenDefinitionStore(path)
 }
 
 type cleanupSecretStore interface {
@@ -95,22 +127,40 @@ func (store *DefinitionStore) Close() error {
 }
 
 func (store *DefinitionStore) Definitions(ctx context.Context) ([]Definition, error) {
+	configuration, err := store.Configuration(ctx)
+	return configuration.Definitions, err
+}
+
+func (store *DefinitionStore) Configuration(ctx context.Context) (RestorableConfiguration, error) {
 	if store == nil || ctx == nil {
-		return nil, ErrInvalidConfig
+		return RestorableConfiguration{}, ErrInvalidConfig
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return RestorableConfiguration{}, err
 	}
 	store.mutex.RLock()
 	defer store.mutex.RUnlock()
 	if store.lock == nil {
-		return nil, ErrDefinitionCommit
+		return RestorableConfiguration{}, ErrDefinitionCommit
 	}
-	definitions := make([]Definition, len(store.state.Definitions))
-	for index := range store.state.Definitions {
-		definitions[index] = cloneDefinition(store.state.Definitions[index])
+	return configurationFromState(store.state), nil
+}
+
+func (store *DefinitionStore) PendingApplicationSettings(
+	ctx context.Context,
+) (configmodel.ApplicationSettings, bool, error) {
+	if store == nil || ctx == nil {
+		return configmodel.ApplicationSettings{}, false, ErrInvalidConfig
 	}
-	return definitions, nil
+	if err := ctx.Err(); err != nil {
+		return configmodel.ApplicationSettings{}, false, err
+	}
+	store.mutex.RLock()
+	defer store.mutex.RUnlock()
+	if store.lock == nil {
+		return configmodel.ApplicationSettings{}, false, ErrDefinitionCommit
+	}
+	return store.state.ApplicationSettings, store.state.ApplyApplicationSettingsOnStart, nil
 }
 
 func (store *DefinitionStore) StageCleanup(
@@ -205,13 +255,124 @@ func (store *DefinitionStore) Publish(
 		} else {
 			next.Definitions[index] = cloneDefinition(replacement)
 		}
-		sort.Slice(next.Definitions, func(left, right int) bool {
-			return next.Definitions[left].ID < next.Definitions[right].ID
-		})
 		next.PendingSecretDeletes = sortedReferences(pending)
 		return nil
 	}, &committed)
 	return committed, err
+}
+
+// ReplaceConfiguration performs the only non-secret import commit. Every new
+// reference must already be in the durable cleanup journal and every retired
+// reference is added to that journal by the same file replacement.
+func (store *DefinitionStore) ReplaceConfiguration(
+	ctx context.Context,
+	expected RestorableConfiguration,
+	replacement RestorableConfiguration,
+	activated []secretstore.Reference,
+) (ReplaceConfigurationResult, error) {
+	result := ReplaceConfigurationResult{}
+	err := store.updateWithCommit(ctx, func(next *definitionStoreState) error {
+		if !reflect.DeepEqual(configurationFromState(*next), cloneRestorableConfiguration(expected)) {
+			return ErrDefinitionCommit
+		}
+		replacement = cloneRestorableConfiguration(replacement)
+		candidate := stateFromConfiguration(replacement, next.PendingSecretDeletes)
+		candidate.ApplyApplicationSettingsOnStart = true
+		currentReferences := definitionReferences(next.Definitions)
+		replacementReferences := definitionReferences(candidate.Definitions)
+		added := make(map[secretstore.Reference]struct{})
+		for reference := range replacementReferences {
+			if _, exists := currentReferences[reference]; !exists {
+				added[reference] = struct{}{}
+			}
+		}
+		activatedSet := make(map[secretstore.Reference]struct{}, len(activated))
+		for _, reference := range activated {
+			if _, duplicate := activatedSet[reference]; duplicate {
+				return ErrDefinitionCommit
+			}
+			activatedSet[reference] = struct{}{}
+		}
+		if !reflect.DeepEqual(added, activatedSet) {
+			return ErrDefinitionCommit
+		}
+		pending := referenceSet(next.PendingSecretDeletes)
+		for _, reference := range activated {
+			if _, staged := pending[reference]; !staged {
+				return ErrDefinitionCommit
+			}
+			delete(pending, reference)
+		}
+		for reference := range currentReferences {
+			if _, retained := replacementReferences[reference]; retained {
+				continue
+			}
+			pending[reference] = struct{}{}
+			result.Retired = append(result.Retired, reference)
+		}
+		sort.Slice(result.Retired, func(left, right int) bool {
+			return result.Retired[left] < result.Retired[right]
+		})
+		candidate.PendingSecretDeletes = sortedReferences(pending)
+		if err := validateDefinitionStoreState(candidate); err != nil {
+			return err
+		}
+		*next = candidate
+		return nil
+	}, &result.Committed)
+	return result, err
+}
+
+func (store *DefinitionStore) UpdateWebSettings(
+	ctx context.Context,
+	settings configmodel.WebSettings,
+) error {
+	return store.update(ctx, func(next *definitionStoreState) error {
+		if !configmodel.ValidateWebSettings(settings) {
+			return ErrInvalidConfig
+		}
+		next.WebSettings = settings
+		return nil
+	})
+}
+
+func (store *DefinitionStore) UpdateApplicationSettings(
+	ctx context.Context,
+	settings configmodel.ApplicationSettings,
+) error {
+	return store.update(ctx, func(next *definitionStoreState) error {
+		next.ApplicationSettings = settings
+		next.ApplyApplicationSettingsOnStart = false
+		return nil
+	})
+}
+
+func (store *DefinitionStore) UpdateDeviceProfile(
+	ctx context.Context,
+	profile configmodel.DeviceProfile,
+) error {
+	return store.update(ctx, func(next *definitionStoreState) error {
+		if !configmodel.ValidateDeviceProfile(profile) {
+			return ErrInvalidConfig
+		}
+		for index := range next.DeviceProfiles {
+			if next.DeviceProfiles[index].DeviceID == profile.DeviceID {
+				if reflect.DeepEqual(next.DeviceProfiles[index], profile) {
+					return nil
+				}
+				next.DeviceProfiles[index] = profile
+				return nil
+			}
+		}
+		if len(next.DeviceProfiles) >= configmodel.MaximumDeviceProfiles {
+			return ErrDefinitionCommit
+		}
+		next.DeviceProfiles = append(next.DeviceProfiles, profile)
+		sort.Slice(next.DeviceProfiles, func(left, right int) bool {
+			return next.DeviceProfiles[left].DeviceID < next.DeviceProfiles[right].DeviceID
+		})
+		return nil
+	})
 }
 
 func (store *DefinitionStore) CompleteCleanup(
@@ -403,6 +564,9 @@ func emptyDefinitionStoreState() definitionStoreState {
 	return definitionStoreState{
 		SchemaVersion:        definitionStoreSchemaVersion,
 		Definitions:          []Definition{},
+		WebSettings:          configmodel.WebSettings{ManagementAddress: configmodel.DefaultManagementAddress},
+		ApplicationSettings:  configmodel.ApplicationSettings{HistoryEnabled: true},
+		DeviceProfiles:       []configmodel.DeviceProfile{},
 		PendingSecretDeletes: []secretstore.Reference{},
 	}
 }
@@ -412,6 +576,10 @@ func cloneDefinitionStoreState(source definitionStoreState) definitionStoreState
 	for _, definition := range source.Definitions {
 		clone.Definitions = append(clone.Definitions, cloneDefinition(definition))
 	}
+	clone.WebSettings = source.WebSettings
+	clone.ApplicationSettings = source.ApplicationSettings
+	clone.ApplyApplicationSettingsOnStart = source.ApplyApplicationSettingsOnStart
+	clone.DeviceProfiles = configmodel.CloneDeviceProfiles(source.DeviceProfiles)
 	clone.PendingSecretDeletes = append(clone.PendingSecretDeletes, source.PendingSecretDeletes...)
 	return clone
 }
@@ -425,9 +593,30 @@ func readDefinitionStore(path string) (definitionStoreState, error) {
 	if err != nil {
 		return definitionStoreState{}, errors.New("structured Provider store is unavailable")
 	}
+	var header struct {
+		SchemaVersion int `json:"schema_version"`
+	}
+	if json.Unmarshal(contents, &header) != nil {
+		return definitionStoreState{}, errors.New("structured Provider store is malformed")
+	}
 	var state definitionStoreState
-	if protocol.DecodeStrictDocumentLimit(contents, maximumDefinitionStoreBytes, &state) != nil ||
-		validateDefinitionStoreState(state) != nil {
+	switch header.SchemaVersion {
+	case 1:
+		var previous definitionStoreStateV1
+		if protocol.DecodeStrictDocumentLimit(contents, maximumDefinitionStoreBytes, &previous) != nil {
+			return definitionStoreState{}, errors.New("structured Provider store is malformed")
+		}
+		state = emptyDefinitionStoreState()
+		state.Definitions = previous.Definitions
+		state.PendingSecretDeletes = previous.PendingSecretDeletes
+	case definitionStoreSchemaVersion:
+		if protocol.DecodeStrictDocumentLimit(contents, maximumDefinitionStoreBytes, &state) != nil {
+			return definitionStoreState{}, errors.New("structured Provider store is malformed")
+		}
+	default:
+		return definitionStoreState{}, errors.New("structured Provider store is malformed")
+	}
+	if validateDefinitionStoreState(state) != nil {
 		return definitionStoreState{}, errors.New("structured Provider store is malformed")
 	}
 	return state, nil
@@ -435,8 +624,13 @@ func readDefinitionStore(path string) (definitionStoreState, error) {
 
 func validateDefinitionStoreState(state definitionStoreState) error {
 	if state.SchemaVersion != definitionStoreSchemaVersion || state.Definitions == nil ||
-		state.PendingSecretDeletes == nil || len(state.Definitions) > maximumStoredDefinitions ||
+		state.DeviceProfiles == nil || state.PendingSecretDeletes == nil ||
+		len(state.Definitions) > maximumStoredDefinitions ||
+		len(state.DeviceProfiles) > configmodel.MaximumDeviceProfiles ||
 		len(state.PendingSecretDeletes) > maximumPendingCleanup {
+		return ErrInvalidConfig
+	}
+	if !configmodel.ValidateWebSettings(state.WebSettings) {
 		return ErrInvalidConfig
 	}
 	ids := make(map[string]struct{}, len(state.Definitions))
@@ -466,6 +660,16 @@ func validateDefinitionStoreState(state definitionStoreState) error {
 			active[reference] = struct{}{}
 		}
 	}
+	deviceIDs := make(map[string]struct{}, len(state.DeviceProfiles))
+	for _, profile := range state.DeviceProfiles {
+		if !configmodel.ValidateDeviceProfile(profile) {
+			return ErrInvalidConfig
+		}
+		if _, duplicate := deviceIDs[profile.DeviceID]; duplicate {
+			return ErrInvalidConfig
+		}
+		deviceIDs[profile.DeviceID] = struct{}{}
+	}
 	pending := make(map[secretstore.Reference]struct{}, len(state.PendingSecretDeletes))
 	for _, reference := range state.PendingSecretDeletes {
 		if _, err := secretstore.ParseReference(reference.String()); err != nil {
@@ -480,6 +684,40 @@ func validateDefinitionStoreState(state definitionStoreState) error {
 		pending[reference] = struct{}{}
 	}
 	return nil
+}
+
+func configurationFromState(state definitionStoreState) RestorableConfiguration {
+	configuration := RestorableConfiguration{
+		Definitions:         make([]Definition, len(state.Definitions)),
+		WebSettings:         state.WebSettings,
+		ApplicationSettings: state.ApplicationSettings,
+		DeviceProfiles:      configmodel.CloneDeviceProfiles(state.DeviceProfiles),
+	}
+	for index := range state.Definitions {
+		configuration.Definitions[index] = cloneDefinition(state.Definitions[index])
+	}
+	return configuration
+}
+
+func cloneRestorableConfiguration(source RestorableConfiguration) RestorableConfiguration {
+	state := stateFromConfiguration(source, []secretstore.Reference{})
+	return configurationFromState(state)
+}
+
+func stateFromConfiguration(
+	configuration RestorableConfiguration,
+	pending []secretstore.Reference,
+) definitionStoreState {
+	state := emptyDefinitionStoreState()
+	state.Definitions = make([]Definition, len(configuration.Definitions))
+	for index := range configuration.Definitions {
+		state.Definitions[index] = cloneDefinition(configuration.Definitions[index])
+	}
+	state.WebSettings = configuration.WebSettings
+	state.ApplicationSettings = configuration.ApplicationSettings
+	state.DeviceProfiles = configmodel.CloneDeviceProfiles(configuration.DeviceProfiles)
+	state.PendingSecretDeletes = append([]secretstore.Reference(nil), pending...)
+	return state
 }
 
 func definitionReferences(definitions []Definition) map[secretstore.Reference]struct{} {

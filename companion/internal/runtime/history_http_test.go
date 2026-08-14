@@ -13,9 +13,29 @@ import (
 	"time"
 
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/aisnapshot"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/configmodel"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/history"
 	companionruntime "github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/runtime"
 )
+
+type historySettingsOwner struct {
+	application configmodel.ApplicationSettings
+}
+
+func (owner *historySettingsOwner) UpdateApplicationSettings(
+	_ context.Context,
+	settings configmodel.ApplicationSettings,
+) error {
+	owner.application = settings
+	return nil
+}
+
+func (*historySettingsOwner) UpdateDeviceProfile(
+	context.Context,
+	configmodel.DeviceProfile,
+) error {
+	return nil
+}
 
 func TestManagementHistoryRoutesQueryExportDisableAndClear(t *testing.T) {
 	historyStore, err := history.Open(context.Background(), history.Config{
@@ -45,6 +65,8 @@ func TestManagementHistoryRoutesQueryExportDisableAndClear(t *testing.T) {
 
 	config := testConfig()
 	config.History = historyStore
+	settingsOwner := &historySettingsOwner{}
+	config.Configuration = settingsOwner
 	application, err := companionruntime.New(config)
 	if err != nil {
 		t.Fatal(err)
@@ -102,7 +124,8 @@ func TestManagementHistoryRoutesQueryExportDisableAndClear(t *testing.T) {
 		t.Fatal(err)
 	}
 	response.Body.Close()
-	if response.StatusCode != http.StatusNoContent || historyStore.Enabled() {
+	if response.StatusCode != http.StatusNoContent || historyStore.Enabled() ||
+		settingsOwner.application.HistoryEnabled {
 		t.Fatalf("PUT settings status=%d enabled=%v", response.StatusCode, historyStore.Enabled())
 	}
 

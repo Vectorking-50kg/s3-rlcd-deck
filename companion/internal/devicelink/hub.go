@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/configmodel"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
 	"github.com/coder/websocket"
 )
@@ -29,6 +31,7 @@ type Config struct {
 	HeartbeatTimeout  time.Duration
 	Now               func() time.Time
 	Elapsed           func() time.Duration
+	OnDeviceProfile   func(configmodel.DeviceProfile)
 }
 
 type Hub struct {
@@ -37,6 +40,7 @@ type Hub struct {
 	heartbeatTimeout  time.Duration
 	now               func() time.Time
 	elapsed           func() time.Duration
+	onDeviceProfile   func(configmodel.DeviceProfile)
 	done              chan struct{}
 	closeOnce         sync.Once
 
@@ -85,6 +89,7 @@ func New(config Config) (*Hub, error) {
 		heartbeatTimeout:  config.HeartbeatTimeout,
 		now:               config.Now,
 		elapsed:           config.Elapsed,
+		onDeviceProfile:   config.OnDeviceProfile,
 		done:              make(chan struct{}),
 		connections:       make(map[*websocket.Conn]struct{}),
 		sessions:          make(map[string]*websocket.Conn),
@@ -213,13 +218,25 @@ func (hub *Hub) serveConnection(
 		_ = connection.Close(websocket.StatusPolicyViolation, "device.hello must be text")
 		return
 	}
-	if _, err = parseDeviceHello(message, authentication.deviceID); err != nil {
+	hello, err := parseDeviceHello(message, authentication.deviceID)
+	if err != nil {
 		_ = connection.Close(websocket.StatusPolicyViolation, "invalid device.hello")
 		return
 	}
 	if !hub.reserve(authentication.deviceID, connection) {
 		_ = connection.Close(websocket.StatusPolicyViolation, "duplicate Device ID")
 		return
+	}
+	if hub.onDeviceProfile != nil {
+		capabilities := append([]string(nil), hello.Capabilities...)
+		sort.Strings(capabilities)
+		hub.onDeviceProfile(configmodel.DeviceProfile{
+			DeviceID:        hello.DeviceID,
+			FirmwareVersion: hello.FirmwareVersion,
+			Board:           hello.Board,
+			Capabilities:    capabilities,
+			LastSeenUTC:     hub.now().UTC().Format(time.RFC3339Nano),
+		})
 	}
 	if !hub.writeHeartbeat(connection) {
 		return

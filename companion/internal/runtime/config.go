@@ -9,8 +9,10 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/backup"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/codexappserver"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/codexobserver"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/configmodel"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/cursorprovider"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/history"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
@@ -38,6 +40,26 @@ type Config struct {
 	CursorCollector      CursorCollector
 	StructuredCollectors []StructuredCollector
 	History              *history.Store
+	Backup               BackupService
+	Configuration        ConfigurationOwner
+}
+
+type BackupService interface {
+	Export(context.Context, []byte) ([]byte, error)
+	Preview(context.Context, []byte, []byte, backup.ImportMode) (backup.Preview, error)
+	Import(
+		context.Context,
+		[]byte,
+		[]byte,
+		backup.ImportMode,
+		map[string]backup.ConflictDecision,
+		string,
+	) (backup.ImportResult, error)
+}
+
+type ConfigurationOwner interface {
+	UpdateApplicationSettings(context.Context, configmodel.ApplicationSettings) error
+	UpdateDeviceProfile(context.Context, configmodel.DeviceProfile) error
 }
 
 // CodexCollector is intentionally narrow: the runtime can supervise normalized
