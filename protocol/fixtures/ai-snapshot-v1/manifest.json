@@ -19,9 +19,12 @@
     {"file": "invalid-provider-order.json", "result": "malformed"},
     {"file": "invalid-unknown-field-v0.json", "result": "malformed"},
     {"file": "invalid-forward-string.json", "result": "private_data"},
+    {"file": "invalid-forward-key.json", "result": "malformed"},
     {"file": "invalid-privacy-prompt.json", "result": "private_data"},
     {"file": "invalid-privacy-camel.json", "result": "private_data"},
     {"file": "invalid-privacy-path.json", "result": "private_data"},
-    {"file": "invalid-oversized.json", "result": "malformed"}
+    {"file": "invalid-privacy-embedded-path.json", "result": "private_data"},
+    {"file": "invalid-oversized.json", "result": "malformed"},
+    {"file": "invalid-too-complex.json", "result": "malformed"}
   ]
 }

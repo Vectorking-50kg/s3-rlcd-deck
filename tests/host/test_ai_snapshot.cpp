@@ -90,10 +90,46 @@ void shared_fixtures_match_the_firmware_contract()
     }
 }
 
+void retained_snapshot_survives_an_unsupported_major()
+{
+    const std::string root = DECK_REPOSITORY_ROOT;
+    const std::string valid = read_file(
+        root + "/protocol/fixtures/ai-snapshot-v1/valid-full.json"
+    );
+    const std::string unsupported = read_file(
+        root + "/protocol/fixtures/ai-snapshot-v1/invalid-major-version.json"
+    );
+    char storage[DECK_AI_SNAPSHOT_MAX_BYTES]{};
+    deck_ai_snapshot_retained_t retained{};
+    assert(deck_ai_snapshot_retained_init(&retained, storage, sizeof(storage)));
+    assert(deck_ai_snapshot_retained_apply(&retained, valid.data(), valid.size()) ==
+           DECK_AI_SNAPSHOT_ACCEPTED);
+    const char *before = nullptr;
+    size_t before_size = 0;
+    deck_ai_snapshot_metadata_t before_metadata{};
+    assert(deck_ai_snapshot_retained_current(
+        &retained, &before, &before_size, &before_metadata
+    ));
+    const std::string before_copy(before, before_size);
+
+    assert(deck_ai_snapshot_retained_apply(
+        &retained, unsupported.data(), unsupported.size()
+    ) == DECK_AI_SNAPSHOT_UNSUPPORTED_VERSION);
+    const char *after = nullptr;
+    size_t after_size = 0;
+    deck_ai_snapshot_metadata_t after_metadata{};
+    assert(deck_ai_snapshot_retained_current(
+        &retained, &after, &after_size, &after_metadata
+    ));
+    assert(std::string(after, after_size) == before_copy);
+    assert(after_metadata.generated_at_unix_ms == before_metadata.generated_at_unix_ms);
+}
+
 }  // namespace
 
 int main()
 {
     shared_fixtures_match_the_firmware_contract();
+    retained_snapshot_survives_an_unsupported_major();
     return 0;
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/protocol"
@@ -19,6 +20,8 @@ const (
 	maxProviders       = 8
 	maxSessions        = 16
 	maxWindows         = 4
+	maxJSONNodes       = 2048
+	maxForwardFields   = 16
 )
 
 var (
@@ -186,6 +189,39 @@ type Snapshot struct {
 	NextRefresh       uint32        `json:"next_refresh_seconds"`
 }
 
+// Retained owns the last document that passed the complete wire contract.
+// Failed updates, including unknown schema majors, never mutate that value.
+type Retained struct {
+	mutex    sync.RWMutex
+	document []byte
+}
+
+func (retained *Retained) Apply(document []byte) (Snapshot, error) {
+	snapshot, err := Decode(document)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	copyOfDocument := append([]byte(nil), document...)
+	retained.mutex.Lock()
+	retained.document = copyOfDocument
+	retained.mutex.Unlock()
+	return snapshot, nil
+}
+
+func (retained *Retained) Current() (Snapshot, bool) {
+	retained.mutex.RLock()
+	document := append([]byte(nil), retained.document...)
+	retained.mutex.RUnlock()
+	if len(document) == 0 {
+		return Snapshot{}, false
+	}
+	snapshot, err := Decode(document)
+	if err != nil {
+		return Snapshot{}, false
+	}
+	return snapshot, true
+}
+
 // Encode is the only supported collector boundary for constructing a wire
 // snapshot. It deliberately re-enters Decode so locally produced documents and
 // remotely received documents cannot drift into different contracts.
@@ -208,6 +244,9 @@ func Decode(document []byte) (Snapshot, error) {
 	var privacyDocument any
 	if err = json.Unmarshal(document, &privacyDocument); err != nil {
 		return Snapshot{}, errors.Join(ErrMalformedSnapshot, err)
+	}
+	if jsonNodeCount(privacyDocument) > maxJSONNodes {
+		return Snapshot{}, ErrMalformedSnapshot
 	}
 	if containsPrivateContent(privacyDocument) {
 		return Snapshot{}, ErrPrivateData
@@ -302,6 +341,31 @@ func Decode(document []byte) (Snapshot, error) {
 	return snapshot, nil
 }
 
+func jsonNodeCount(value any) int {
+	switch typed := value.(type) {
+	case map[string]any:
+		count := 1
+		for _, child := range typed {
+			count += 1 + jsonNodeCount(child)
+			if count > maxJSONNodes {
+				return count
+			}
+		}
+		return count
+	case []any:
+		count := 1
+		for _, child := range typed {
+			count += jsonNodeCount(child)
+			if count > maxJSONNodes {
+				return count
+			}
+		}
+		return count
+	default:
+		return 1
+	}
+}
+
 func containsPrivateContent(value any) bool {
 	switch typed := value.(type) {
 	case map[string]any:
@@ -318,13 +382,41 @@ func containsPrivateContent(value any) bool {
 			}
 		}
 	case string:
-		return strings.HasPrefix(typed, "/") || strings.HasPrefix(typed, "~/") ||
-			strings.HasPrefix(typed, `\\`) ||
-			(len(typed) >= 3 && ((typed[0] >= 'A' && typed[0] <= 'Z') ||
-				(typed[0] >= 'a' && typed[0] <= 'z')) && typed[1] == ':' &&
-				(typed[2] == '\\' || typed[2] == '/'))
+		return containsAbsolutePath(typed)
 	}
 	return false
+}
+
+func containsAbsolutePath(value string) bool {
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if character != '/' && character != '\\' {
+			continue
+		}
+		if index == 0 || pathBoundary(value[index-1]) ||
+			(value[index-1] == '~' && (index == 1 || pathBoundary(value[index-2]))) {
+			return true
+		}
+		if index >= 2 && value[index-1] == ':' && isASCIIAlpha(value[index-2]) &&
+			(index == 2 || pathBoundary(value[index-3])) {
+			return true
+		}
+	}
+	return false
+}
+
+func pathBoundary(character byte) bool {
+	switch character {
+	case ' ', '\t', '\r', '\n', '(', '[', '{', '"', '\'', '=', ':', ';', ',':
+		return true
+	default:
+		return false
+	}
+}
+
+func isASCIIAlpha(character byte) bool {
+	return (character >= 'A' && character <= 'Z') ||
+		(character >= 'a' && character <= 'z')
 }
 
 func normalizedFieldName(value string) string {
@@ -388,7 +480,7 @@ func validateProvider(document json.RawMessage, provider *Provider, generatedAt 
 		}
 		provider.UpdatedAtUnixMS = unixMS(parsed)
 	}
-	if err = validateMoney(object["balance"], provider.Balance, version.Minor); err != nil {
+	if err = validateMoney(object["balance"], provider.Balance, SchemaMinor); err != nil {
 		return err
 	}
 	var windows []json.RawMessage
@@ -396,14 +488,14 @@ func validateProvider(document json.RawMessage, provider *Provider, generatedAt 
 		return ErrMalformedSnapshot
 	}
 	for index := range provider.Windows {
-		if err = validateWindow(windows[index], &provider.Windows[index], version.Minor); err != nil {
+		if err = validateWindow(windows[index], &provider.Windows[index], SchemaMinor); err != nil {
 			return err
 		}
 	}
-	if err = validateTokens(object["tokens"], provider.Tokens, version.Minor); err != nil {
+	if err = validateTokens(object["tokens"], provider.Tokens, SchemaMinor); err != nil {
 		return err
 	}
-	if err = validateProviderError(object["error"], provider.Error, version.Minor); err != nil {
+	if err = validateProviderError(object["error"], provider.Error, SchemaMinor); err != nil {
 		return err
 	}
 	if (provider.Status == ProviderOK && provider.Error != nil) ||
@@ -627,6 +719,7 @@ func requireFields(object map[string]json.RawMessage, fields, nonNull []string) 
 }
 
 func validateObjectFields(object map[string]json.RawMessage, minor uint16, known map[string]struct{}) error {
+	forwardFields := 0
 	for name, value := range object {
 		if _, recognized := known[name]; recognized {
 			continue
@@ -635,6 +728,10 @@ func validateObjectFields(object map[string]json.RawMessage, minor uint16, known
 			return ErrMalformedSnapshot
 		}
 		if !safeIdentifier(name, 32) {
+			return ErrMalformedSnapshot
+		}
+		forwardFields++
+		if forwardFields > maxForwardFields {
 			return ErrMalformedSnapshot
 		}
 		if !safeForwardScalar(value) {

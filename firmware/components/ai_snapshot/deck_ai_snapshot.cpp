@@ -7,7 +7,8 @@
 
 namespace {
 
-constexpr size_t kMaximumNodes = 1024;
+constexpr size_t kMaximumNodes = 2048;
+constexpr size_t kMaximumForwardFields = 16;
 constexpr uint64_t kMaximumSafeInteger = 9'007'199'254'740'991ULL;
 constexpr uint64_t kNoNode = UINT64_MAX;
 
@@ -775,63 +776,106 @@ bool key_is_private(const Document &document, size_t key)
     return false;
 }
 
-bool string_starts_absolute_path(const Document &document, size_t index)
+bool next_path_character(
+    const Document &document,
+    const Node &value,
+    size_t *cursor,
+    char *output
+)
+{
+    if (*cursor >= value.end) {
+        return false;
+    }
+    uint8_t byte = static_cast<uint8_t>(document.text()[(*cursor)++]);
+    if (byte != '\\') {
+        *output = byte <= 0x7fU ? static_cast<char>(byte) : static_cast<char>(0x7f);
+        return true;
+    }
+    if (*cursor >= value.end) {
+        return false;
+    }
+    const char escaped = document.text()[(*cursor)++];
+    if (escaped == '/' || escaped == '\\' || escaped == '"') {
+        *output = escaped;
+        return true;
+    }
+    if (escaped == 'b' || escaped == 'f' || escaped == 'n' || escaped == 'r' ||
+        escaped == 't') {
+        *output = ' ';
+        return true;
+    }
+    if (escaped != 'u' || *cursor + 4U > value.end) {
+        return false;
+    }
+    unsigned codepoint = 0;
+    for (unsigned digit = 0; digit < 4U; ++digit) {
+        const char character = document.text()[(*cursor)++];
+        codepoint <<= 4U;
+        if (character >= '0' && character <= '9') {
+            codepoint |= static_cast<unsigned>(character - '0');
+        } else if (character >= 'a' && character <= 'f') {
+            codepoint |= static_cast<unsigned>(character - 'a' + 10);
+        } else if (character >= 'A' && character <= 'F') {
+            codepoint |= static_cast<unsigned>(character - 'A' + 10);
+        } else {
+            return false;
+        }
+    }
+    *output = codepoint <= 0x7fU ? static_cast<char>(codepoint) : static_cast<char>(0x7f);
+    return true;
+}
+
+bool path_boundary(char character)
+{
+    return character == ' ' || character == '\t' || character == '\r' ||
+           character == '\n' || character == '(' || character == '[' ||
+           character == '{' || character == '"' || character == '\'' ||
+           character == '=' || character == ':' || character == ';' ||
+           character == ',';
+}
+
+bool ascii_alpha(char character)
+{
+    return (character >= 'A' && character <= 'Z') ||
+           (character >= 'a' && character <= 'z');
+}
+
+bool string_contains_absolute_path(const Document &document, size_t index)
 {
     const Node &value = document.node(index);
     if (value.type != NodeType::string) {
         return false;
     }
-    char decoded[4]{};
-    size_t written = 0;
     size_t cursor = value.start;
-    while (cursor < value.end && written < 3U) {
-        uint8_t byte = static_cast<uint8_t>(document.text()[cursor++]);
-        if (byte == '\\') {
-            if (cursor == value.end) {
-                return false;
-            }
-            const char escaped = document.text()[cursor++];
-            if (escaped == '/' || escaped == '\\') {
-                byte = static_cast<uint8_t>(escaped);
-            } else if (escaped == 'u' && cursor + 4U <= value.end) {
-                unsigned codepoint = 0;
-                for (unsigned digit = 0; digit < 4U; ++digit) {
-                    const char character = document.text()[cursor++];
-                    codepoint <<= 4U;
-                    if (character >= '0' && character <= '9') {
-                        codepoint |= static_cast<unsigned>(character - '0');
-                    } else if (character >= 'a' && character <= 'f') {
-                        codepoint |= static_cast<unsigned>(character - 'a' + 10);
-                    } else if (character >= 'A' && character <= 'F') {
-                        codepoint |= static_cast<unsigned>(character - 'A' + 10);
-                    } else {
-                        return false;
-                    }
-                }
-                if (codepoint > 0x7fU) {
-                    return false;
-                }
-                byte = static_cast<uint8_t>(codepoint);
-            } else {
-                return false;
-            }
-        }
-        if (byte > 0x7fU) {
+    size_t position = 0;
+    char previous = '\0';
+    char two_back = '\0';
+    char three_back = '\0';
+    while (cursor < value.end) {
+        char character = '\0';
+        if (!next_path_character(document, value, &cursor, &character)) {
             return false;
         }
-        decoded[written++] = static_cast<char>(byte);
+        if (character == '/' || character == '\\') {
+            if (position == 0U || path_boundary(previous) ||
+                (previous == '~' && (position == 1U || path_boundary(two_back))) ||
+                (position >= 2U && previous == ':' && ascii_alpha(two_back) &&
+                 (position == 2U || path_boundary(three_back)))) {
+                return true;
+            }
+        }
+        three_back = two_back;
+        two_back = previous;
+        previous = character;
+        ++position;
     }
-    return decoded[0] == '/' || (decoded[0] == '~' && decoded[1] == '/') ||
-           (decoded[0] == '\\' && decoded[1] == '\\') ||
-           (((decoded[0] >= 'A' && decoded[0] <= 'Z') ||
-             (decoded[0] >= 'a' && decoded[0] <= 'z')) &&
-            decoded[1] == ':' && (decoded[2] == '\\' || decoded[2] == '/'));
+    return false;
 }
 
 bool contains_private_content(const Document &document, size_t index)
 {
     const Node &node = document.node(index);
-    if (node.type == NodeType::string && string_starts_absolute_path(document, index)) {
+    if (node.type == NodeType::string && string_contains_absolute_path(document, index)) {
         return true;
     }
     if (node.type == NodeType::object) {
@@ -886,6 +930,7 @@ deck_ai_snapshot_result_t object_fields(
     if (document.node(object_index).type != NodeType::object) {
         return DECK_AI_SNAPSHOT_MALFORMED;
     }
+    size_t forward_fields = 0;
     for (size_t key = document.node(object_index).first_child;
          key != static_cast<size_t>(kNoNode); key = document.node(key).next_sibling) {
         if (key_is_private(document, key)) {
@@ -898,6 +943,9 @@ deck_ai_snapshot_result_t object_fields(
             return DECK_AI_SNAPSHOT_MALFORMED;
         }
         if (!safe_identifier(document, key, 32)) {
+            return DECK_AI_SNAPSHOT_MALFORMED;
+        }
+        if (++forward_fields > kMaximumForwardFields) {
             return DECK_AI_SNAPSHOT_MALFORMED;
         }
         if (!safe_forward_scalar(document, document.node(key).first_child)) {
@@ -1191,7 +1239,7 @@ deck_ai_snapshot_result_t validate_provider(
          !document.string_equals(confidence, "inferred"))) {
         return DECK_AI_SNAPSHOT_MALFORMED;
     }
-    result = validate_money(document, document.field(index, "balance"), minor);
+    result = validate_money(document, document.field(index, "balance"), 0);
     if (result != DECK_AI_SNAPSHOT_ACCEPTED) {
         return result;
     }
@@ -1202,17 +1250,17 @@ deck_ai_snapshot_result_t validate_provider(
     }
     for (size_t window = document.node(windows).first_child;
          window != static_cast<size_t>(kNoNode); window = document.node(window).next_sibling) {
-        result = validate_window(document, window, minor);
+        result = validate_window(document, window, 0);
         if (result != DECK_AI_SNAPSHOT_ACCEPTED) {
             return result;
         }
     }
-    result = validate_tokens(document, document.field(index, "tokens"), minor);
+    result = validate_tokens(document, document.field(index, "tokens"), 0);
     if (result != DECK_AI_SNAPSHOT_ACCEPTED) {
         return result;
     }
     const size_t error = document.field(index, "error");
-    result = validate_provider_error(document, error, minor);
+    result = validate_provider_error(document, error, 0);
     if (result != DECK_AI_SNAPSHOT_ACCEPTED ||
         (document.string_equals(status, "ok") && !is_null(document, error)) ||
         (!document.string_equals(status, "ok") && is_null(document, error))) {
@@ -1472,4 +1520,60 @@ deck_ai_snapshot_result_t deck_ai_snapshot_validate(
     }
     delete[] nodes;
     return result;
+}
+
+bool deck_ai_snapshot_retained_init(
+    deck_ai_snapshot_retained_t *retained,
+    char *storage,
+    size_t storage_capacity
+)
+{
+    if (retained == nullptr || storage == nullptr ||
+        storage_capacity < DECK_AI_SNAPSHOT_MAX_BYTES) {
+        return false;
+    }
+    *retained = deck_ai_snapshot_retained_t{};
+    retained->document = storage;
+    retained->capacity = storage_capacity;
+    return true;
+}
+
+deck_ai_snapshot_result_t deck_ai_snapshot_retained_apply(
+    deck_ai_snapshot_retained_t *retained,
+    const char *document,
+    size_t document_size
+)
+{
+    if (retained == nullptr || retained->document == nullptr ||
+        document_size > retained->capacity) {
+        return DECK_AI_SNAPSHOT_MALFORMED;
+    }
+    deck_ai_snapshot_metadata_t candidate{};
+    const deck_ai_snapshot_result_t result =
+        deck_ai_snapshot_validate(document, document_size, &candidate);
+    if (result != DECK_AI_SNAPSHOT_ACCEPTED) {
+        return result;
+    }
+    std::memmove(retained->document, document, document_size);
+    retained->document_size = document_size;
+    retained->metadata = candidate;
+    retained->has_snapshot = true;
+    return DECK_AI_SNAPSHOT_ACCEPTED;
+}
+
+bool deck_ai_snapshot_retained_current(
+    const deck_ai_snapshot_retained_t *retained,
+    const char **document,
+    size_t *document_size,
+    deck_ai_snapshot_metadata_t *metadata
+)
+{
+    if (retained == nullptr || !retained->has_snapshot || document == nullptr ||
+        document_size == nullptr || metadata == nullptr) {
+        return false;
+    }
+    *document = retained->document;
+    *document_size = retained->document_size;
+    *metadata = retained->metadata;
+    return true;
 }

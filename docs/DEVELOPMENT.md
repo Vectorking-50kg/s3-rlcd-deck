@@ -449,6 +449,8 @@ Companion 提供内置模板，同时提供结构化 HTTP Provider：
 有界整数字段；字符串、数组和对象必须经过新 major 的隐私审查。Provider 错误码固定为
 `auth_stale`、`permission_denied`、`timeout`、`process_exited`、
 `schema_changed`、`unavailable`。
+每个带 `schema_version` 的对象最多包含 16 个 forward 字段，完整文档最多包含 2048
+个 JSON syntax nodes；无独立版本的额度、Token、货币和错误子对象不接受扩展字段。
 
 ### 7.6 会话 DTO
 

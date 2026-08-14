@@ -6,6 +6,7 @@
   "$defs": {
     "schema_version": {
       "type": "object",
+      "maxProperties": 2,
       "required": ["major", "minor"],
       "properties": {
         "major": {"const": 1},
@@ -43,15 +44,17 @@
     },
     "money": {
       "type": "object",
+      "maxProperties": 2,
       "required": ["amount_micros", "currency"],
       "properties": {
         "amount_micros": {"$ref": "#/$defs/safe_count"},
         "currency": {"type": "string", "pattern": "^[A-Z]{3}$"}
       },
-      "additionalProperties": {"$ref": "#/$defs/forward_scalar"}
+      "additionalProperties": false
     },
     "quota_window": {
       "type": "object",
+      "maxProperties": 5,
       "required": ["name", "used_basis_points", "remaining_basis_points", "window_minutes", "resets_at"],
       "properties": {
         "name": {"type": "string", "minLength": 1, "maxLength": 24, "pattern": "^[a-z][a-z0-9_-]{0,23}$"},
@@ -60,10 +63,11 @@
         "window_minutes": {"oneOf": [{"type": "integer", "minimum": 1, "maximum": 525600}, {"type": "null"}]},
         "resets_at": {"$ref": "#/$defs/nullable_utc"}
       },
-      "additionalProperties": {"$ref": "#/$defs/forward_scalar"}
+      "additionalProperties": false
     },
     "token_usage": {
       "type": "object",
+      "maxProperties": 5,
       "required": ["input", "cached_input", "output", "reasoning", "total"],
       "properties": {
         "input": {"$ref": "#/$defs/nullable_safe_count"},
@@ -72,19 +76,22 @@
         "reasoning": {"$ref": "#/$defs/nullable_safe_count"},
         "total": {"$ref": "#/$defs/nullable_safe_count"}
       },
-      "additionalProperties": {"$ref": "#/$defs/forward_scalar"}
+      "additionalProperties": false
     },
     "provider_error": {
       "type": "object",
+      "maxProperties": 2,
       "required": ["code", "retryable"],
       "properties": {
         "code": {"enum": ["auth_stale", "permission_denied", "timeout", "process_exited", "schema_changed", "unavailable"]},
         "retryable": {"type": "boolean"}
       },
-      "additionalProperties": {"$ref": "#/$defs/forward_scalar"}
+      "additionalProperties": false
     },
     "provider": {
       "type": "object",
+      "maxProperties": 29,
+      "propertyNames": {"pattern": "^[a-z][a-z0-9_]{0,31}$"},
       "required": ["schema_version", "provider_id", "display_name", "status", "source", "confidence", "experimental", "updated_at", "stale_after_seconds", "balance", "windows", "tokens", "error"],
       "properties": {
         "schema_version": {"$ref": "#/$defs/schema_version"},
@@ -101,10 +108,16 @@
         "tokens": {"oneOf": [{"$ref": "#/$defs/token_usage"}, {"type": "null"}]},
         "error": {"oneOf": [{"$ref": "#/$defs/provider_error"}, {"type": "null"}]}
       },
-      "additionalProperties": {"$ref": "#/$defs/forward_scalar"}
+      "additionalProperties": {"$ref": "#/$defs/forward_scalar"},
+      "allOf": [{
+        "if": {"properties": {"schema_version": {"properties": {"minor": {"const": 0}}}}},
+        "then": {"propertyNames": {"enum": ["schema_version", "provider_id", "display_name", "status", "source", "confidence", "experimental", "updated_at", "stale_after_seconds", "balance", "windows", "tokens", "error"]}}
+      }]
     },
     "session": {
       "type": "object",
+      "maxProperties": 28,
+      "propertyNames": {"pattern": "^[a-z][a-z0-9_]{0,31}$"},
       "required": ["schema_version", "session_id", "provider_id", "display_name", "state", "source", "confidence", "started_at", "last_activity_at", "duration_seconds", "turn_tokens", "context_used_basis_points"],
       "properties": {
         "schema_version": {"$ref": "#/$defs/schema_version"},
@@ -120,10 +133,16 @@
         "turn_tokens": {"$ref": "#/$defs/nullable_safe_count"},
         "context_used_basis_points": {"$ref": "#/$defs/nullable_basis_points"}
       },
-      "additionalProperties": {"$ref": "#/$defs/forward_scalar"}
+      "additionalProperties": {"$ref": "#/$defs/forward_scalar"},
+      "allOf": [{
+        "if": {"properties": {"schema_version": {"properties": {"minor": {"const": 0}}}}},
+        "then": {"propertyNames": {"enum": ["schema_version", "session_id", "provider_id", "display_name", "state", "source", "confidence", "started_at", "last_activity_at", "duration_seconds", "turn_tokens", "context_used_basis_points"]}}
+      }]
     },
     "snapshot": {
       "type": "object",
+      "maxProperties": 25,
+      "propertyNames": {"pattern": "^[a-z][a-z0-9_]{0,31}$"},
       "required": ["type", "protocol_version", "schema_version", "generated_at", "timezone", "provider_order", "providers", "sessions", "next_refresh_seconds"],
       "properties": {
         "type": {"const": "snapshot.ai"},
@@ -136,7 +155,11 @@
         "sessions": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/session"}},
         "next_refresh_seconds": {"type": "integer", "minimum": 1, "maximum": 3600}
       },
-      "additionalProperties": {"$ref": "#/$defs/forward_scalar"}
+      "additionalProperties": {"$ref": "#/$defs/forward_scalar"},
+      "allOf": [{
+        "if": {"properties": {"schema_version": {"properties": {"minor": {"const": 0}}}}},
+        "then": {"propertyNames": {"enum": ["type", "protocol_version", "schema_version", "generated_at", "timezone", "provider_order", "providers", "sessions", "next_refresh_seconds"]}}
+      }]
     }
   }
 }

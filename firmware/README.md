@@ -213,9 +213,11 @@ All credentials remain private to the Profile and Device Link modules.
 The `ai_snapshot` component validates `snapshot.ai` before any state can replace the Deck's last
 valid AI Snapshot. It enforces the shared 16 KiB bound, schema versions, canonical UTC times,
 provider/session relationships, enum/source/confidence combinations, numeric ranges, and the
-privacy field deny boundary. Validation does not retain the input document. Unknown schema
-majors fail closed; compatible higher minors may add only null, boolean, or bounded integer
-fields. Host and firmware builds run the same fixture manifest from `protocol/fixtures`.
+privacy field deny boundary. Stateless validation does not retain the input; the caller-owned
+retained slot replaces its last valid document only after validation succeeds. Unknown schema
+majors fail closed without changing that slot. Compatible higher minors may add only null,
+boolean, or bounded integer fields. Host and firmware builds run the same fixture manifest from
+`protocol/fixtures`.
 
 ## Long-duration HIL
 

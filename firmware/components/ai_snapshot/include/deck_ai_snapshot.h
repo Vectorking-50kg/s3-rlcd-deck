@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stddef.h>
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -29,6 +30,14 @@ typedef struct {
     uint32_t next_refresh_seconds;
 } deck_ai_snapshot_metadata_t;
 
+typedef struct {
+    char *document;
+    size_t capacity;
+    size_t document_size;
+    deck_ai_snapshot_metadata_t metadata;
+    bool has_snapshot;
+} deck_ai_snapshot_retained_t;
+
 /*
  * Validates the privacy-safe normalized wire contract without retaining the
  * document. Unknown major versions are rejected. A higher minor may add only
@@ -38,6 +47,27 @@ typedef struct {
 deck_ai_snapshot_result_t deck_ai_snapshot_validate(
     const char *document,
     size_t document_size,
+    deck_ai_snapshot_metadata_t *metadata
+);
+
+/* Caller-owned storage keeps allocation and PSRAM policy outside the parser. */
+bool deck_ai_snapshot_retained_init(
+    deck_ai_snapshot_retained_t *retained,
+    char *storage,
+    size_t storage_capacity
+);
+
+/* Validation failure never changes the retained document or metadata. */
+deck_ai_snapshot_result_t deck_ai_snapshot_retained_apply(
+    deck_ai_snapshot_retained_t *retained,
+    const char *document,
+    size_t document_size
+);
+
+bool deck_ai_snapshot_retained_current(
+    const deck_ai_snapshot_retained_t *retained,
+    const char **document,
+    size_t *document_size,
     deck_ai_snapshot_metadata_t *metadata
 );
 

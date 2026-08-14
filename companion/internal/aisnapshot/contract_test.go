@@ -132,6 +132,22 @@ func TestEncodeUsesTheSameContractAsDecode(t *testing.T) {
 	}
 }
 
+func TestRetainedSnapshotSurvivesAnUnsupportedMajor(t *testing.T) {
+	var retained Retained
+	accepted, err := retained.Apply(fixture(t, "valid-full.json"))
+	if err != nil || accepted.ProviderOrder[0] != "codex" {
+		t.Fatalf("Apply(valid) = %#v, %v", accepted, err)
+	}
+	if _, err = retained.Apply(fixture(t, "invalid-major-version.json")); !errors.Is(err, ErrUnsupportedVersion) {
+		t.Fatalf("Apply(unknown major) error = %v", err)
+	}
+	current, present := retained.Current()
+	if !present || current.GeneratedAtUnixMS != accepted.GeneratedAtUnixMS ||
+		current.ProviderOrder[0] != "codex" {
+		t.Fatalf("Current() = %#v, %t; previous valid snapshot was overwritten", current, present)
+	}
+}
+
 func TestGoEnumsMatchTheSharedSchemaAndErrorCatalog(t *testing.T) {
 	var schema struct {
 		Defs map[string]struct {

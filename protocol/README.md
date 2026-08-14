@@ -20,6 +20,11 @@ value and is never replaced with zero. Unknown schema majors are rejected. A hig
 add only null, boolean, or bounded integer fields. Unknown strings, arrays, and objects are
 rejected as private data. The deny boundary also rejects prompt/reply/command/tool fields,
 credentials, upstream raw/attributes, and absolute paths anywhere in the document.
+Each versioned object may add at most 16 forward fields and a document may contain at most
+2048 JSON syntax nodes, bounding parser memory while covering every declared Provider/window/
+Session maximum.
+Both implementations expose a retained-snapshot seam whose previous document changes only
+after a candidate passes the entire contract.
 
 `fixtures/ai-snapshot-v1/manifest.json` assigns the authoritative parser result to each canonical
 fixture. Go and the ESP-IDF component execute that same manifest unchanged.
