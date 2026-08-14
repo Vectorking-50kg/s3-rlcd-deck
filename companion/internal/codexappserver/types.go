@@ -59,38 +59,8 @@ type Update struct {
 // retained or reconstructed.
 func (update Update) Clone() Update {
 	cloned := Update{
-		Provider: update.Provider,
+		Provider: update.Provider.Clone(),
 		Sessions: cloneSlice(update.Sessions),
-	}
-	cloned.Provider.UpdatedAt = clonePointer(update.Provider.UpdatedAt)
-	cloned.Provider.UpdatedAtUnixMS = clonePointer(update.Provider.UpdatedAtUnixMS)
-	cloned.Provider.StaleAfterSeconds = clonePointer(update.Provider.StaleAfterSeconds)
-	if update.Provider.Balance != nil {
-		balance := *update.Provider.Balance
-		cloned.Provider.Balance = &balance
-	}
-	cloned.Provider.Windows = cloneSlice(update.Provider.Windows)
-	for index := range cloned.Provider.Windows {
-		window := &cloned.Provider.Windows[index]
-		source := update.Provider.Windows[index]
-		window.UsedBasisPoints = clonePointer(source.UsedBasisPoints)
-		window.RemainingBasisPoints = clonePointer(source.RemainingBasisPoints)
-		window.WindowMinutes = clonePointer(source.WindowMinutes)
-		window.ResetsAt = clonePointer(source.ResetsAt)
-		window.ResetsAtUnixMS = clonePointer(source.ResetsAtUnixMS)
-	}
-	if update.Provider.Tokens != nil {
-		tokens := *update.Provider.Tokens
-		tokens.Input = clonePointer(update.Provider.Tokens.Input)
-		tokens.CachedInput = clonePointer(update.Provider.Tokens.CachedInput)
-		tokens.Output = clonePointer(update.Provider.Tokens.Output)
-		tokens.Reasoning = clonePointer(update.Provider.Tokens.Reasoning)
-		tokens.Total = clonePointer(update.Provider.Tokens.Total)
-		cloned.Provider.Tokens = &tokens
-	}
-	if update.Provider.Error != nil {
-		problem := *update.Provider.Error
-		cloned.Provider.Error = &problem
 	}
 	for index := range cloned.Sessions {
 		session := &cloned.Sessions[index]

@@ -62,6 +62,52 @@ func TestDecodeReturnsNormalizedProviderAndSessionDTOs(t *testing.T) {
 	}
 }
 
+func TestProviderCloneOwnsAllNestedValues(t *testing.T) {
+	originalSnapshot, err := Decode(fixture(t, "valid-full.json"))
+	if err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+	original := originalSnapshot.Providers[0]
+	original.Balance = &Money{AmountMicros: 2, Currency: "USD"}
+	original.Error = &ProviderError{Code: ProviderErrorTimeout, Retryable: true}
+	cloned := original.Clone()
+
+	*cloned.UpdatedAt = "2026-08-14T01:00:00Z"
+	*cloned.UpdatedAtUnixMS = 1
+	*cloned.StaleAfterSeconds = 1
+	cloned.Balance.AmountMicros++
+	cloned.Windows[0].Name = "changed"
+	*cloned.Windows[0].UsedBasisPoints = 1
+	*cloned.Windows[0].RemainingBasisPoints = 1
+	*cloned.Windows[0].WindowMinutes = 1
+	*cloned.Windows[0].ResetsAt = "2026-08-14T02:00:00Z"
+	*cloned.Windows[0].ResetsAtUnixMS = 2
+	*cloned.Tokens.Input = 1
+	*cloned.Tokens.CachedInput = 1
+	*cloned.Tokens.Output = 1
+	*cloned.Tokens.Reasoning = 1
+	*cloned.Tokens.Total = 1
+	cloned.Error.Code = ProviderErrorUnavailable
+
+	if original.UpdatedAt == cloned.UpdatedAt || original.UpdatedAtUnixMS == cloned.UpdatedAtUnixMS ||
+		original.StaleAfterSeconds == cloned.StaleAfterSeconds || original.Balance == cloned.Balance ||
+		&original.Windows[0] == &cloned.Windows[0] || original.Windows[0].UsedBasisPoints == cloned.Windows[0].UsedBasisPoints ||
+		original.Windows[0].RemainingBasisPoints == cloned.Windows[0].RemainingBasisPoints ||
+		original.Windows[0].WindowMinutes == cloned.Windows[0].WindowMinutes ||
+		original.Windows[0].ResetsAt == cloned.Windows[0].ResetsAt ||
+		original.Windows[0].ResetsAtUnixMS == cloned.Windows[0].ResetsAtUnixMS ||
+		original.Tokens == cloned.Tokens || original.Tokens.Input == cloned.Tokens.Input ||
+		original.Tokens.CachedInput == cloned.Tokens.CachedInput ||
+		original.Tokens.Output == cloned.Tokens.Output || original.Tokens.Reasoning == cloned.Tokens.Reasoning ||
+		original.Tokens.Total == cloned.Tokens.Total || original.Error == cloned.Error {
+		t.Fatal("Provider.Clone() retained a nested alias")
+	}
+	if original.Windows[0].Name == "changed" || *original.Tokens.Total == 1 ||
+		original.Error.Code == ProviderErrorUnavailable {
+		t.Fatal("mutating Provider.Clone() changed the original")
+	}
+}
+
 func TestDecodeRejectsUnknownSessionState(t *testing.T) {
 	if _, err := Decode(fixture(t, "invalid-session-state.json")); err == nil {
 		t.Fatal("Decode() accepted an unknown Session state")

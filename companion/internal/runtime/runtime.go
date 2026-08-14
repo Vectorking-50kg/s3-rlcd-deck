@@ -113,7 +113,7 @@ func (application *Runtime) CursorProvider() (aisnapshot.Provider, bool) {
 	if !application.hasCursorProvider {
 		return aisnapshot.Provider{}, false
 	}
-	return cursorprovider.CloneProvider(application.cursorProvider), true
+	return application.cursorProvider.Clone(), true
 }
 
 func (application *Runtime) Status() Status {
@@ -316,7 +316,7 @@ func (application *Runtime) publishCursorProvider(
 		return cursorprovider.ErrUnavailable
 	}
 	application.mu.Lock()
-	application.cursorProvider = cursorprovider.CloneProvider(provider)
+	application.cursorProvider = provider.Clone()
 	application.hasCursorProvider = true
 	application.mu.Unlock()
 	return nil

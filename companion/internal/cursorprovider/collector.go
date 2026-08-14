@@ -141,15 +141,15 @@ func (collector *Collector) collectRetained(
 	collector.mutex.Lock()
 	defer collector.mutex.Unlock()
 	if err == nil {
-		owned := CloneProvider(provider)
+		owned := provider.Clone()
 		collector.lastProvider = &owned
-		return CloneProvider(owned), true, nil
+		return owned.Clone(), true, nil
 	}
 	problem := providerError(err)
 	if collector.lastProvider == nil {
 		return unavailableProvider(problem), false, nil
 	}
-	retained := CloneProvider(*collector.lastProvider)
+	retained := collector.lastProvider.Clone()
 	retained.Status = aisnapshot.ProviderDegraded
 	retained.Error = problem
 	return retained, false, nil
