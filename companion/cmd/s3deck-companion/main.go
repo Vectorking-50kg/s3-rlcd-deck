@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/codexappserver"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/codexobserver"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/desktop"
 	desktopassets "github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/desktop/assets"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/deviceidentity"
@@ -139,9 +140,17 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "cannot configure Codex collection: %v\n", err)
 		return 2
 	}
+	codexObserver, observerErr := codexobserver.New(codexobserver.Config{})
+	if observerErr != nil {
+		// Observation is optional and inferred. Do not include a path-bearing OS
+		// error in logs, and never make official quota collection unavailable.
+		fmt.Fprintln(stderr, "Codex session observation is unavailable")
+		codexObserver = nil
+	}
 	config := companionruntime.Config{
 		Version:        version,
 		CodexCollector: codexCollector,
+		CodexObserver:  codexObserver,
 		Management: companionruntime.ManagementConfig{
 			Address:       *managementAddress,
 			AllowLAN:      *allowLANManagement,

@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/aisnapshot"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/codexappserver"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/devicelink"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
@@ -52,12 +54,14 @@ type Runtime struct {
 	pairing           *pairing.Service
 	deviceLink        *devicelink.Hub
 	codexCollector    CodexCollector
+	codexObserver     CodexObserver
 
 	mu             sync.RWMutex
 	status         Status
 	started        bool
 	codexUpdate    codexappserver.Update
 	hasCodexUpdate bool
+	codexSessions  []aisnapshot.Session
 }
 
 func New(config Config) (*Runtime, error) {
@@ -91,6 +95,7 @@ func New(config Config) (*Runtime, error) {
 		pairing:         normalized.Pairing,
 		deviceLink:      deviceLink,
 		codexCollector:  normalized.CodexCollector,
+		codexObserver:   normalized.CodexObserver,
 		status:          status,
 	}, nil
 }
@@ -111,7 +116,22 @@ func (application *Runtime) CodexUpdate() (codexappserver.Update, bool) {
 	if !application.hasCodexUpdate {
 		return codexappserver.Update{}, false
 	}
-	return application.codexUpdate.Clone(), true
+	update := application.codexUpdate.Clone()
+	seen := make(map[string]struct{}, len(update.Sessions)+len(application.codexSessions))
+	for _, session := range update.Sessions {
+		seen[session.ID] = struct{}{}
+	}
+	for _, session := range application.codexSessions {
+		if len(update.Sessions) >= 16 {
+			break
+		}
+		if _, duplicate := seen[session.ID]; duplicate {
+			continue
+		}
+		seen[session.ID] = struct{}{}
+		update.Sessions = append(update.Sessions, cloneSession(session))
+	}
+	return update, true
 }
 
 func (application *Runtime) LoadCodexThread(ctx context.Context, threadID string) error {
@@ -198,13 +218,24 @@ func (application *Runtime) Run(ctx context.Context) error {
 		serveResults <- serveResult{name: "Device Hub", err: deviceHubServer.Serve(deviceHubListener)}
 	}()
 	collectorContext, stopCollector := context.WithCancel(ctx)
-	var collectorDone chan error
+	collectorDone := make([]chan error, 0, 2)
 	if application.codexCollector != nil {
-		collectorDone = make(chan error, 1)
+		done := make(chan error, 1)
+		collectorDone = append(collectorDone, done)
 		go func() {
-			collectorDone <- application.codexCollector.Run(
+			done <- application.codexCollector.Run(
 				collectorContext,
 				application.publishCodexUpdate,
+			)
+		}()
+	}
+	if application.codexObserver != nil {
+		done := make(chan error, 1)
+		collectorDone = append(collectorDone, done)
+		go func() {
+			done <- application.codexObserver.Run(
+				collectorContext,
+				application.publishCodexSessions,
 			)
 		}()
 	}
@@ -221,9 +252,9 @@ func (application *Runtime) Run(ctx context.Context) error {
 	defer cancel()
 	application.deviceLink.Close()
 	shutdownErrors := shutdownServers(shutdownContext, managementServer, deviceHubServer)
-	if collectorDone != nil {
+	for _, done := range collectorDone {
 		select {
-		case <-collectorDone:
+		case <-done:
 		case <-shutdownContext.Done():
 			// Collector failure and latency remain scoped to the Codex Provider.
 			// Listener shutdown must not inherit that failure mode.
@@ -249,6 +280,81 @@ func (application *Runtime) publishCodexUpdate(
 	application.hasCodexUpdate = true
 	application.mu.Unlock()
 	return nil
+}
+
+func (application *Runtime) publishCodexSessions(
+	_ context.Context,
+	sessions []aisnapshot.Session,
+) error {
+	if len(sessions) > 16 {
+		return ErrCodexUnavailable
+	}
+	for _, session := range sessions {
+		if !validInferredCodexSession(session) {
+			return ErrCodexUnavailable
+		}
+	}
+	cloned := make([]aisnapshot.Session, len(sessions))
+	for index := range sessions {
+		cloned[index] = cloneSession(sessions[index])
+	}
+	application.mu.Lock()
+	application.codexSessions = cloned
+	application.mu.Unlock()
+	return nil
+}
+
+func validInferredCodexSession(session aisnapshot.Session) bool {
+	if session.SchemaVersion != (aisnapshot.SchemaVersion{Major: 1, Minor: 0}) ||
+		session.ProviderID != "codex" || session.DisplayName != nil ||
+		session.Source != aisnapshot.SessionSourceProcessJSONL ||
+		session.Confidence != aisnapshot.ConfidenceInferred ||
+		session.StartedAt != nil || session.StartedAtUnixMS != nil ||
+		session.LastActivityAtUnixMS != nil || session.DurationSeconds != nil ||
+		session.TurnTokens != nil || session.ContextUsedBasisPoints != nil ||
+		(session.State != aisnapshot.SessionRunning &&
+			session.State != aisnapshot.SessionRecent &&
+			session.State != aisnapshot.SessionEnded &&
+			session.State != aisnapshot.SessionUnknown) {
+		return false
+	}
+	if len(session.ID) != len("codex_")+16 || !strings.HasPrefix(session.ID, "codex_") {
+		return false
+	}
+	for _, character := range session.ID[len("codex_"):] {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	if session.LastActivityAt != nil {
+		parsed, err := time.Parse(time.RFC3339Nano, *session.LastActivityAt)
+		if err != nil || parsed.Location() != time.UTC ||
+			parsed.Format(time.RFC3339Nano) != *session.LastActivityAt {
+			return false
+		}
+	}
+	return true
+}
+
+func cloneSession(source aisnapshot.Session) aisnapshot.Session {
+	cloned := source
+	cloned.DisplayName = cloneRuntimePointer(source.DisplayName)
+	cloned.StartedAt = cloneRuntimePointer(source.StartedAt)
+	cloned.StartedAtUnixMS = cloneRuntimePointer(source.StartedAtUnixMS)
+	cloned.LastActivityAt = cloneRuntimePointer(source.LastActivityAt)
+	cloned.LastActivityAtUnixMS = cloneRuntimePointer(source.LastActivityAtUnixMS)
+	cloned.DurationSeconds = cloneRuntimePointer(source.DurationSeconds)
+	cloned.TurnTokens = cloneRuntimePointer(source.TurnTokens)
+	cloned.ContextUsedBasisPoints = cloneRuntimePointer(source.ContextUsedBasisPoints)
+	return cloned
+}
+
+func cloneRuntimePointer[T any](value *T) *T {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 func shutdownServers(ctx context.Context, servers ...*http.Server) error {
