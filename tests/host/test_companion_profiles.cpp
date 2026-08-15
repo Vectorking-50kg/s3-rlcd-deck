@@ -375,6 +375,129 @@ void concurrent_setup_submissions_serialize_duplicate_profile_updates()
     deck_companion_profiles_destroy(profiles);
 }
 
+void candidate_success_is_atomic_and_cannot_override_a_newer_manual_selection()
+{
+    FakeStorage storage;
+    FakePairing pairing;
+    deck_companion_profiles_t *profiles = create_profiles(&storage, &pairing);
+    std::string ids[3];
+    for (unsigned index = 0; index < 3; ++index) {
+        set_credential(&pairing, index);
+        ids[index] = pairing.next.certificate_fingerprint;
+        const deck_companion_pair_request_t add = request(index);
+        assert(deck_companion_profiles_pair(profiles, &add) ==
+               DECK_COMPANION_PAIR_PAIRED);
+    }
+    assert(deck_companion_profiles_select_active(profiles, ids[0].c_str()) ==
+           DECK_COMPANION_PROFILE_UPDATED);
+    const uint32_t failover_generation = snapshot(profiles).generation;
+
+    deck_companion_profile_secret_t candidate{};
+    assert(deck_companion_profiles_secret_for(
+        profiles,
+        ids[1].c_str(),
+        failover_generation,
+        &candidate
+    ));
+    assert(std::string(candidate.profile_id) == ids[1]);
+    deck_companion_profile_secret_clear(&candidate);
+
+    assert(deck_companion_profiles_activate_on_success(
+               profiles,
+               ids[1].c_str(),
+               failover_generation,
+               1'234'000
+           ) == DECK_COMPANION_PROFILE_UPDATED);
+    deck_companion_profiles_snapshot_t current = snapshot(profiles);
+    assert(std::string(current.active_profile_id) == ids[1]);
+    bool saw_success = false;
+    for (size_t index = 0; index < current.count; ++index) {
+        if (std::string(current.profiles[index].profile_id) == ids[1]) {
+            assert(current.profiles[index].last_success_unix_ms == 1'234'000);
+            saw_success = true;
+        }
+    }
+    assert(saw_success);
+
+    const uint32_t monotonic_generation = current.generation;
+    assert(deck_companion_profiles_activate_on_success(
+               profiles,
+               ids[1].c_str(),
+               monotonic_generation,
+               1'000
+           ) == DECK_COMPANION_PROFILE_UPDATED);
+    current = snapshot(profiles);
+    for (size_t index = 0; index < current.count; ++index) {
+        if (std::string(current.profiles[index].profile_id) == ids[1]) {
+            assert(current.profiles[index].last_success_unix_ms == 1'234'000);
+        }
+    }
+
+    const uint32_t stale_generation = current.generation;
+    assert(deck_companion_profiles_select_active(profiles, ids[2].c_str()) ==
+           DECK_COMPANION_PROFILE_UPDATED);
+    assert(deck_companion_profiles_activate_on_success(
+               profiles,
+               ids[0].c_str(),
+               stale_generation,
+               1'235'000
+           ) == DECK_COMPANION_PROFILE_STALE_GENERATION);
+    current = snapshot(profiles);
+    assert(std::string(current.active_profile_id) == ids[2]);
+    assert(!deck_companion_profiles_secret_for(
+        profiles,
+        ids[0].c_str(),
+        stale_generation,
+        &candidate
+    ));
+    deck_companion_profiles_destroy(profiles);
+}
+
+void failed_candidate_commit_preserves_the_active_and_other_profile_secrets()
+{
+    FakeStorage storage;
+    FakePairing pairing;
+    deck_companion_profiles_t *profiles = create_profiles(&storage, &pairing);
+    std::string ids[2];
+    std::string tokens[2];
+    for (unsigned index = 0; index < 2; ++index) {
+        set_credential(&pairing, index);
+        ids[index] = pairing.next.certificate_fingerprint;
+        tokens[index] = pairing.next.token;
+        const deck_companion_pair_request_t add = request(index);
+        assert(deck_companion_profiles_pair(profiles, &add) ==
+               DECK_COMPANION_PAIR_PAIRED);
+    }
+    assert(deck_companion_profiles_select_active(profiles, ids[0].c_str()) ==
+           DECK_COMPANION_PROFILE_UPDATED);
+    const uint32_t generation = snapshot(profiles).generation;
+    storage.fail_write = DECK_COMPANION_STORAGE_ACTIVE_MARKER;
+    assert(deck_companion_profiles_activate_on_success(
+               profiles,
+               ids[1].c_str(),
+               generation,
+               55'000
+           ) == DECK_COMPANION_PROFILE_STORAGE_FAILURE);
+    deck_companion_profiles_snapshot_t current = snapshot(profiles);
+    assert(std::string(current.active_profile_id) == ids[0]);
+
+    deck_companion_profile_secret_t secret{};
+    assert(deck_companion_profiles_secret_for(
+        profiles,
+        ids[1].c_str(),
+        current.generation,
+        &secret
+    ));
+    assert(std::string(secret.token) == tokens[1]);
+    deck_companion_profile_secret_clear(&secret);
+    assert(deck_companion_profiles_revoke(profiles, ids[1].c_str()) ==
+           DECK_COMPANION_PROFILE_STORAGE_FAILURE);
+    current = snapshot(profiles);
+    assert(current.count == 2);
+    assert(std::string(current.active_profile_id) == ids[0]);
+    deck_companion_profiles_destroy(profiles);
+}
+
 }  // namespace
 
 int main()
@@ -384,5 +507,7 @@ int main()
     capacity_update_selection_and_revoke_are_transactional();
     storage_failure_keeps_the_last_valid_set_across_restart();
     concurrent_setup_submissions_serialize_duplicate_profile_updates();
+    candidate_success_is_atomic_and_cannot_override_a_newer_manual_selection();
+    failed_candidate_commit_preserves_the_active_and_other_profile_secrets();
     return 0;
 }

@@ -315,7 +315,14 @@ uses discovery trust: the `companion_link` module initiates WSS with the exact s
 certificate, device identity, and per-Deck Token. It sends `device.hello` first, accepts
 only strict version-1 heartbeat frames up to 16 KiB, marks the Companion offline after 30
 seconds without a valid heartbeat, and reconnects with exponential delay capped at 30
-seconds. The ESP-IDF `tcp_transport` component is compiled without log calls because its
+seconds. After 30 continuous offline seconds, a bounded Failover Round tries the other
+Profiles by priority, last-success, and stable Profile order. A candidate becomes the sticky
+Active only when its first authenticated heartbeat and generation-fenced Profile transaction
+both succeed; all-offline rounds return to the previous Active and wait another full window.
+Manual recovery selection, Pairing/address changes, and revocation cancel stale rounds, and
+transport generations reject queued events from older WSS clients. Snapshot data remains stale
+and any Web TX Owner is revoked before the replacement transport starts. The ESP-IDF
+`tcp_transport` component is compiled without log calls because its
 stock handshake error path prints custom headers; Deck-owned diagnostics remain redacted.
 All credentials remain private to the Profile and Device Link modules.
 

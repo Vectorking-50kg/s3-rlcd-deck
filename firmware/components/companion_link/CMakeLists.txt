@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "deck_companion_link.cpp"
+        "deck_companion_failover.cpp"
         "deck_companion_link_frame.cpp"
         "deck_companion_link_message.cpp"
         "deck_companion_link_timing.cpp"

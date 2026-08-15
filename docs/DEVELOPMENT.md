@@ -661,6 +661,13 @@ Companion 使用本地 SQLite 保存最近 90 天的小时级用量、余额和�
 - 用户可在恢复页手动选择 Active Companion。
 - Companion 之间不自动同步配置；使用加密备份手工迁移。
 
+故障切换只在连续离线满 30 秒后开始一轮：按优先级降序、last-success 降序和稳定
+Profile 顺序依次尝试其余候选；全部失败则回到原 Active，并重新等待完整窗口。候选首个
+有效心跳与 Active/last-success 的事务提交同时成功后才完成切换。所有候选读取与提交都绑定
+Profile generation，配对、地址更新、撤销或恢复页手动选择会使旧决定失效；切换期间 Snapshot
+保持 STALE，新的 WSS 连接必须等 Serial Web TX Owner 完成撤权。完整决定见
+[ADR 0022](adr/0022-keep-companion-failover-sticky-and-generation-fenced.md)。
+
 ## 10. 设备协议
 
 ### 10.1 WSS 连接

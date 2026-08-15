@@ -126,6 +126,7 @@ typedef enum {
     DECK_COMPANION_PROFILE_UPDATED = 0,
     DECK_COMPANION_PROFILE_NOT_FOUND,
     DECK_COMPANION_PROFILE_INVALID_ARGUMENT,
+    DECK_COMPANION_PROFILE_STALE_GENERATION,
     DECK_COMPANION_PROFILE_STORAGE_FAILURE,
 } deck_companion_profile_update_result_t;
 
@@ -155,12 +156,26 @@ deck_companion_profile_update_result_t deck_companion_profiles_record_success(
     const char *profile_id,
     uint64_t unix_ms
 );
+/* Atomically makes one candidate sticky and records its first valid heartbeat. */
+deck_companion_profile_update_result_t deck_companion_profiles_activate_on_success(
+    deck_companion_profiles_t *profiles,
+    const char *profile_id,
+    uint32_t expected_generation,
+    uint64_t unix_ms
+);
 bool deck_companion_profiles_snapshot(
     const deck_companion_profiles_t *profiles,
     deck_companion_profiles_snapshot_t *snapshot
 );
 bool deck_companion_profiles_active_secret(
     const deck_companion_profiles_t *profiles,
+    deck_companion_profile_secret_t *secret
+);
+/* Copies one candidate only if the complete Profile set still has this generation. */
+bool deck_companion_profiles_secret_for(
+    const deck_companion_profiles_t *profiles,
+    const char *profile_id,
+    uint32_t expected_generation,
     deck_companion_profile_secret_t *secret
 );
 void deck_companion_profile_secret_clear(deck_companion_profile_secret_t *secret);

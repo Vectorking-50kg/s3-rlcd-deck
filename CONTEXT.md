@@ -71,6 +71,10 @@ _Avoid_: Login, device discovery
 A Deck-owned record of one paired Companion's identity, trust material, connection location, preference, and last successful contact.
 _Avoid_: Server profile, account
 
+**Failover Round**:
+The bounded, priority-ordered attempt of the other Companion Profiles after the Active Companion has remained offline for 30 continuous seconds.
+_Avoid_: Discovery sweep, preemption
+
 **Device Hub**:
 The Companion-facing surface dedicated to paired Deck connections and minimal device health. It is distinct from the management Web used by people.
 _Avoid_: Management API, Web console
