@@ -158,6 +158,42 @@ the service's copy APIs and never receive internal queues or block ownership. Th
 path decision is recorded in
 [`ADR 0018`](../docs/adr/0018-fan-out-uart-rx-through-a-fixed-block-router.md).
 
+## USB Serial/JTAG bridge
+
+The release firmware installs the ESP-IDF USB Serial/JTAG driver only inside an
+active Serial Session. Two low-priority tasks adapt that single CDC endpoint to
+the Router without ever running on the UART RX task: the output task holds at
+most one copied 256-byte Router block across partial writes or USB reconnects,
+and the input task moves raw bytes through a fixed 16-block queue to the sole
+Session owner. No path decodes UTF-8, adds line endings, logs payload, or writes
+it to Flash.
+
+USB bus presence is not treated as proof that a computer has opened the COM
+port. If the port is unopened, occupied, or stops reading, the 4 KiB driver TX
+ring eventually applies zero-progress backpressure; only the USB sink then
+overwrites its own oldest Router references. The Router, WSS, history, and UART
+RX continue independently. A disconnect does not end the Serial Session. A
+partially handed-off block remains bridge-owned and resumes after reconnect,
+while exit zeroes it together with every current-session queue.
+
+USB input is stamped at read time with the owner's published generation.
+Generation-matching blocks are serialized by the owner into UART1's unbuffered hardware
+FIFO with partial-progress handling. Bytes observed while Web owns TX are never
+queued for later transmission: their count is transferred to the owner and
+added to `usb_tx_rejected`, even if the Lease returns to USB before the owner
+processes that count. A read spanning a complete `USB → WEB → USB` transition
+also fails its generation check and is rejected. Owner switches clear only
+unsent source queues; target RX output rings remain independent.
+
+The development/HIL firmware reserves USB Serial/JTAG for its structured
+diagnostic console and therefore does not install this bridge. The release
+configuration sets the ESP-IDF application console to `None` and enables this
+bridge instead. ROM boot text may still precede the application after reset;
+target bridging begins only after a physical Serial Session entry, so ROM or
+HIL text is never sent to GPIO17. The project neither burns USB eFuses nor links
+a second TinyUSB device stack. The decision is recorded in
+[`ADR 0019`](../docs/adr/0019-isolate-the-release-usb-serial-jtag-bridge.md).
+
 ## Safe boot smoke test
 
 With exactly one Deck connected and its serial port free:

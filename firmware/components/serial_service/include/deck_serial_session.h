@@ -108,6 +108,19 @@ bool deck_serial_session_accept_usb_input(
     deck_serial_session_t *session,
     size_t byte_count
 );
+bool deck_serial_session_accept_usb_input_generation(
+    deck_serial_session_t *session,
+    uint64_t owner_generation,
+    size_t byte_count
+);
+/*
+ * Records bytes whose receive-time owner decision was WEB_TX even if the
+ * owner task observes the record after the Lease has returned to USB.
+ */
+bool deck_serial_session_record_usb_rejection(
+    deck_serial_session_t *session,
+    uint64_t byte_count
+);
 void deck_serial_session_tick(deck_serial_session_t *session, uint64_t now_ms);
 bool deck_serial_session_snapshot(
     const deck_serial_session_t *session,

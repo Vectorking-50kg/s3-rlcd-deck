@@ -5,6 +5,7 @@
 
 #include "deck_serial_session.h"
 #include "deck_serial_router.h"
+#include "deck_serial_usb_bridge.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -87,6 +88,10 @@ bool deck_serial_service_sink_stats(
 bool deck_serial_service_router_stats(
     deck_serial_service_t *service,
     deck_serial_router_stats_t *stats
+);
+bool deck_serial_service_usb_stats(
+    deck_serial_service_t *service,
+    deck_serial_usb_bridge_stats_t *stats
 );
 
 #ifdef __cplusplus

@@ -1,5 +1,7 @@
 #include "deck_serial_service.h"
 #include "deck_serial_router.h"
+#include "deck_serial_usb_bridge.h"
+#include "sdkconfig.h"
 
 #include <algorithm>
 #include <atomic>
@@ -8,6 +10,7 @@
 
 #include "driver/gpio.h"
 #include "driver/uart.h"
+#include "driver/usb_serial_jtag.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -22,10 +25,15 @@ constexpr uart_port_t kTargetUart = UART_NUM_1;
 constexpr gpio_num_t kTargetRx = GPIO_NUM_44;
 constexpr gpio_num_t kTargetTx = GPIO_NUM_17;
 constexpr int kTargetRxBufferBytes = 2'048;
-constexpr int kTargetTxBufferBytes = 2'048;
+// TX stays unbuffered so the sole Session owner can hand only immediately
+// writable FIFO bytes to hardware and can clear unsent source queues during
+// an owner transition.
+constexpr int kTargetTxBufferBytes = 0;
 constexpr size_t kUartEventQueueDepth = 20;
 constexpr size_t kInputBlockCount = 16;
 constexpr size_t kInputQueueDepth = kInputBlockCount;
+constexpr size_t kUsbInputQueueDepth = 16;
+constexpr size_t kUsbDriverBufferBytes = 4U * 1024U;
 constexpr size_t kUsbSinkBytes = 16U * 1024U;
 constexpr size_t kWssSinkBytes = 16U * 1024U;
 constexpr size_t kStatsSinkBytes = DECK_SERIAL_ROUTER_BLOCK_BYTES;
@@ -33,9 +41,11 @@ constexpr size_t kCommandQueueDepth = 16;
 constexpr uint32_t kOwnerTaskStackBytes = 4'096;
 constexpr uint32_t kRxTaskStackBytes = 3'584;
 constexpr uint32_t kRouterTaskStackBytes = 3'584;
+constexpr uint32_t kUsbTaskStackBytes = 3'584;
 constexpr UBaseType_t kOwnerTaskPriority = 4;
 constexpr UBaseType_t kRxTaskPriority = 7;
 constexpr UBaseType_t kRouterTaskPriority = 6;
+constexpr UBaseType_t kUsbTaskPriority = 3;
 constexpr TickType_t kOwnerPollTicks = pdMS_TO_TICKS(100);
 constexpr TickType_t kDataPollTicks = pdMS_TO_TICKS(20);
 constexpr TickType_t kLifecycleTimeoutTicks = pdMS_TO_TICKS(2'000);
@@ -46,6 +56,16 @@ constexpr EventBits_t kRouterReadyBit = BIT1;
 constexpr EventBits_t kRxStoppedBit = BIT2;
 constexpr EventBits_t kRouterStoppedBit = BIT3;
 constexpr EventBits_t kDataStartBit = BIT4;
+constexpr EventBits_t kUsbOutputReadyBit = BIT5;
+constexpr EventBits_t kUsbInputReadyBit = BIT6;
+constexpr EventBits_t kUsbOutputStoppedBit = BIT7;
+constexpr EventBits_t kUsbInputStoppedBit = BIT8;
+
+#ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
+constexpr bool kUsbBridgeEnabled = false;
+#else
+constexpr bool kUsbBridgeEnabled = true;
+#endif
 
 #ifdef CONFIG_DECK_SERIAL_HISTORY_KIB
 constexpr size_t kHistoryBytes =
@@ -76,6 +96,19 @@ struct Command {
     uint64_t control_epoch;
 };
 
+struct UsbInputBlock {
+    uint16_t length;
+    uint64_t owner_generation;
+    uint8_t bytes[DECK_SERIAL_ROUTER_BLOCK_BYTES];
+};
+
+enum class UsbDrainResult : uint8_t {
+    idle,
+    progress,
+    stalled,
+    rejected,
+};
+
 uint64_t monotonic_ms()
 {
     return static_cast<uint64_t>(esp_timer_get_time() / 1'000);
@@ -101,13 +134,18 @@ void clear_web_tx(void *context);
 
 struct SerialDataPath {
     deck_serial_router_t *router;
+    deck_serial_usb_bridge_t *usb_bridge;
     QueueHandle_t uart_events;
     QueueHandle_t free_blocks;
     QueueHandle_t filled_blocks;
+    QueueHandle_t usb_input_blocks;
     EventGroupHandle_t lifecycle;
     TaskHandle_t rx_task;
     TaskHandle_t router_task;
+    TaskHandle_t usb_output_task;
+    TaskHandle_t usb_input_task;
     deck_serial_input_block_t *input_blocks;
+    bool usb_driver_owned;
     std::atomic<bool> stop_requested;
 };
 
@@ -122,6 +160,12 @@ struct deck_serial_service {
     deck_serial_session_snapshot_t latest_snapshot;
     deck_serial_router_stats_t published_router_stats;
     bool has_published_router_stats;
+    UsbInputBlock pending_usb_input;
+    size_t pending_usb_offset;
+    bool has_pending_usb_input;
+    bool pending_usb_authorized;
+    std::atomic<uint64_t> usb_input_authority_generation;
+    std::atomic<uint64_t> pending_usb_rejected_bytes;
     std::atomic<bool> stop_requested;
     std::atomic<uint64_t> control_epoch;
     SemaphoreHandle_t router_mutex;
@@ -141,6 +185,139 @@ void *router_allocate(void *, size_t size, bool external_memory)
 void router_deallocate(void *, void *memory)
 {
     heap_caps_free(memory);
+}
+
+void *usb_bridge_allocate(void *, size_t size)
+{
+    return heap_caps_calloc(1, size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+}
+
+void usb_bridge_deallocate(void *, void *memory)
+{
+    heap_caps_free(memory);
+}
+
+bool usb_connected(void *)
+{
+    return usb_serial_jtag_is_connected();
+}
+
+deck_serial_router_copy_result_t take_usb_output(
+    void *context,
+    deck_serial_routed_block_t *block
+)
+{
+    auto *service = static_cast<deck_serial_service_t *>(context);
+    if (service == nullptr || block == nullptr ||
+        xSemaphoreTake(service->router_mutex, kDataPollTicks) != pdTRUE) {
+        return DECK_SERIAL_ROUTER_COPY_INVALID;
+    }
+    const deck_serial_router_copy_result_t result =
+        service->data_path.router == nullptr
+            ? DECK_SERIAL_ROUTER_COPY_INVALID
+            : deck_serial_router_take(
+                  service->data_path.router,
+                  DECK_SERIAL_SINK_USB,
+                  block
+              );
+    xSemaphoreGive(service->router_mutex);
+    return result;
+}
+
+int write_usb_output(void *, const uint8_t *bytes, size_t size)
+{
+    if (bytes == nullptr || size == 0 ||
+        size > DECK_SERIAL_ROUTER_BLOCK_BYTES) {
+        return -1;
+    }
+    return usb_serial_jtag_write_bytes(bytes, size, 0);
+}
+
+bool usb_input_ready(void *context)
+{
+    auto *service = static_cast<deck_serial_service_t *>(context);
+    return service != nullptr &&
+           !service->data_path.stop_requested.load(std::memory_order_acquire) &&
+           service->data_path.usb_input_blocks != nullptr &&
+           (service->usb_input_authority_generation.load(
+                std::memory_order_acquire
+            ) == 0 ||
+            uxQueueSpacesAvailable(service->data_path.usb_input_blocks) != 0);
+}
+
+uint64_t usb_input_authority_generation(void *context)
+{
+    auto *service = static_cast<deck_serial_service_t *>(context);
+    return service == nullptr
+               ? 0
+               : service->usb_input_authority_generation.load(
+                     std::memory_order_acquire
+                 );
+}
+
+int read_usb_input(void *, uint8_t *bytes, size_t capacity)
+{
+    if (bytes == nullptr || capacity == 0 ||
+        capacity > DECK_SERIAL_ROUTER_BLOCK_BYTES) {
+        return -1;
+    }
+    return usb_serial_jtag_read_bytes(
+        bytes,
+        static_cast<uint32_t>(capacity),
+        kDataPollTicks
+    );
+}
+
+bool submit_usb_input(
+    void *context,
+    const uint8_t *bytes,
+    size_t size,
+    uint64_t authority_generation
+)
+{
+    auto *service = static_cast<deck_serial_service_t *>(context);
+    if (service == nullptr || bytes == nullptr || size == 0 ||
+        size > DECK_SERIAL_ROUTER_BLOCK_BYTES ||
+        service->data_path.usb_input_blocks == nullptr ||
+        service->stop_requested.load(std::memory_order_acquire)) {
+        return false;
+    }
+    if (authority_generation == 0) {
+        uint64_t current = service->pending_usb_rejected_bytes.load(
+            std::memory_order_relaxed
+        );
+        while (true) {
+            const uint64_t amount = static_cast<uint64_t>(size);
+            const uint64_t next =
+                current > UINT64_MAX - amount ? UINT64_MAX : current + amount;
+            if (service->pending_usb_rejected_bytes.compare_exchange_weak(
+                    current,
+                    next,
+                    std::memory_order_release,
+                    std::memory_order_relaxed
+                )) {
+                break;
+            }
+        }
+        if (service->owner_task != nullptr) {
+            xTaskNotifyGive(service->owner_task);
+        }
+        return true;
+    }
+    UsbInputBlock block{};
+    block.length = static_cast<uint16_t>(size);
+    block.owner_generation = authority_generation;
+    std::memcpy(block.bytes, bytes, size);
+    const bool submitted = xQueueSend(
+        service->data_path.usb_input_blocks,
+        &block,
+        0
+    ) == pdTRUE;
+    std::memset(&block, 0, sizeof(block));
+    if (submitted && service->owner_task != nullptr) {
+        xTaskNotifyGive(service->owner_task);
+    }
+    return submitted;
 }
 
 void note_uart_error(
@@ -299,9 +476,95 @@ void router_task(void *context)
     vTaskSuspend(nullptr);
 }
 
+void usb_output_task(void *context)
+{
+    auto *service = static_cast<deck_serial_service_t *>(context);
+    xEventGroupSetBits(service->data_path.lifecycle, kUsbOutputReadyBit);
+    while (!service->data_path.stop_requested.load(std::memory_order_acquire) &&
+           (xEventGroupWaitBits(
+                service->data_path.lifecycle,
+                kDataStartBit,
+                pdFALSE,
+                pdTRUE,
+                kDataPollTicks
+            ) & kDataStartBit) == 0) {
+    }
+    while (!service->data_path.stop_requested.load(std::memory_order_acquire)) {
+        const deck_serial_usb_pump_result_t result =
+            deck_serial_usb_bridge_pump_output(
+                service->data_path.usb_bridge
+            );
+        if (result == DECK_SERIAL_USB_PROGRESS) {
+            taskYIELD();
+        } else {
+            vTaskDelay(kDataPollTicks);
+        }
+    }
+    xEventGroupSetBits(service->data_path.lifecycle, kUsbOutputStoppedBit);
+    vTaskSuspend(nullptr);
+}
+
+void usb_input_task(void *context)
+{
+    auto *service = static_cast<deck_serial_service_t *>(context);
+    xEventGroupSetBits(service->data_path.lifecycle, kUsbInputReadyBit);
+    while (!service->data_path.stop_requested.load(std::memory_order_acquire) &&
+           (xEventGroupWaitBits(
+                service->data_path.lifecycle,
+                kDataStartBit,
+                pdFALSE,
+                pdTRUE,
+                kDataPollTicks
+            ) & kDataStartBit) == 0) {
+    }
+    while (!service->data_path.stop_requested.load(std::memory_order_acquire)) {
+        const deck_serial_usb_pump_result_t result =
+            deck_serial_usb_bridge_pump_input(
+                service->data_path.usb_bridge
+            );
+        if (result == DECK_SERIAL_USB_PROGRESS) {
+            taskYIELD();
+        } else {
+            vTaskDelay(kDataPollTicks);
+        }
+    }
+    xEventGroupSetBits(service->data_path.lifecycle, kUsbInputStoppedBit);
+    vTaskSuspend(nullptr);
+}
+
+void clear_pending_usb_input(deck_serial_service_t *service)
+{
+    std::memset(
+        &service->pending_usb_input,
+        0,
+        sizeof(service->pending_usb_input)
+    );
+    service->pending_usb_offset = 0;
+    service->has_pending_usb_input = false;
+    service->pending_usb_authorized = false;
+}
+
+void clear_usb_input_state(deck_serial_service_t *service)
+{
+    if (service->data_path.usb_input_blocks != nullptr) {
+        (void)xQueueReset(service->data_path.usb_input_blocks);
+    }
+    clear_pending_usb_input(service);
+}
+
 void release_data_path_allocations(deck_serial_service_t *service)
 {
     SerialDataPath &path = service->data_path;
+    service->usb_input_authority_generation.store(
+        0,
+        std::memory_order_release
+    );
+    service->pending_usb_rejected_bytes.store(0, std::memory_order_release);
+    clear_usb_input_state(service);
+    if (path.usb_bridge != nullptr) {
+        deck_serial_usb_bridge_destroy(path.usb_bridge);
+        path.usb_bridge = nullptr;
+    }
     if (path.router != nullptr) {
         deck_serial_router_destroy(path.router);
         path.router = nullptr;
@@ -313,6 +576,10 @@ void release_data_path_allocations(deck_serial_service_t *service)
     if (path.filled_blocks != nullptr) {
         vQueueDelete(path.filled_blocks);
         path.filled_blocks = nullptr;
+    }
+    if (path.usb_input_blocks != nullptr) {
+        vQueueDelete(path.usb_input_blocks);
+        path.usb_input_blocks = nullptr;
     }
     if (path.lifecycle != nullptr) {
         vEventGroupDelete(path.lifecycle);
@@ -328,6 +595,7 @@ void release_data_path_allocations(deck_serial_service_t *service)
         path.input_blocks = nullptr;
     }
     path.uart_events = nullptr;
+    path.usb_driver_owned = false;
     path.stop_requested.store(false, std::memory_order_release);
 }
 
@@ -341,6 +609,12 @@ bool stop_data_path_tasks(deck_serial_service_t *service)
     }
     if (path.router_task != nullptr) {
         required |= kRouterStoppedBit;
+    }
+    if (path.usb_output_task != nullptr) {
+        required |= kUsbOutputStoppedBit;
+    }
+    if (path.usb_input_task != nullptr) {
+        required |= kUsbInputStoppedBit;
     }
     if (required != 0) {
         const EventBits_t stopped = xEventGroupWaitBits(
@@ -361,6 +635,14 @@ bool stop_data_path_tasks(deck_serial_service_t *service)
     if (path.router_task != nullptr) {
         vTaskDelete(path.router_task);
         path.router_task = nullptr;
+    }
+    if (path.usb_output_task != nullptr) {
+        vTaskDelete(path.usb_output_task);
+        path.usb_output_task = nullptr;
+    }
+    if (path.usb_input_task != nullptr) {
+        vTaskDelete(path.usb_input_task);
+        path.usb_input_task = nullptr;
     }
     return true;
 }
@@ -385,13 +667,26 @@ bool prepare_data_path(deck_serial_service_t *service, uint64_t session_id)
 {
     SerialDataPath &path = service->data_path;
     if (path.router != nullptr || path.uart_events != nullptr ||
-        path.rx_task != nullptr || path.router_task != nullptr) {
+        path.usb_bridge != nullptr || path.rx_task != nullptr ||
+        path.router_task != nullptr || path.usb_output_task != nullptr ||
+        path.usb_input_task != nullptr) {
         return false;
     }
+    service->usb_input_authority_generation.store(
+        0,
+        std::memory_order_release
+    );
+    service->pending_usb_rejected_bytes.store(0, std::memory_order_release);
     path.stop_requested.store(false, std::memory_order_release);
     path.lifecycle = xEventGroupCreate();
     path.free_blocks = xQueueCreate(kInputQueueDepth, sizeof(void *));
     path.filled_blocks = xQueueCreate(kInputQueueDepth, sizeof(void *));
+    if constexpr (kUsbBridgeEnabled) {
+        path.usb_input_blocks = xQueueCreate(
+            kUsbInputQueueDepth,
+            sizeof(UsbInputBlock)
+        );
+    }
     path.input_blocks = static_cast<deck_serial_input_block_t *>(heap_caps_calloc(
         kInputBlockCount,
         sizeof(deck_serial_input_block_t),
@@ -404,9 +699,21 @@ bool prepare_data_path(deck_serial_service_t *service, uint64_t session_id)
         {router_allocate, router_deallocate, nullptr},
     };
     path.router = deck_serial_router_create(&router_config);
+    if constexpr (kUsbBridgeEnabled) {
+        const deck_serial_usb_bridge_config_t usb_config = {
+            {usb_connected, take_usb_output, write_usb_output,
+             usb_input_ready, usb_input_authority_generation, read_usb_input,
+             submit_usb_input, service},
+            {usb_bridge_allocate, usb_bridge_deallocate, nullptr},
+        };
+        path.usb_bridge = deck_serial_usb_bridge_create(&usb_config);
+    }
     if (path.lifecycle == nullptr || path.free_blocks == nullptr ||
         path.filled_blocks == nullptr || path.input_blocks == nullptr ||
-        path.router == nullptr || !register_data_sinks(path.router)) {
+        path.router == nullptr ||
+        (kUsbBridgeEnabled &&
+         (path.usb_input_blocks == nullptr || path.usb_bridge == nullptr)) ||
+        !register_data_sinks(path.router)) {
         release_data_path_allocations(service);
         return false;
     }
@@ -434,6 +741,25 @@ void abort_data_path_start(deck_serial_service_t *service)
     if (path.router_task != nullptr) {
         vTaskDelete(path.router_task);
         path.router_task = nullptr;
+    }
+    if (path.usb_output_task != nullptr) {
+        vTaskDelete(path.usb_output_task);
+        path.usb_output_task = nullptr;
+    }
+    if (path.usb_input_task != nullptr) {
+        vTaskDelete(path.usb_input_task);
+        path.usb_input_task = nullptr;
+    }
+    if (path.usb_driver_owned) {
+        if (usb_serial_jtag_driver_uninstall() != ESP_OK) {
+            // Keep every allocation and ownership flag intact. The Session
+            // installation-failure path immediately calls uninstall_uart(),
+            // which can retry the same bounded cleanup without losing the
+            // driver owner.
+            (void)set_target_tx_high_impedance(nullptr);
+            return;
+        }
+        path.usb_driver_owned = false;
     }
     if (uart_is_driver_installed(kTargetUart) &&
         uart_driver_delete(kTargetUart) != ESP_OK) {
@@ -479,8 +805,22 @@ bool install_target_uart_locked(
             kTargetRx,
             UART_PIN_NO_CHANGE,
             UART_PIN_NO_CHANGE
-        ) != ESP_OK ||
-        xTaskCreatePinnedToCore(
+        ) != ESP_OK) {
+        abort_data_path_start(service);
+        return false;
+    }
+    if constexpr (kUsbBridgeEnabled) {
+        usb_serial_jtag_driver_config_t usb_config = {
+            static_cast<uint32_t>(kUsbDriverBufferBytes),
+            static_cast<uint32_t>(kUsbDriverBufferBytes),
+        };
+        if (usb_serial_jtag_driver_install(&usb_config) != ESP_OK) {
+            abort_data_path_start(service);
+            return false;
+        }
+        path.usb_driver_owned = true;
+    }
+    if (xTaskCreatePinnedToCore(
             router_task,
             "serial_router",
             kRouterTaskStackBytes,
@@ -501,15 +841,42 @@ bool install_target_uart_locked(
         abort_data_path_start(service);
         return false;
     }
+    if constexpr (kUsbBridgeEnabled) {
+        if (xTaskCreatePinnedToCore(
+                usb_output_task,
+                "serial_usb_out",
+                kUsbTaskStackBytes,
+                service,
+                kUsbTaskPriority,
+                &path.usb_output_task,
+                1
+            ) != pdPASS ||
+            xTaskCreatePinnedToCore(
+                usb_input_task,
+                "serial_usb_in",
+                kUsbTaskStackBytes,
+                service,
+                kUsbTaskPriority,
+                &path.usb_input_task,
+                1
+            ) != pdPASS) {
+            abort_data_path_start(service);
+            return false;
+        }
+    }
+    const EventBits_t required_ready =
+        kRxReadyBit | kRouterReadyBit |
+        (kUsbBridgeEnabled
+             ? kUsbOutputReadyBit | kUsbInputReadyBit
+             : static_cast<EventBits_t>(0));
     const EventBits_t ready = xEventGroupWaitBits(
         path.lifecycle,
-        kRxReadyBit | kRouterReadyBit,
+        required_ready,
         pdFALSE,
         pdTRUE,
         kLifecycleTimeoutTicks
     );
-    if ((ready & (kRxReadyBit | kRouterReadyBit)) !=
-        (kRxReadyBit | kRouterReadyBit)) {
+    if ((ready & required_ready) != required_ready) {
         abort_data_path_start(service);
         return false;
     }
@@ -539,6 +906,12 @@ bool uninstall_target_uart(void *context)
     if (!stop_data_path_tasks(service)) {
         return false;
     }
+    if (path.usb_driver_owned) {
+        if (usb_serial_jtag_driver_uninstall() != ESP_OK) {
+            return false;
+        }
+        path.usb_driver_owned = false;
+    }
     if (uart_is_driver_installed(kTargetUart) &&
         uart_driver_delete(kTargetUart) != ESP_OK) {
         return false;
@@ -552,9 +925,16 @@ bool uninstall_target_uart(void *context)
     return set_target_tx_high_impedance(nullptr);
 }
 
-// These callbacks belong to future USB/Web -> target source queues. Router
-// sinks carry target RX output and must survive TX-owner transitions.
-void clear_usb_tx(void *) {}
+// Source queues are separate from Router target-RX sinks. Owner transitions
+// clear only unsent host -> target bytes; target output survives reconnects.
+void clear_usb_tx(void *context)
+{
+    auto *service = static_cast<deck_serial_service_t *>(context);
+    if (service != nullptr) {
+        clear_usb_input_state(service);
+    }
+}
+
 void clear_web_tx(void *) {}
 
 void publish(
@@ -631,6 +1011,90 @@ bool snapshot_changed(
            left.uart_installed != right.uart_installed;
 }
 
+void sync_usb_input_authority(deck_serial_service_t *service)
+{
+    deck_serial_session_snapshot_t current{};
+    const bool authorized =
+        service->session != nullptr &&
+        deck_serial_session_snapshot(service->session, &current) &&
+        current.state == DECK_SERIAL_USB_TX && current.uart_installed;
+    service->usb_input_authority_generation.store(
+        authorized ? current.owner_generation : 0,
+        std::memory_order_release
+    );
+}
+
+bool drain_usb_rejections(deck_serial_service_t *service)
+{
+    const uint64_t rejected = service->pending_usb_rejected_bytes.exchange(
+        0,
+        std::memory_order_acq_rel
+    );
+    if (rejected == 0) {
+        return false;
+    }
+    return deck_serial_session_record_usb_rejection(
+        service->session,
+        rejected
+    );
+}
+
+UsbDrainResult drain_usb_input(deck_serial_service_t *service)
+{
+    if (!kUsbBridgeEnabled || service->data_path.usb_input_blocks == nullptr) {
+        return UsbDrainResult::idle;
+    }
+    if (!service->has_pending_usb_input) {
+        if (xQueueReceive(
+                service->data_path.usb_input_blocks,
+                &service->pending_usb_input,
+                0
+            ) != pdTRUE) {
+            return UsbDrainResult::idle;
+        }
+        if (service->pending_usb_input.length == 0 ||
+            service->pending_usb_input.length >
+                DECK_SERIAL_ROUTER_BLOCK_BYTES) {
+            clear_pending_usb_input(service);
+            return UsbDrainResult::rejected;
+        }
+        service->has_pending_usb_input = true;
+    }
+    if (!service->pending_usb_authorized) {
+        if (!deck_serial_session_accept_usb_input_generation(
+                service->session,
+                service->pending_usb_input.owner_generation,
+                service->pending_usb_input.length
+            )) {
+            clear_pending_usb_input(service);
+            return UsbDrainResult::rejected;
+        }
+        service->pending_usb_authorized = true;
+    }
+    const size_t remaining =
+        static_cast<size_t>(service->pending_usb_input.length) -
+        service->pending_usb_offset;
+    const int written = uart_tx_chars(
+        kTargetUart,
+        reinterpret_cast<const char *>(
+            service->pending_usb_input.bytes + service->pending_usb_offset
+        ),
+        static_cast<uint32_t>(remaining)
+    );
+    if (written < 0 || static_cast<size_t>(written) > remaining) {
+        clear_pending_usb_input(service);
+        return UsbDrainResult::rejected;
+    }
+    if (written == 0) {
+        return UsbDrainResult::stalled;
+    }
+    service->pending_usb_offset += static_cast<size_t>(written);
+    if (service->pending_usb_offset == service->pending_usb_input.length) {
+        clear_pending_usb_input(service);
+    }
+    return UsbDrainResult::progress;
+}
+
 void process_command(deck_serial_service_t *service, const Command &command)
 {
     deck_serial_command_result_t result{};
@@ -638,6 +1102,16 @@ void process_command(deck_serial_service_t *service, const Command &command)
     const uint64_t now_ms = monotonic_ms();
     // Expiry must advance even when control producers keep the queue busy.
     deck_serial_session_tick(service->session, now_ms);
+    if (command.kind == CommandKind::enter ||
+        command.kind == CommandKind::exit ||
+        command.kind == CommandKind::request_web ||
+        command.kind == CommandKind::web_disconnect ||
+        command.kind == CommandKind::stop) {
+        service->usb_input_authority_generation.store(
+            0,
+            std::memory_order_release
+        );
+    }
     switch (command.kind) {
         case CommandKind::enter:
             has_result = deck_serial_session_enter(
@@ -687,6 +1161,7 @@ void process_command(deck_serial_service_t *service, const Command &command)
             );
             break;
     }
+    sync_usb_input_authority(service);
     publish(service, has_result ? &result : nullptr);
 }
 
@@ -706,12 +1181,30 @@ void owner_task(void *context)
         xEventGroupSetBits(service->lifecycle, kStoppedBit);
         vTaskSuspend(nullptr);
     }
+    sync_usb_input_authority(service);
     xEventGroupSetBits(service->lifecycle, kReadyBit);
     publish(service, nullptr);
 
+    uint64_t next_router_alert_poll_ms = monotonic_ms();
     while (true) {
+        const uint64_t now_ms = monotonic_ms();
+        deck_serial_session_snapshot_t before{};
+        deck_serial_session_snapshot_t after{};
+        (void)deck_serial_session_snapshot(service->session, &before);
+        deck_serial_session_tick(service->session, now_ms);
+        (void)deck_serial_session_snapshot(service->session, &after);
+        sync_usb_input_authority(service);
+        const bool poll_router = now_ms >= next_router_alert_poll_ms;
+        const bool alert_changed = poll_router && router_alert_changed(service);
+        if (poll_router) {
+            next_router_alert_poll_ms = now_ms + 100U;
+        }
+        if (snapshot_changed(before, after) || alert_changed) {
+            publish(service, nullptr);
+        }
+
         Command command{};
-        if (xQueueReceive(service->commands, &command, kOwnerPollTicks) == pdTRUE) {
+        if (xQueueReceive(service->commands, &command, 0) == pdTRUE) {
             process_command(service, command);
             if (command.kind == CommandKind::stop) {
                 deck_serial_session_snapshot_t state{};
@@ -723,16 +1216,26 @@ void owner_task(void *context)
                     vTaskSuspend(nullptr);
                 }
             }
-        } else {
-            deck_serial_session_snapshot_t before{};
-            deck_serial_session_snapshot_t after{};
-            (void)deck_serial_session_snapshot(service->session, &before);
-            deck_serial_session_tick(service->session, monotonic_ms());
-            (void)deck_serial_session_snapshot(service->session, &after);
-            if (snapshot_changed(before, after) || router_alert_changed(service)) {
-                publish(service, nullptr);
-            }
+            continue;
         }
+
+        if (drain_usb_rejections(service)) {
+            publish(service, nullptr);
+            continue;
+        }
+
+        const UsbDrainResult drained = drain_usb_input(service);
+        if (drained == UsbDrainResult::rejected) {
+            publish(service, nullptr);
+            continue;
+        }
+        if (drained == UsbDrainResult::progress) {
+            continue;
+        }
+        const TickType_t wait =
+            drained == UsbDrainResult::stalled ? pdMS_TO_TICKS(1)
+                                               : kOwnerPollTicks;
+        (void)ulTaskNotifyTake(pdTRUE, wait);
     }
 }
 
@@ -744,7 +1247,13 @@ bool enqueue(deck_serial_service_t *service, const Command &command)
     }
     Command stamped = command;
     stamped.control_epoch = service->control_epoch.load(std::memory_order_acquire);
-    return xQueueSend(service->commands, &stamped, 0) == pdTRUE;
+    if (xQueueSend(service->commands, &stamped, 0) != pdTRUE) {
+        return false;
+    }
+    if (service->owner_task != nullptr) {
+        xTaskNotifyGive(service->owner_task);
+    }
+    return true;
 }
 
 uint64_t advance_control_epoch(deck_serial_service_t *service)
@@ -879,6 +1388,9 @@ bool deck_serial_service_stop(deck_serial_service_t *service)
             }
             return false;
         }
+        if (service->owner_task != nullptr) {
+            xTaskNotifyGive(service->owner_task);
+        }
     }
     const EventBits_t stopped = xEventGroupWaitBits(
         service->lifecycle,
@@ -915,7 +1427,17 @@ bool deck_serial_service_exit(deck_serial_service_t *service)
     const Command command{
         CommandKind::exit, false, 0, 0, 0, control_epoch
     };
-    return xQueueSendToFront(service->commands, &command, kOwnerPollTicks) == pdTRUE;
+    if (xQueueSendToFront(
+            service->commands,
+            &command,
+            kOwnerPollTicks
+        ) != pdTRUE) {
+        return false;
+    }
+    if (service->owner_task != nullptr) {
+        xTaskNotifyGive(service->owner_task);
+    }
+    return true;
 }
 
 bool deck_serial_service_request_web(
@@ -1039,6 +1561,22 @@ bool deck_serial_service_router_stats(
     const bool result =
         service->data_path.router != nullptr &&
         deck_serial_router_stats(service->data_path.router, stats);
+    xSemaphoreGive(service->router_mutex);
+    return result;
+}
+
+bool deck_serial_service_usb_stats(
+    deck_serial_service_t *service,
+    deck_serial_usb_bridge_stats_t *stats
+)
+{
+    if (service == nullptr || stats == nullptr ||
+        xSemaphoreTake(service->router_mutex, kOwnerPollTicks) != pdTRUE) {
+        return false;
+    }
+    const bool result =
+        service->data_path.usb_bridge != nullptr &&
+        deck_serial_usb_bridge_stats(service->data_path.usb_bridge, stats);
     xSemaphoreGive(service->router_mutex);
     return result;
 }

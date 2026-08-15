@@ -107,6 +107,12 @@ void test_entry_switch_lease_and_exit()
     assert(!deck_serial_session_accept_usb_input(session, 5));
     assert(snapshot(session).usb_tx_rejected == 12);
 
+    // USB bytes observed while Web owned TX may reach the owner task after
+    // the lease has already returned to USB. Their receive-time decision is
+    // still authoritative and must remain rejected/countable.
+    assert(deck_serial_session_record_usb_rejection(session, 3));
+    assert(snapshot(session).usb_tx_rejected == 15);
+
     assert(deck_serial_session_web_activity(session, 1, lease_id, 1'199));
     assert(snapshot(session).lease_deadline_ms == 2'199);
     deck_serial_session_tick(session, 2'198);
@@ -117,28 +123,49 @@ void test_entry_switch_lease_and_exit()
     assert(state.lease_id == 0);
     assert(hardware.web_clears == 1);
     assert(deck_serial_session_accept_usb_input(session, 1));
+    assert(deck_serial_session_record_usb_rejection(session, 4));
+    assert(snapshot(session).usb_tx_rejected == 19);
+
+    // A read that started in an earlier USB owner generation cannot cross a
+    // complete USB -> Web -> USB ABA and become authorized again.
+    const uint64_t stale_usb_generation = state.owner_generation;
+    assert(deck_serial_session_request_web(session, 1, 11, true, 2'200, &result));
+    assert(deck_serial_session_request_web(session, 1, 12, false, 2'201, &result));
+    const auto returned_to_usb = snapshot(session);
+    assert(returned_to_usb.owner_generation != stale_usb_generation);
+    assert(!deck_serial_session_accept_usb_input_generation(
+        session,
+        stale_usb_generation,
+        6
+    ));
+    assert(deck_serial_session_accept_usb_input_generation(
+        session,
+        returned_to_usb.owner_generation,
+        6
+    ));
+    assert(snapshot(session).usb_tx_rejected == 25);
 
     // A response replay is only valid while the transition it describes is
     // still current. It must not claim WEB TX after the lease expired.
-    assert(deck_serial_session_request_web(session, 1, 10, true, 2'199, &replay));
+    assert(deck_serial_session_request_web(session, 1, 10, true, 2'202, &replay));
     assert(replay.code == DECK_SERIAL_COMMAND_STALE_REQUEST);
     assert(replay.state == DECK_SERIAL_USB_TX);
 
     // Stale session/request commands cannot reacquire ownership.
-    assert(deck_serial_session_request_web(session, 0, 11, true, 2'200, &result));
+    assert(deck_serial_session_request_web(session, 0, 13, true, 2'203, &result));
     assert(result.code == DECK_SERIAL_COMMAND_STALE_SESSION);
-    assert(deck_serial_session_request_web(session, 1, 9, true, 2'200, &result));
+    assert(deck_serial_session_request_web(session, 1, 9, true, 2'203, &result));
     assert(result.code == DECK_SERIAL_COMMAND_STALE_REQUEST);
     assert(snapshot(session).state == DECK_SERIAL_USB_TX);
 
-    assert(deck_serial_session_request_web(session, 1, 12, true, 2'300, &result));
+    assert(deck_serial_session_request_web(session, 1, 14, true, 2'300, &result));
     const uint64_t second_lease = result.lease_id;
-    assert(deck_serial_session_request_web(session, 1, 13, false, 2'301, &result));
+    assert(deck_serial_session_request_web(session, 1, 15, false, 2'301, &result));
     assert(result.code == DECK_SERIAL_COMMAND_APPLIED);
     assert(snapshot(session).state == DECK_SERIAL_USB_TX);
     assert(!deck_serial_session_web_disconnect(session, 1, second_lease));
 
-    assert(deck_serial_session_request_web(session, 1, 14, true, 2'302, &result));
+    assert(deck_serial_session_request_web(session, 1, 16, true, 2'302, &result));
     const uint64_t third_lease = result.lease_id;
     assert(deck_serial_session_web_disconnect(session, 1, third_lease));
     assert(snapshot(session).state == DECK_SERIAL_USB_TX);
@@ -149,8 +176,8 @@ void test_entry_switch_lease_and_exit()
     assert(state.state == DECK_SERIAL_DISARMED);
     assert(!state.uart_installed);
     assert(hardware.uninstalls == 1);
-    assert(hardware.usb_clears == 4);
-    assert(hardware.web_clears == 4);
+    assert(hardware.usb_clears == 5);
+    assert(hardware.web_clears == 5);
     assert(hardware.high_impedance == 2);
 
     assert(deck_serial_session_exit(session, 1, &result));
