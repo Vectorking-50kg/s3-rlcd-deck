@@ -65,10 +65,16 @@ func (application *Runtime) managementRoutes() http.Handler {
 		limits.SensitiveRateWindow,
 		application.handleLogin,
 	))
+	mux.HandleFunc("POST /api/v1/session/refresh", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.requireManagementSession(application.handleSessionRefresh),
+	))
 	mux.HandleFunc("GET /api/v1/status", application.requireManagementSession(application.handleStatus))
 	mux.HandleFunc("GET /api/v1/serial/status", application.requireManagementSession(application.handleSerialStatus))
 	mux.HandleFunc("GET /api/v1/serial/download", application.requireManagementSession(application.handleSerialDownload))
 	mux.HandleFunc("GET /api/v1/serial/observe", application.handleSerialObserve)
+	mux.HandleFunc("GET /api/v1/console", application.requireManagementSession(application.handleConsoleView))
 	mux.HandleFunc("GET /api/v1/providers", application.requireManagementSession(application.handleProviders))
 	mux.HandleFunc("POST /api/v1/providers", limitManagementRequests(
 		sensitiveRateLimiter,
@@ -153,12 +159,20 @@ func secureManagementResponses(next http.Handler) http.Handler {
 }
 
 func (application *Runtime) handleIssuePairingCode(response http.ResponseWriter, request *http.Request) {
+	advertisedAddress := application.deviceHubAdvertisedAddress(request.Context())
+	if advertisedAddress == "" {
+		http.Error(response, "Device Hub advertised address unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	issued, err := application.pairing.Issue(request.Context())
 	if err != nil {
 		http.Error(response, "pairing code unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	writeManagementJSON(response, issued)
+	writeManagementJSON(response, struct {
+		pairing.IssuedCode
+		DeviceHubAddress string `json:"device_hub_address"`
+	}{IssuedCode: issued, DeviceHubAddress: advertisedAddress})
 }
 
 func (application *Runtime) handleRotateDeviceToken(response http.ResponseWriter, request *http.Request) {
@@ -246,6 +260,30 @@ func (application *Runtime) handleStatus(response http.ResponseWriter, _ *http.R
 	writeManagementJSON(response, application.Status())
 }
 
+func (application *Runtime) handleSessionRefresh(response http.ResponseWriter, request *http.Request) {
+	if !application.managementOriginValid(request) {
+		http.Error(response, "forbidden", http.StatusForbidden)
+		return
+	}
+	cookie, err := request.Cookie(managementSessionCookie)
+	if err != nil || cookie.Value == "" {
+		http.Error(response, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	csrfToken, err := randomWebToken()
+	if err != nil {
+		http.Error(response, "session unavailable", http.StatusInternalServerError)
+		return
+	}
+	if !application.sessions.rotateCSRF(cookie.Value, csrfToken, time.Now()) {
+		http.Error(response, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	writeManagementJSON(response, struct {
+		CSRFToken string `json:"csrf_token"`
+	}{CSRFToken: csrfToken})
+}
+
 func (application *Runtime) handleLogout(response http.ResponseWriter, request *http.Request) {
 	cookie, _ := request.Cookie(managementSessionCookie)
 	application.sessions.revoke(cookie.Value)
@@ -323,6 +361,24 @@ func (sessions *managementSessions) revoke(sessionToken string) {
 	sessions.mu.Lock()
 	defer sessions.mu.Unlock()
 	delete(sessions.entries, sha256.Sum256([]byte(sessionToken)))
+}
+
+func (sessions *managementSessions) rotateCSRF(
+	sessionToken string,
+	csrfToken string,
+	now time.Time,
+) bool {
+	sessions.mu.Lock()
+	defer sessions.mu.Unlock()
+	sessions.pruneExpired(now)
+	key := sha256.Sum256([]byte(sessionToken))
+	session, found := sessions.entries[key]
+	if !found {
+		return false
+	}
+	session.csrfHash = sha256.Sum256([]byte(csrfToken))
+	sessions.entries[key] = session
+	return true
 }
 
 func (sessions *managementSessions) pruneExpired(now time.Time) {

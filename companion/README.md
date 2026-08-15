@@ -9,6 +9,9 @@ The current M1 runtime provides:
   connection count, Open Console, Start/Stop, and Quit actions;
 - a loopback-only management listener at `127.0.0.1:7777` by default;
 - an independently authenticated TLS Device Hub listener at `0.0.0.0:7780` by default;
+- a separately reported routable Device Hub endpoint, re-resolved from the physical default-route
+  IPv4 address when Pairing is requested or pinned with `--device-hub-advertised-address IP:port`;
+  ambiguous, virtual, wildcard, loopback, reserved, and documentation addresses fail closed;
 - management login sessions with strict Origin/CSRF checks on writes;
 - bounded Device Hub headers, bodies, timeouts, concurrency, and per-IP request rate;
 - short-lived, one-time Pairing codes and revocable per-device trust;
@@ -75,6 +78,29 @@ supervisor reconciles the committed ordered definitions into isolated collectors
 Companion restart. Runtime composes Codex, Cursor, and structured states into one complete
 `snapshot.ai`; Device Hub coalesces only the latest document per authenticated Deck through that
 connection's sole WebSocket writer.
+
+### Management Web UI
+
+The embedded UI implements the selected Scheme C instrument-panel design as an offline,
+Chinese-first application. Its login surface and five stable domains provide 17 UI views: overview;
+Provider list/editor, history, and Codex sessions; serial terminal/presets; Deck inventory,
+network trust, Setup recovery, and RLCD preview; plus system settings, updates, backup,
+diagnostics, and tray guidance. At widths below 920 px the domain dock and context navigation
+become one mobile drawer without changing the task hierarchy.
+
+`GET /api/v1/console` is the narrow read-only ViewModel seam for overview, session, device,
+network, Deck-preview, system, and diagnostics surfaces. It exposes only `Status`, normalized
+AI Snapshot Provider/Session DTOs, and capability booleans; credentials, raw responses, prompts,
+paths, and serial bodies cannot be represented. A tray-created HttpOnly session can obtain a
+fresh CSRF token through same-origin `POST /api/v1/session/refresh`; rotation does not extend the
+eight-hour session lifetime and invalidates the previous CSRF token.
+
+Provider management, history, pairing, and backup controls call their existing authenticated
+APIs. Serial Web TX, signed OTA, and diagnostic-bundle interfaces are not present on the current
+mainline, so those formal views explicitly say that the module is not connected and never invent
+connections, versions, progress, or success states. All destructive operations use a scoped
+confirmation dialog, unknown metrics render as unavailable rather than zero, and the UI includes
+visible focus states, reduced-motion handling, and responsive table containment.
 
 Provider credentials and raw private content must never be sent to a Deck.
 

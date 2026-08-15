@@ -425,7 +425,8 @@ func testConfigWithPairing(clock pairing.Clock, store pairing.Store) companionru
 			AdminToken: "management-test-token-000000000001",
 		},
 		DeviceHub: companionruntime.DeviceHubConfig{
-			Address: "127.0.0.1:0",
+			Address:           "127.0.0.1:0",
+			AdvertisedAddress: "192.168.50.8:7780",
 		},
 		Pairing: pairingService,
 	}
