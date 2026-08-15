@@ -675,7 +675,8 @@ ESP32 主动连接 Companion，便于处理设备 DHCP 地址变化和电脑防�
   "firmware_version": "0.1.0",
   "board": "esp32-s3-rlcd-4.2",
   "capabilities": ["display", "serial", "ota"],
-  "serial_state": "disarmed"
+  "serial_state": "disarmed",
+  "serial_session_id": 0
 }
 ```
 
@@ -698,6 +699,22 @@ Companion 验证 Token、证书连接、device ID 和协议版本后返回配置
 | `error` | 双向 | 结构化错误 |
 
 串口原始流使用 WebSocket binary frame，至少带通道、序号、设备单调时钟和 payload length。原始字节不经过 UTF-8 转换。
+
+V1 的精确 32-byte big-endian header 与 256-byte payload 上限由
+`protocol/catalog/serial-frame-v1.json` 唯一定义。ESP 与 Companion 对同一 Session 的 sequence
+和单调时间执行失败闭合校验；重连先以 `serial.history.request` 从 Companion 最新游标补发 Deck
+history，再进入 live sink，避免重复或缺口被伪装为连续数据。
+
+Companion Serial Hub 只在 RAM 保存当前 Session，payload 上限 8 MiB、frame metadata 上限
+65,536、观察者上限 64。每个观察者拥有独立 ordinal cursor；覆盖只推进落后的观察者并累计其
+丢失字节，不能阻塞 Device Link ingest。Session 结束、切换或 Companion 退出必须清零 payload、
+关闭观察者并拒绝旧 Session 下载。下载单次最多 1 MiB，且不得写日志、SQLite、Backup Archive
+或其他持久证据。
+
+Web TX Lease 同时只能属于一个观察者，默认 10 分钟。Acquire、release、disconnect 与 timeout
+均先进入 `transitioning`，只有 Deck owner 的 exact request result 才能发布最终状态；在 Deck
+确认 USB 前 UI 不得提前显示 USB。Lease/browser/request capability 不得出现在普通管理状态 API。
+完整决定见 [ADR 0020](adr/0020-keep-serial-hub-history-volatile-and-lease-web-transmit.md)。
 
 ### 10.3 AI 快照
 

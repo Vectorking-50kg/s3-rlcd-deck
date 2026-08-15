@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "deck_serial_session.h"
@@ -61,9 +62,26 @@ bool deck_serial_service_web_disconnect(
     uint64_t session_id,
     uint64_t lease_id
 );
+/*
+ * Copies one bounded Web -> target block into the owner queue. The Session
+ * owner revalidates the exact session and lease immediately before UART TX.
+ */
+bool deck_serial_service_submit_web(
+    deck_serial_service_t *service,
+    uint64_t session_id,
+    uint64_t lease_id,
+    const uint8_t *bytes,
+    size_t size
+);
 bool deck_serial_service_snapshot(
     deck_serial_service_t *service,
     deck_serial_session_snapshot_t *snapshot
+);
+/* Returns the most recent exact command result when its request ID matches. */
+bool deck_serial_service_command_result(
+    deck_serial_service_t *service,
+    uint64_t request_id,
+    deck_serial_command_result_t *result
 );
 
 /*

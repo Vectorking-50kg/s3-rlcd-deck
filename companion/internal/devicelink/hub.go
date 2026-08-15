@@ -15,6 +15,7 @@ import (
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/configmodel"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/protocol"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/serialprotocol"
 	"github.com/coder/websocket"
 )
 
@@ -25,29 +26,38 @@ const (
 )
 
 var ErrInvalidSnapshot = errors.New("invalid AI Snapshot publication")
+var ErrDeviceUnavailable = errors.New("Deck Device Link is unavailable")
 
 type Authenticator interface {
 	Verify(context.Context, pairing.Authentication) (bool, error)
 }
 
 type Config struct {
-	Authenticator     Authenticator
-	HeartbeatInterval time.Duration
-	HeartbeatTimeout  time.Duration
-	Now               func() time.Time
-	Elapsed           func() time.Duration
-	OnDeviceProfile   func(configmodel.DeviceProfile)
+	Authenticator       Authenticator
+	HeartbeatInterval   time.Duration
+	HeartbeatTimeout    time.Duration
+	Now                 func() time.Time
+	Elapsed             func() time.Duration
+	OnDeviceProfile     func(configmodel.DeviceProfile)
+	OnSerialState       func(deviceID string, sessionID uint64, state string) error
+	OnSerialFrame       func(deviceID string, frame serialprotocol.Frame) error
+	OnSerialOwnerResult func(deviceID string, result SerialOwnerResult) error
+	SerialHistoryCursor func(deviceID string, sessionID uint64) (uint64, bool)
 }
 
 type Hub struct {
-	authenticator     Authenticator
-	heartbeatInterval time.Duration
-	heartbeatTimeout  time.Duration
-	now               func() time.Time
-	elapsed           func() time.Duration
-	onDeviceProfile   func(configmodel.DeviceProfile)
-	done              chan struct{}
-	closeOnce         sync.Once
+	authenticator       Authenticator
+	heartbeatInterval   time.Duration
+	heartbeatTimeout    time.Duration
+	now                 func() time.Time
+	elapsed             func() time.Duration
+	onDeviceProfile     func(configmodel.DeviceProfile)
+	onSerialState       func(deviceID string, sessionID uint64, state string) error
+	onSerialFrame       func(deviceID string, frame serialprotocol.Frame) error
+	onSerialOwnerResult func(deviceID string, result SerialOwnerResult) error
+	serialHistoryCursor func(deviceID string, sessionID uint64) (uint64, bool)
+	done                chan struct{}
+	closeOnce           sync.Once
 
 	mu                 sync.Mutex
 	closed             bool
@@ -92,16 +102,20 @@ func New(config Config) (*Hub, error) {
 		config.Elapsed = func() time.Duration { return time.Since(started) }
 	}
 	return &Hub{
-		authenticator:     config.Authenticator,
-		heartbeatInterval: config.HeartbeatInterval,
-		heartbeatTimeout:  config.HeartbeatTimeout,
-		now:               config.Now,
-		elapsed:           config.Elapsed,
-		onDeviceProfile:   config.OnDeviceProfile,
-		done:              make(chan struct{}),
-		connections:       make(map[*websocket.Conn]struct{}),
-		sessions:          make(map[string]*websocket.Conn),
-		snapshotSignals:   make(map[*websocket.Conn]chan struct{}),
+		authenticator:       config.Authenticator,
+		heartbeatInterval:   config.HeartbeatInterval,
+		heartbeatTimeout:    config.HeartbeatTimeout,
+		now:                 config.Now,
+		elapsed:             config.Elapsed,
+		onDeviceProfile:     config.OnDeviceProfile,
+		onSerialState:       config.OnSerialState,
+		onSerialFrame:       config.OnSerialFrame,
+		onSerialOwnerResult: config.OnSerialOwnerResult,
+		serialHistoryCursor: config.SerialHistoryCursor,
+		done:                make(chan struct{}),
+		connections:         make(map[*websocket.Conn]struct{}),
+		sessions:            make(map[string]*websocket.Conn),
+		snapshotSignals:     make(map[*websocket.Conn]chan struct{}),
 	}, nil
 }
 
@@ -214,6 +228,86 @@ func (hub *Hub) ConnectedDecks() int {
 	return len(hub.sessions)
 }
 
+func (hub *Hub) RequestSerialOwner(
+	ctx context.Context,
+	deviceID string,
+	request SerialOwnerRequest,
+) error {
+	request.Type = MessageSerialOwnerRequest
+	request.ProtocolVersion = ProtocolVersion
+	if request.SerialSessionID == 0 || request.RequestID == 0 {
+		return ErrDeviceUnavailable
+	}
+	return hub.writeDeviceControl(ctx, deviceID, request)
+}
+
+func (hub *Hub) SendSerialOwnerActivity(
+	ctx context.Context,
+	deviceID string,
+	activity SerialOwnerActivity,
+) error {
+	activity.Type = MessageSerialOwnerActivity
+	activity.ProtocolVersion = ProtocolVersion
+	if activity.SerialSessionID == 0 || activity.LeaseID == 0 {
+		return ErrDeviceUnavailable
+	}
+	return hub.writeDeviceControl(ctx, deviceID, activity)
+}
+
+func (hub *Hub) SendSerialWebFrame(
+	ctx context.Context,
+	deviceID string,
+	frame serialprotocol.Frame,
+) error {
+	if frame.Channel != serialprotocol.ChannelWebTX {
+		return ErrDeviceUnavailable
+	}
+	document, err := serialprotocol.Encode(frame)
+	if err != nil {
+		return err
+	}
+	defer clear(document)
+	connection := hub.deviceConnection(deviceID)
+	if connection == nil || connection.Write(ctx, websocket.MessageBinary, document) != nil {
+		return ErrDeviceUnavailable
+	}
+	return nil
+}
+
+func (hub *Hub) writeSerialHistoryRequest(
+	ctx context.Context,
+	deviceID string,
+	sessionID uint64,
+	afterSequence uint64,
+) error {
+	return hub.writeDeviceControl(ctx, deviceID, SerialHistoryRequest{
+		Type: MessageSerialHistoryRequest, ProtocolVersion: ProtocolVersion,
+		SerialSessionID: sessionID, AfterSequence: afterSequence,
+	})
+}
+
+func (hub *Hub) writeDeviceControl(ctx context.Context, deviceID string, message any) error {
+	document, err := json.Marshal(message)
+	if err != nil || len(document) == 0 || len(document) > MaxControlMessageBytes {
+		return ErrDeviceUnavailable
+	}
+	defer clear(document)
+	connection := hub.deviceConnection(deviceID)
+	if connection == nil || connection.Write(ctx, websocket.MessageText, document) != nil {
+		return ErrDeviceUnavailable
+	}
+	return nil
+}
+
+func (hub *Hub) deviceConnection(deviceID string) *websocket.Conn {
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	if hub.closed {
+		return nil
+	}
+	return hub.sessions[deviceID]
+}
+
 func (hub *Hub) isClosed() bool {
 	hub.mu.Lock()
 	defer hub.mu.Unlock()
@@ -306,6 +400,16 @@ func (hub *Hub) serveConnection(
 		_ = connection.Close(websocket.StatusPolicyViolation, "duplicate Device ID")
 		return
 	}
+	if hub.onSerialState != nil {
+		if err = hub.onSerialState(
+			authentication.deviceID,
+			hello.SerialSessionID,
+			hello.SerialState,
+		); err != nil {
+			_ = connection.Close(websocket.StatusPolicyViolation, "invalid Serial Session state")
+			return
+		}
+	}
 	if hub.onDeviceProfile != nil {
 		capabilities := append([]string(nil), hello.Capabilities...)
 		sort.Strings(capabilities)
@@ -319,6 +423,24 @@ func (hub *Hub) serveConnection(
 	}
 	if !hub.writeHeartbeat(connection) {
 		return
+	}
+	if hello.SerialSessionID != 0 && hub.serialHistoryCursor != nil {
+		if afterSequence, available := hub.serialHistoryCursor(
+			authentication.deviceID,
+			hello.SerialSessionID,
+		); available {
+			ctx, cancel := context.WithTimeout(context.Background(), hub.heartbeatInterval)
+			err = hub.writeSerialHistoryRequest(
+				ctx,
+				authentication.deviceID,
+				hello.SerialSessionID,
+				afterSequence,
+			)
+			cancel()
+			if err != nil {
+				return
+			}
+		}
 	}
 	snapshotSignal := hub.snapshotSignal(connection)
 	var snapshotGeneration uint64
@@ -374,28 +496,88 @@ func (hub *Hub) serveConnection(
 			if frame.err != nil {
 				return
 			}
-			if frame.messageType != websocket.MessageText {
-				_ = connection.Close(websocket.StatusPolicyViolation, "control messages must be text")
-				return
-			}
-			heartbeat, parseErr := parseHeartbeat(
-				frame.message,
-				previousMonotonic,
-				hasPreviousMonotonic,
-			)
-			if parseErr != nil {
-				_ = connection.Close(websocket.StatusPolicyViolation, "invalid device.heartbeat")
-				return
-			}
-			previousMonotonic = heartbeat.MonotonicMS
-			hasPreviousMonotonic = true
-			if !heartbeatTimer.Stop() {
-				select {
-				case <-heartbeatTimer.C:
-				default:
+			if frame.messageType == websocket.MessageBinary {
+				serialFrame, decodeErr := serialprotocol.Decode(frame.message)
+				if decodeErr != nil || hub.onSerialFrame == nil ||
+					hub.onSerialFrame(authentication.deviceID, serialFrame) != nil {
+					_ = connection.Close(websocket.StatusPolicyViolation, "invalid Serial binary frame")
+					return
 				}
+				go readFrames(connection, frames)
+				continue
 			}
-			heartbeatTimer.Reset(hub.heartbeatTimeout)
+			if frame.messageType != websocket.MessageText {
+				_ = connection.Close(websocket.StatusPolicyViolation, "unsupported Device Link frame")
+				return
+			}
+			envelope, envelopeErr := protocol.ParseEnvelope(frame.message)
+			if envelopeErr != nil {
+				_ = connection.Close(websocket.StatusPolicyViolation, "invalid Device Link control message")
+				return
+			}
+			switch envelope.Type {
+			case MessageHeartbeat:
+				heartbeat, parseErr := parseHeartbeat(
+					frame.message,
+					previousMonotonic,
+					hasPreviousMonotonic,
+				)
+				if parseErr != nil {
+					_ = connection.Close(websocket.StatusPolicyViolation, "invalid device.heartbeat")
+					return
+				}
+				previousMonotonic = heartbeat.MonotonicMS
+				hasPreviousMonotonic = true
+				if !heartbeatTimer.Stop() {
+					select {
+					case <-heartbeatTimer.C:
+					default:
+					}
+				}
+				heartbeatTimer.Reset(hub.heartbeatTimeout)
+			case MessageSerialState:
+				state, parseErr := parseSerialState(frame.message)
+				if parseErr != nil || hub.onSerialState == nil ||
+					hub.onSerialState(
+						authentication.deviceID,
+						state.SerialSessionID,
+						state.SerialState,
+					) != nil {
+					_ = connection.Close(websocket.StatusPolicyViolation, "invalid serial.state")
+					return
+				}
+				if state.SerialSessionID != 0 && hub.serialHistoryCursor != nil {
+					if afterSequence, available := hub.serialHistoryCursor(
+						authentication.deviceID,
+						state.SerialSessionID,
+					); available {
+						writeContext, cancel := context.WithTimeout(
+							context.Background(),
+							hub.heartbeatInterval,
+						)
+						writeErr := hub.writeSerialHistoryRequest(
+							writeContext,
+							authentication.deviceID,
+							state.SerialSessionID,
+							afterSequence,
+						)
+						cancel()
+						if writeErr != nil {
+							return
+						}
+					}
+				}
+			case MessageSerialOwnerResult:
+				result, parseErr := parseSerialOwnerResult(frame.message)
+				if parseErr != nil || hub.onSerialOwnerResult == nil ||
+					hub.onSerialOwnerResult(authentication.deviceID, result) != nil {
+					_ = connection.Close(websocket.StatusPolicyViolation, "invalid serial.owner.result")
+					return
+				}
+			default:
+				_ = connection.Close(websocket.StatusPolicyViolation, "unsupported Device Link control message")
+				return
+			}
 			go readFrames(connection, frames)
 		}
 	}

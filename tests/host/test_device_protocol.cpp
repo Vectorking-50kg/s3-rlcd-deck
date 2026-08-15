@@ -85,6 +85,37 @@ void exact_certificate_pin_rejects_a_wrong_digest()
     ));
 }
 
+void serial_controls_are_strict_and_bounded()
+{
+    deck_device_serial_control_t control{};
+    const std::string request = fixture("serial-owner-request-valid.json");
+    assert(deck_device_protocol_parse_serial_control(
+        request.data(), request.size(), &control
+    ));
+    assert(control.kind == DECK_DEVICE_SERIAL_OWNER_REQUEST);
+    assert(control.session_id == 7 && control.request_id == 9 && control.enable);
+
+    const std::string activity = fixture("serial-owner-activity-valid.json");
+    assert(deck_device_protocol_parse_serial_control(
+        activity.data(), activity.size(), &control
+    ));
+    assert(control.kind == DECK_DEVICE_SERIAL_OWNER_ACTIVITY);
+
+    const std::string history = fixture("serial-history-request-valid.json");
+    assert(deck_device_protocol_parse_serial_control(
+        history.data(), history.size(), &control
+    ));
+    assert(control.kind == DECK_DEVICE_SERIAL_HISTORY_REQUEST);
+
+    constexpr char duplicate[] =
+        "{\"type\":\"serial.owner.request\",\"protocol_version\":1,"
+        "\"serial_session_id\":7,\"request_id\":9,\"request_id\":10,"
+        "\"enable\":true}";
+    assert(!deck_device_protocol_parse_serial_control(
+        duplicate, sizeof(duplicate) - 1U, &control
+    ));
+}
+
 }  // namespace
 
 int main()
@@ -92,5 +123,6 @@ int main()
     shared_hello_fixtures_match_the_device_contract();
     shared_heartbeat_fixtures_match_the_device_contract();
     exact_certificate_pin_rejects_a_wrong_digest();
+    serial_controls_are_strict_and_bounded();
     return 0;
 }

@@ -104,6 +104,11 @@ bool deck_serial_session_web_disconnect(
     uint64_t session_id,
     uint64_t lease_id
 );
+bool deck_serial_session_accept_web_input(
+    const deck_serial_session_t *session,
+    uint64_t session_id,
+    uint64_t lease_id
+);
 bool deck_serial_session_accept_usb_input(
     deck_serial_session_t *session,
     size_t byte_count

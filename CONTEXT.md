@@ -91,6 +91,17 @@ _Avoid_: Controller, writer
 The temporary, exclusive grant that allows one authenticated Web client to act as the Web TX Owner during a Serial Session.
 _Avoid_: Browser lock, Web session
 
+**Serial Hub**:
+The Companion-owned, volatile 8 MiB current-Session ring that validates Deck frames and gives each
+Serial Observer an independent read cursor. It is never a persistent history store.
+_Avoid_: Serial database, terminal log
+
+**Serial Observer**:
+An authenticated management Web connection that reads one Serial Session through its own bounded
+cursor. Observation alone grants no transmit authority; Web transmit additionally requires the sole
+Web TX Lease.
+_Avoid_: Serial owner, terminal session
+
 **Target**:
 The external 3.3 V TTL UART device connected to the Deck for monitoring or controlled transmission.
 _Avoid_: Client device, downstream board

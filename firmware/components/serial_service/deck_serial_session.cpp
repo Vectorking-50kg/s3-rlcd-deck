@@ -342,6 +342,18 @@ bool deck_serial_session_web_disconnect(
     return true;
 }
 
+bool deck_serial_session_accept_web_input(
+    const deck_serial_session_t *session,
+    uint64_t session_id,
+    uint64_t lease_id
+)
+{
+    return session != nullptr && session->state == DECK_SERIAL_WEB_TX &&
+           session->uart_installed && session_id != 0 &&
+           session_id == session->session_id && lease_id != 0 &&
+           lease_id == session->lease_id;
+}
+
 bool deck_serial_session_accept_usb_input(
     deck_serial_session_t *session,
     size_t byte_count

@@ -5,6 +5,7 @@ idf_component_register(
         "deck_companion_link_message.cpp"
         "deck_companion_link_timing.cpp"
         "deck_device_protocol.cpp"
+        "deck_serial_frame.cpp"
     INCLUDE_DIRS "include"
     REQUIRES
         ai_snapshot
@@ -14,6 +15,7 @@ idf_component_register(
         freertos
         mbedtls
         pthread
+        serial_service
 )
 
 target_compile_features(${COMPONENT_LIB} PRIVATE cxx_std_17)

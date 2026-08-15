@@ -194,6 +194,22 @@ HIL text is never sent to GPIO17. The project neither burns USB eFuses nor links
 a second TinyUSB device stack. The decision is recorded in
 [`ADR 0019`](../docs/adr/0019-isolate-the-release-usb-serial-jtag-bridge.md).
 
+## Device Link Serial stream
+
+The active Companion Link publishes target RX as binary `SRD1` frames defined by the shared
+`protocol/catalog/serial-frame-v1.json`. It is the only WSS writer. A newly connected or newly
+announced Session remains stream-gated until the Companion supplies `serial.history.request`; the
+Link then copies the non-destructive history cursor before resuming its live WSS sink. Live
+references at or behind the completed history cursor are discarded instead of being sent twice.
+
+Companion Web input uses the opposite binary channel. The Link rejects a wrong channel, Session,
+sequence, monotonic timestamp, or inactive owner and copies at most one 256-byte frame into the
+fixed Web source queue. The sole Serial owner rechecks the exact Session and Lease immediately
+before each partial UART FIFO write. Owner changes clear this queue but never a target-RX Router
+sink. WSS disconnect also queues a Web-owner revocation; the ten-minute owner-side expiry remains
+the independent final safety boundary. No serial payload is logged or written to Flash. See
+[`ADR 0020`](../docs/adr/0020-keep-serial-hub-history-volatile-and-lease-web-transmit.md).
+
 ## Safe boot smoke test
 
 With exactly one Deck connected and its serial port free:

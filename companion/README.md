@@ -210,6 +210,27 @@ strict, size-limited `device.heartbeat` control messages. Missing heartbeats clo
 session after 30 seconds; a revoked trust is rechecked and disconnected without waiting
 for a Companion restart.
 
+## Volatile Serial Hub
+
+An authenticated Deck with an active Serial Session may publish fixed, versioned binary frames to
+the Companion's volatile Serial Hub. The Hub owns at most 8 MiB of payload for the current Session,
+rejects wrong Session/channel/order/monotonic metadata, and clears all bytes when that Session ends
+or the Runtime stops. It never writes serial bytes to logs, Provider Hour SQLite, configuration,
+backup archives, or diagnostics.
+
+Authenticated management clients use `/api/v1/serial/observe` with subprotocol
+`s3deck.serial.v1`; every observer has an independent overwrite-aware cursor. Current-session raw
+download is bounded to 1 MiB through `/api/v1/serial/download`, and `/api/v1/serial/status` excludes
+browser IDs, Lease IDs, and pending request capabilities. A slow observer can lose its own oldest
+bytes but cannot block Deck ingest or another observer.
+
+Only one observer may hold the ten-minute Web TX Lease. Acquire/release results remain
+`transitioning` until the Deck's sole owner acknowledges the exact request. Observer disconnect and
+Lease expiry request Deck revocation before USB is reported locally; Device Link disconnect and the
+Deck's independent deadline also return the target owner to USB. Raw input from any other observer
+is rejected. See
+[`ADR 0020`](../docs/adr/0020-keep-serial-hub-history-volatile-and-lease-web-transmit.md).
+
 LAN management is off by default. Enabling it requires all three explicit options and causes the status document to report a security warning:
 
 ```bash

@@ -32,3 +32,6 @@ after a candidate passes the entire contract.
 fixture. Go and the ESP-IDF component execute that same manifest unchanged.
 
 Raw Serial Session bytes use versioned WebSocket binary frames and are specified separately from control JSON.
+`catalog/serial-frame-v1.json` is the authoritative fixed-header catalog: big-endian fields bind every
+payload to a channel, nonzero Serial Session ID, nonzero sequence, device monotonic timestamp, and
+exact payload length. V1 payloads are bounded to the Deck Router's 256-byte immutable block size.

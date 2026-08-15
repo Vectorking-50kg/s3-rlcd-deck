@@ -6,6 +6,7 @@
 #include "deck_companion_link_timing.h"
 #include "deck_companion_pairing_esp.h"
 #include "deck_device_protocol.h"
+#include "deck_serial_frame.h"
 
 #include <atomic>
 #include <cstdio>
@@ -27,7 +28,7 @@ namespace {
 
 constexpr uint32_t kTaskStackBytes = 8'192;
 constexpr UBaseType_t kTaskPriority = 2;
-constexpr TickType_t kPollTicks = pdMS_TO_TICKS(100);
+constexpr TickType_t kPollTicks = pdMS_TO_TICKS(10);
 constexpr TickType_t kSendTimeoutTicks = pdMS_TO_TICKS(2'000);
 constexpr TickType_t kReceiveBackpressureTicks = pdMS_TO_TICKS(2'000);
 constexpr uint64_t kHeartbeatIntervalMs = 10'000;
@@ -149,6 +150,23 @@ struct deck_companion_link {
     std::atomic<bool> queue_overflow{false};
     mutable std::mutex mutex;
     deck_companion_link_snapshot_t snapshot{};
+    std::mutex serial_mutex;
+    deck_serial_service_t *serial = nullptr;
+    deck_serial_session_snapshot_t published_serial{};
+    bool has_published_serial = false;
+    std::atomic<bool> serial_publication_dirty{false};
+    bool pending_serial_owner_request = false;
+    uint64_t pending_serial_request_id = 0;
+    bool serial_history_active = false;
+    bool serial_stream_ready = false;
+    uint64_t serial_history_session_id = 0;
+    uint64_t serial_history_cursor = 0;
+    uint64_t sent_serial_session_id = 0;
+    uint64_t sent_serial_sequence = 0;
+    uint64_t accepted_web_session_id = 0;
+    uint64_t accepted_web_sequence = 0;
+    uint64_t accepted_web_monotonic_ms = 0;
+    uint64_t next_serial_revoke_ms = 0;
 };
 
 namespace {
@@ -173,6 +191,41 @@ bool state_is_online(const deck_companion_link_t *link)
     return link->snapshot.state == DECK_COMPANION_LINK_ONLINE;
 }
 
+bool sequence_after(uint64_t candidate, uint64_t previous)
+{
+    const uint64_t difference = candidate - previous;
+    return difference != 0 && difference < (UINT64_C(1) << 63U);
+}
+
+bool ensure_web_owner_revoked(deck_companion_link_t *link, uint64_t now_ms)
+{
+    const std::lock_guard<std::mutex> lock(link->serial_mutex);
+    if (link->serial == nullptr) {
+        return true;
+    }
+    deck_serial_session_snapshot_t serial{};
+    if (!deck_serial_service_snapshot(link->serial, &serial)) {
+        return false;
+    }
+    if (serial.state != DECK_SERIAL_WEB_TX) {
+        link->next_serial_revoke_ms = 0;
+        return true;
+    }
+    if (serial.session_id == 0 || serial.lease_id == 0) {
+        return false;
+    }
+    if (now_ms >= link->next_serial_revoke_ms) {
+        if (deck_serial_service_web_disconnect(
+            link->serial,
+            serial.session_id,
+            serial.lease_id
+        )) {
+            link->next_serial_revoke_ms = now_ms + 100U;
+        }
+    }
+    return false;
+}
+
 void clear_secret(deck_companion_link_t *link)
 {
     if (link->secret != nullptr) {
@@ -183,6 +236,8 @@ void clear_secret(deck_companion_link_t *link)
 
 void disconnect_transport(deck_companion_link_t *link)
 {
+    link->next_serial_revoke_ms = 0;
+    (void)ensure_web_owner_revoked(link, monotonic_ms());
     esp_websocket_client_handle_t client = link->client;
     link->client = nullptr;
     if (client != nullptr) {
@@ -194,6 +249,13 @@ void disconnect_transport(deck_companion_link_t *link)
     }
     deck_companion_link_frame_reset(&link->frame_assembler);
     link->has_server_monotonic = false;
+    link->has_published_serial = false;
+    link->pending_serial_owner_request = false;
+    link->pending_serial_request_id = 0;
+    link->serial_history_active = false;
+    link->serial_stream_ready = false;
+    link->serial_history_session_id = 0;
+    link->serial_history_cursor = 0;
     link->timing = {};
 }
 
@@ -370,19 +432,414 @@ bool send_text(deck_companion_link_t *link, const char *message, size_t size)
            ) == static_cast<int>(size);
 }
 
+bool send_binary(deck_companion_link_t *link, const uint8_t *message, size_t size)
+{
+    return link->client != nullptr && message != nullptr &&
+           size <= static_cast<size_t>(INT_MAX) &&
+           esp_websocket_client_send_bin(
+               link->client,
+               reinterpret_cast<const char *>(message),
+               static_cast<int>(size),
+               kSendTimeoutTicks
+           ) == static_cast<int>(size);
+}
+
+bool read_serial_snapshot(
+    deck_companion_link_t *link,
+    deck_serial_session_snapshot_t *snapshot
+)
+{
+    if (snapshot == nullptr) {
+        return false;
+    }
+    const std::lock_guard<std::mutex> lock(link->serial_mutex);
+    if (link->serial == nullptr) {
+        *snapshot = {};
+        snapshot->state = DECK_SERIAL_DISARMED;
+        return true;
+    }
+    return deck_serial_service_snapshot(link->serial, snapshot);
+}
+
+const char *serial_state_name(deck_serial_state_t state)
+{
+    switch (state) {
+        case DECK_SERIAL_USB_TX:
+            return "usb_tx";
+        case DECK_SERIAL_WEB_TX:
+            return "web_tx";
+        case DECK_SERIAL_DISARMED:
+        default:
+            return "disarmed";
+    }
+}
+
+bool same_serial_publication(
+    const deck_serial_session_snapshot_t &left,
+    const deck_serial_session_snapshot_t &right
+)
+{
+    return left.state == right.state && left.session_id == right.session_id &&
+           left.owner_generation == right.owner_generation &&
+           left.lease_id == right.lease_id;
+}
+
 bool send_hello(deck_companion_link_t *link)
 {
+    deck_serial_session_snapshot_t serial{};
+    if (!read_serial_snapshot(link, &serial)) {
+        return false;
+    }
     char message[320]{};
+    const uint64_t wire_session_id =
+        serial.state == DECK_SERIAL_DISARMED ? 0 : serial.session_id;
     const int size = std::snprintf(
         message,
         sizeof(message),
-        "{\"type\":\"device.hello\",\"protocol_version\":1,\"device_id\":\"%s\",\"firmware_version\":\"%s\",\"board\":\"%s\",\"capabilities\":[\"display\"],\"serial_state\":\"disarmed\"}",
+        "{\"type\":\"device.hello\",\"protocol_version\":1,\"device_id\":\"%s\",\"firmware_version\":\"%s\",\"board\":\"%s\",\"capabilities\":[\"display\",\"serial\"],\"serial_state\":\"%s\",\"serial_session_id\":%llu}",
         link->device_id,
         link->firmware_version,
-        kBoard
+        kBoard,
+        serial_state_name(serial.state),
+        static_cast<unsigned long long>(wire_session_id)
     );
-    return size > 0 && static_cast<size_t>(size) < sizeof(message) &&
-           send_text(link, message, static_cast<size_t>(size));
+    const bool sent = size > 0 && static_cast<size_t>(size) < sizeof(message) &&
+                      send_text(link, message, static_cast<size_t>(size));
+    if (sent) {
+        link->published_serial = serial;
+        link->has_published_serial = true;
+        link->serial_stream_ready = serial.state == DECK_SERIAL_DISARMED;
+        link->serial_history_active = false;
+        link->serial_history_session_id = 0;
+        link->serial_history_cursor = 0;
+    }
+    return sent;
+}
+
+bool send_serial_state_if_changed(deck_companion_link_t *link)
+{
+    deck_serial_session_snapshot_t serial{};
+    if (!read_serial_snapshot(link, &serial)) {
+        return false;
+    }
+    if (link->has_published_serial &&
+        same_serial_publication(link->published_serial, serial)) {
+        return true;
+    }
+    const bool session_changed =
+        !link->has_published_serial ||
+        link->published_serial.session_id != serial.session_id ||
+        (link->published_serial.state == DECK_SERIAL_DISARMED) !=
+            (serial.state == DECK_SERIAL_DISARMED);
+    char message[256]{};
+    const uint64_t wire_session_id =
+        serial.state == DECK_SERIAL_DISARMED ? 0 : serial.session_id;
+    const int size = std::snprintf(
+        message,
+        sizeof(message),
+        "{\"type\":\"serial.state\",\"protocol_version\":1,\"serial_state\":\"%s\",\"serial_session_id\":%llu,\"owner_generation\":%llu,\"lease_id\":%llu}",
+        serial_state_name(serial.state),
+        static_cast<unsigned long long>(wire_session_id),
+        static_cast<unsigned long long>(serial.owner_generation),
+        static_cast<unsigned long long>(serial.lease_id)
+    );
+    if (size <= 0 || static_cast<size_t>(size) >= sizeof(message) ||
+        !send_text(link, message, static_cast<size_t>(size))) {
+        return false;
+    }
+    link->published_serial = serial;
+    link->has_published_serial = true;
+    if (session_changed) {
+        link->serial_stream_ready = serial.state == DECK_SERIAL_DISARMED;
+        link->serial_history_active = false;
+        link->serial_history_session_id = 0;
+        link->serial_history_cursor = 0;
+        if (serial.state == DECK_SERIAL_DISARMED) {
+            link->sent_serial_session_id = 0;
+            link->sent_serial_sequence = 0;
+            link->accepted_web_session_id = 0;
+            link->accepted_web_sequence = 0;
+            link->accepted_web_monotonic_ms = 0;
+        }
+    }
+    return true;
+}
+
+bool send_serial_block(
+    deck_companion_link_t *link,
+    deck_serial_routed_block_t *block
+)
+{
+    if (block == nullptr || block->session_id == 0 || block->sequence == 0 ||
+        block->length == 0 || block->length > sizeof(block->bytes)) {
+        return false;
+    }
+    uint8_t document[DECK_SERIAL_FRAME_MAX_BYTES]{};
+    const size_t size = deck_serial_frame_encode(
+        DECK_SERIAL_FRAME_TARGET_RX,
+        block->session_id,
+        block->sequence,
+        block->monotonic_ms,
+        block->bytes,
+        block->length,
+        document,
+        sizeof(document)
+    );
+    const bool sent = size != 0 && send_binary(link, document, size);
+    secure_clear(document, sizeof(document));
+    if (sent) {
+        link->sent_serial_session_id = block->session_id;
+        link->sent_serial_sequence = block->sequence;
+    }
+    secure_clear(block, sizeof(*block));
+    return sent;
+}
+
+bool send_one_live_serial_block(deck_companion_link_t *link, bool *progressed)
+{
+    *progressed = false;
+    deck_serial_routed_block_t block{};
+    deck_serial_router_copy_result_t result = DECK_SERIAL_ROUTER_COPY_EMPTY;
+    {
+        const std::lock_guard<std::mutex> lock(link->serial_mutex);
+        if (link->serial == nullptr) {
+            return true;
+        }
+        result = deck_serial_service_take(
+            link->serial,
+            DECK_SERIAL_SINK_WSS,
+            &block
+        );
+    }
+    if (result == DECK_SERIAL_ROUTER_COPY_EMPTY ||
+        result == DECK_SERIAL_ROUTER_COPY_INVALID) {
+        return true;
+    }
+    if (result != DECK_SERIAL_ROUTER_COPY_OK || block.length == 0 ||
+        block.length > sizeof(block.bytes)) {
+        return false;
+    }
+    *progressed = true;
+    if (link->sent_serial_session_id == block.session_id &&
+        !sequence_after(block.sequence, link->sent_serial_sequence)) {
+        secure_clear(&block, sizeof(block));
+        return true;
+    }
+    return send_serial_block(link, &block);
+}
+
+bool send_one_history_serial_block(
+    deck_companion_link_t *link,
+    bool *progressed
+)
+{
+    *progressed = false;
+    if (!link->serial_history_active) {
+        return true;
+    }
+    deck_serial_routed_block_t block{};
+    deck_serial_router_copy_result_t result = DECK_SERIAL_ROUTER_COPY_EMPTY;
+    {
+        const std::lock_guard<std::mutex> lock(link->serial_mutex);
+        if (link->serial == nullptr) {
+            return false;
+        }
+        result = deck_serial_service_copy_history_after(
+            link->serial,
+            link->serial_history_cursor,
+            &block
+        );
+    }
+    if (result == DECK_SERIAL_ROUTER_COPY_EMPTY) {
+        link->serial_history_active = false;
+        return true;
+    }
+    if ((result != DECK_SERIAL_ROUTER_COPY_OK &&
+         result != DECK_SERIAL_ROUTER_COPY_GAP) ||
+        block.session_id != link->serial_history_session_id) {
+        secure_clear(&block, sizeof(block));
+        return false;
+    }
+    if (result == DECK_SERIAL_ROUTER_COPY_OK &&
+        link->serial_history_cursor != 0 &&
+        !sequence_after(block.sequence, link->serial_history_cursor)) {
+        secure_clear(&block, sizeof(block));
+        return false;
+    }
+    if (!send_serial_block(link, &block)) {
+        return false;
+    }
+    link->serial_history_cursor = link->sent_serial_sequence;
+    *progressed = true;
+    return true;
+}
+
+const char *serial_command_code_name(deck_serial_command_code_t code)
+{
+    switch (code) {
+        case DECK_SERIAL_COMMAND_APPLIED:
+            return "applied";
+        case DECK_SERIAL_COMMAND_NO_CHANGE:
+            return "no_change";
+        case DECK_SERIAL_COMMAND_STALE_SESSION:
+            return "stale_session";
+        case DECK_SERIAL_COMMAND_STALE_REQUEST:
+            return "stale_request";
+        case DECK_SERIAL_COMMAND_UART_INSTALL_FAILED:
+            return "uart_install_failed";
+        case DECK_SERIAL_COMMAND_UART_UNINSTALL_FAILED:
+            return "uart_uninstall_failed";
+        case DECK_SERIAL_COMMAND_INVALID:
+        default:
+            return "invalid";
+    }
+}
+
+bool send_pending_serial_owner_result(deck_companion_link_t *link)
+{
+    if (!link->pending_serial_owner_request) {
+        return true;
+    }
+    deck_serial_command_result_t result{};
+    {
+        const std::lock_guard<std::mutex> lock(link->serial_mutex);
+        if (link->serial == nullptr ||
+            !deck_serial_service_command_result(
+                link->serial,
+                link->pending_serial_request_id,
+                &result
+            )) {
+            return true;
+        }
+    }
+    char message[320]{};
+    const uint64_t wire_session_id =
+        result.state == DECK_SERIAL_DISARMED ? 0 : result.session_id;
+    const int size = std::snprintf(
+        message,
+        sizeof(message),
+        "{\"type\":\"serial.owner.result\",\"protocol_version\":1,\"serial_session_id\":%llu,\"request_id\":%llu,\"code\":\"%s\",\"serial_state\":\"%s\",\"owner_generation\":%llu,\"lease_id\":%llu}",
+        static_cast<unsigned long long>(wire_session_id),
+        static_cast<unsigned long long>(result.request_id),
+        serial_command_code_name(result.code),
+        serial_state_name(result.state),
+        static_cast<unsigned long long>(result.owner_generation),
+        static_cast<unsigned long long>(result.lease_id)
+    );
+    if (size <= 0 || static_cast<size_t>(size) >= sizeof(message) ||
+        !send_text(link, message, static_cast<size_t>(size))) {
+        return false;
+    }
+    link->pending_serial_owner_request = false;
+    link->pending_serial_request_id = 0;
+    return true;
+}
+
+bool handle_serial_control(
+    deck_companion_link_t *link,
+    const char *message,
+    size_t message_size,
+    bool *handled
+)
+{
+    *handled = false;
+    deck_device_serial_control_t control{};
+    if (!deck_device_protocol_parse_serial_control(
+            message,
+            message_size,
+            &control
+        )) {
+        return true;
+    }
+    *handled = true;
+    const std::lock_guard<std::mutex> lock(link->serial_mutex);
+    if (link->serial == nullptr) {
+        return false;
+    }
+    deck_serial_session_snapshot_t serial{};
+    if (!deck_serial_service_snapshot(link->serial, &serial) ||
+        serial.state == DECK_SERIAL_DISARMED ||
+        serial.session_id != control.session_id) {
+        return false;
+    }
+    switch (control.kind) {
+        case DECK_DEVICE_SERIAL_OWNER_REQUEST:
+            if (link->pending_serial_owner_request) {
+                return false;
+            }
+            if (!deck_serial_service_request_web(
+                    link->serial,
+                    control.session_id,
+                    control.request_id,
+                    control.enable
+                )) {
+                return false;
+            }
+            link->pending_serial_owner_request = true;
+            link->pending_serial_request_id = control.request_id;
+            return true;
+        case DECK_DEVICE_SERIAL_OWNER_ACTIVITY:
+            if (serial.state != DECK_SERIAL_WEB_TX ||
+                serial.lease_id != control.lease_id) {
+                return false;
+            }
+            return deck_serial_service_web_activity(
+                link->serial,
+                control.session_id,
+                control.lease_id
+            );
+        case DECK_DEVICE_SERIAL_HISTORY_REQUEST:
+            link->serial_history_active = true;
+            link->serial_stream_ready = true;
+            link->serial_history_session_id = control.session_id;
+            link->serial_history_cursor = control.after_sequence;
+            link->sent_serial_session_id = control.session_id;
+            link->sent_serial_sequence = control.after_sequence;
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool handle_serial_binary(
+    deck_companion_link_t *link,
+    const uint8_t *document,
+    size_t document_size
+)
+{
+    deck_serial_frame_view_t frame{};
+    if (!deck_serial_frame_decode(document, document_size, &frame) ||
+        frame.channel != DECK_SERIAL_FRAME_WEB_TX) {
+        return false;
+    }
+    const std::lock_guard<std::mutex> lock(link->serial_mutex);
+    if (link->serial == nullptr) {
+        return false;
+    }
+    deck_serial_session_snapshot_t serial{};
+    if (!deck_serial_service_snapshot(link->serial, &serial) ||
+        serial.state != DECK_SERIAL_WEB_TX || !serial.uart_installed ||
+        serial.session_id != frame.session_id || serial.lease_id == 0) {
+        return false;
+    }
+    if (link->accepted_web_session_id == frame.session_id &&
+        (!sequence_after(frame.sequence, link->accepted_web_sequence) ||
+         frame.monotonic_ms < link->accepted_web_monotonic_ms)) {
+        return false;
+    }
+    if (!deck_serial_service_submit_web(
+            link->serial,
+            frame.session_id,
+            serial.lease_id,
+            frame.payload,
+            frame.payload_size
+        )) {
+        return false;
+    }
+    link->accepted_web_session_id = frame.session_id;
+    link->accepted_web_sequence = frame.sequence;
+    link->accepted_web_monotonic_ms = frame.monotonic_ms;
+    return true;
 }
 
 bool send_heartbeat(deck_companion_link_t *link, uint64_t now)
@@ -486,7 +943,35 @@ bool accept_data(deck_companion_link_t *link, const TransportEvent &event)
         return true;
     }
     const size_t message_size = link->frame_assembler.message_size;
+    const uint8_t message_opcode = link->frame_assembler.message_opcode;
+    if (message_opcode == 2U) {
+        const bool accepted = handle_serial_binary(
+            link,
+            reinterpret_cast<const uint8_t *>(link->frame.get()),
+            message_size
+        );
+        secure_clear(link->frame.get(), message_size);
+        deck_companion_link_frame_reset(&link->frame_assembler);
+        return accepted;
+    }
+    if (message_opcode != 1U) {
+        secure_clear(link->frame.get(), message_size);
+        deck_companion_link_frame_reset(&link->frame_assembler);
+        return false;
+    }
     link->frame[message_size] = '\0';
+    bool serial_control_handled = false;
+    const bool serial_control_accepted = handle_serial_control(
+        link,
+        link->frame.get(),
+        message_size,
+        &serial_control_handled
+    );
+    if (serial_control_handled) {
+        secure_clear(link->frame.get(), message_size + 1);
+        deck_companion_link_frame_reset(&link->frame_assembler);
+        return serial_control_accepted;
+    }
     deck_device_heartbeat_t heartbeat{};
     const uint64_t now = monotonic_ms();
     uint64_t trusted_utc_ms = 0;
@@ -578,7 +1063,10 @@ void link_task(void *argument)
             (void)refresh_profile(link, now);
             link->next_profile_poll_ms = now + kProfilePollMs;
         }
+        const bool serial_owner_safe =
+            link->client != nullptr || ensure_web_owner_revoked(link, now);
         if (link->secret != nullptr && link->client == nullptr &&
+            serial_owner_safe &&
             now >= link->next_connect_ms && !start_transport(link)) {
             schedule_retry(link, now, true);
         }
@@ -599,6 +1087,38 @@ void link_task(void *argument)
                     now,
                     kHeartbeatIntervalMs
                 );
+            }
+        }
+        if (state_is_online(link)) {
+            if (link->serial_publication_dirty.exchange(
+                    false,
+                    std::memory_order_acq_rel
+                )) {
+                link->has_published_serial = false;
+            }
+            if (!send_pending_serial_owner_result(link) ||
+                !send_serial_state_if_changed(link)) {
+                schedule_retry(link, now, true);
+            } else if (link->serial_stream_ready) {
+                for (size_t index = 0; index < 8; ++index) {
+                    bool progressed = false;
+                    const bool accepted = link->serial_history_active
+                                              ? send_one_history_serial_block(
+                                                    link,
+                                                    &progressed
+                                                )
+                                              : send_one_live_serial_block(
+                                                    link,
+                                                    &progressed
+                                                );
+                    if (!accepted) {
+                        schedule_retry(link, monotonic_ms(), true);
+                        break;
+                    }
+                    if (!progressed) {
+                        break;
+                    }
+                }
             }
         }
         if (link->queue_overflow.exchange(false, std::memory_order_acq_rel)) {
@@ -720,6 +1240,49 @@ deck_companion_link_t *deck_companion_link_start(
     }
     xEventGroupSetBits(link->lifecycle, kStartBit);
     return link;
+}
+
+bool deck_companion_link_attach_serial(
+    deck_companion_link_t *link,
+    deck_serial_service_t *serial
+)
+{
+    if (link == nullptr || serial == nullptr ||
+        link->stop_requested.load(std::memory_order_acquire)) {
+        return false;
+    }
+    {
+        const std::lock_guard<std::mutex> lock(link->serial_mutex);
+        if (link->serial != nullptr && link->serial != serial) {
+            return false;
+        }
+        link->serial = serial;
+    }
+    TransportEvent wake{};
+    wake.type = TransportEventType::wake;
+    link->serial_publication_dirty.store(true, std::memory_order_release);
+    (void)xQueueSend(link->events, &wake, 0);
+    return true;
+}
+
+bool deck_companion_link_detach_serial(
+    deck_companion_link_t *link,
+    deck_serial_service_t *serial
+)
+{
+    if (link == nullptr || serial == nullptr) {
+        return false;
+    }
+    const std::lock_guard<std::mutex> lock(link->serial_mutex);
+    if (link->serial == nullptr) {
+        return true;
+    }
+    if (link->serial != serial) {
+        return false;
+    }
+    link->serial = nullptr;
+    link->serial_publication_dirty.store(true, std::memory_order_release);
+    return true;
 }
 
 bool deck_companion_link_snapshot(

@@ -1,0 +1,21 @@
+{
+  "title": "S3 RLCD Deck Serial binary frame v1",
+  "version": 1,
+  "magic_hex": "53524431",
+  "header_bytes": 32,
+  "max_payload_bytes": 256,
+  "byte_order": "big",
+  "fields": [
+    {"name": "magic", "offset": 0, "bytes": 4},
+    {"name": "channel", "offset": 4, "bytes": 1},
+    {"name": "flags", "offset": 5, "bytes": 1, "required_value": 0},
+    {"name": "payload_length", "offset": 6, "bytes": 2},
+    {"name": "session_id", "offset": 8, "bytes": 8},
+    {"name": "sequence", "offset": 16, "bytes": 8},
+    {"name": "device_monotonic_ms", "offset": 24, "bytes": 8}
+  ],
+  "channels": {
+    "target_rx": 1,
+    "web_tx": 2
+  }
+}

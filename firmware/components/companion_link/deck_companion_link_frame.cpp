@@ -6,6 +6,7 @@ namespace {
 
 constexpr uint8_t kContinuationOpcode = 0;
 constexpr uint8_t kTextOpcode = 1;
+constexpr uint8_t kBinaryOpcode = 2;
 
 bool start_transport_frame(
     deck_companion_link_frame_t *frame,
@@ -14,7 +15,7 @@ bool start_transport_frame(
 )
 {
     if (!frame->active) {
-        if (opcode != kTextOpcode) {
+        if (opcode != kTextOpcode && opcode != kBinaryOpcode) {
             return false;
         }
         frame->active = true;
@@ -87,8 +88,7 @@ deck_companion_link_frame_result_t deck_companion_link_frame_accept(
                static_cast<size_t>(payload_offset) != frame->frame_size) {
         return DECK_COMPANION_LINK_FRAME_INVALID;
     }
-    if (frame->message_opcode != kTextOpcode ||
-        data_size > frame->capacity - frame->message_size) {
+    if (data_size > frame->capacity - frame->message_size) {
         return DECK_COMPANION_LINK_FRAME_INVALID;
     }
     if (data_size != 0) {

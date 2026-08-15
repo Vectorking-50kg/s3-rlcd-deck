@@ -125,6 +125,26 @@ public:
         return true;
     }
 
+    bool boolean(bool *output)
+    {
+        whitespace();
+        if (output == nullptr) {
+            return false;
+        }
+        const size_t remaining = static_cast<size_t>(end_ - current_);
+        if (remaining >= 4 && std::memcmp(current_, "true", 4) == 0) {
+            current_ += 4;
+            *output = true;
+            return true;
+        }
+        if (remaining >= 5 && std::memcmp(current_, "false", 5) == 0) {
+            current_ += 5;
+            *output = false;
+            return true;
+        }
+        return false;
+    }
+
     bool object_separator(bool *done)
     {
         whitespace();
@@ -382,14 +402,16 @@ bool deck_device_protocol_validate_hello(
     if (!cursor.valid() || !cursor.consume('{')) {
         return false;
     }
-    uint8_t seen = 0;
+    uint16_t seen = 0;
+    bool serial_disarmed = false;
+    uint64_t serial_session_id = 0;
     bool done = false;
     while (!done) {
         char key[32]{};
         if (!cursor.string(key, sizeof(key)) || !cursor.consume(':')) {
             return false;
         }
-        uint8_t bit = 0;
+        uint16_t bit = 0;
         if (std::strcmp(key, "type") == 0) {
             bit = 1U;
             char value[17]{};
@@ -431,8 +453,17 @@ bool deck_device_protocol_validate_hello(
         } else if (std::strcmp(key, "serial_state") == 0) {
             bit = 64U;
             char value[16]{};
-            if (!cursor.string(value, sizeof(value)) ||
-                std::strcmp(value, "disarmed") != 0) {
+            if (!cursor.string(value, sizeof(value))) {
+                return false;
+            }
+            serial_disarmed = std::strcmp(value, "disarmed") == 0;
+            if (!serial_disarmed && std::strcmp(value, "usb_tx") != 0 &&
+                std::strcmp(value, "web_tx") != 0) {
+                return false;
+            }
+        } else if (std::strcmp(key, "serial_session_id") == 0) {
+            bit = 128U;
+            if (!cursor.unsigned_integer(&serial_session_id)) {
                 return false;
             }
         } else {
@@ -446,7 +477,8 @@ bool deck_device_protocol_validate_hello(
             return false;
         }
     }
-    return seen == 0x7fU && cursor.finished();
+    return seen == 0xffU && cursor.finished() &&
+           (serial_disarmed ? serial_session_id == 0 : serial_session_id != 0);
 }
 
 bool deck_device_protocol_parse_heartbeat(
@@ -537,4 +569,96 @@ bool deck_device_protocol_parse_heartbeat(
     return seen == 0xffU && cursor.finished() && tx_capacity != 0 &&
            rx_capacity != 0 && tx_depth <= tx_capacity && rx_depth <= rx_capacity &&
            (!has_previous || heartbeat->monotonic_ms >= previous_monotonic_ms);
+}
+
+bool deck_device_protocol_parse_serial_control(
+    const char *message,
+    size_t message_size,
+    deck_device_serial_control_t *control
+)
+{
+    if (message == nullptr || message_size == 0 ||
+        message_size > DECK_DEVICE_PROTOCOL_MAX_CONTROL_BYTES || control == nullptr) {
+        return false;
+    }
+    *control = {};
+    JsonCursor cursor(message, message_size);
+    if (!cursor.valid() || !cursor.consume('{')) {
+        return false;
+    }
+    uint8_t seen = 0;
+    uint8_t required = 0;
+    bool has_kind = false;
+    bool done = false;
+    while (!done) {
+        char key[32]{};
+        if (!cursor.string(key, sizeof(key)) || !cursor.consume(':')) {
+            return false;
+        }
+        uint8_t bit = 0;
+        if (std::strcmp(key, "type") == 0) {
+            bit = 1U;
+            char value[32]{};
+            if (!cursor.string(value, sizeof(value))) {
+                return false;
+            }
+            if (std::strcmp(value, "serial.owner.request") == 0) {
+                control->kind = DECK_DEVICE_SERIAL_OWNER_REQUEST;
+                required = 1U | 2U | 4U | 8U | 16U;
+            } else if (std::strcmp(value, "serial.owner.activity") == 0) {
+                control->kind = DECK_DEVICE_SERIAL_OWNER_ACTIVITY;
+                required = 1U | 2U | 4U | 32U;
+            } else if (std::strcmp(value, "serial.history.request") == 0) {
+                control->kind = DECK_DEVICE_SERIAL_HISTORY_REQUEST;
+                required = 1U | 2U | 4U | 64U;
+            } else {
+                return false;
+            }
+            has_kind = true;
+        } else if (std::strcmp(key, "protocol_version") == 0) {
+            bit = 2U;
+            uint64_t value = 0;
+            if (!cursor.unsigned_integer(&value) || value != DECK_DEVICE_PROTOCOL_VERSION) {
+                return false;
+            }
+        } else if (std::strcmp(key, "serial_session_id") == 0) {
+            bit = 4U;
+            if (!cursor.unsigned_integer(&control->session_id) ||
+                control->session_id == 0) {
+                return false;
+            }
+        } else if (std::strcmp(key, "request_id") == 0) {
+            bit = 8U;
+            if (!cursor.unsigned_integer(&control->request_id) ||
+                control->request_id == 0) {
+                return false;
+            }
+        } else if (std::strcmp(key, "enable") == 0) {
+            bit = 16U;
+            if (!cursor.boolean(&control->enable)) {
+                return false;
+            }
+        } else if (std::strcmp(key, "lease_id") == 0) {
+            bit = 32U;
+            if (!cursor.unsigned_integer(&control->lease_id) ||
+                control->lease_id == 0) {
+                return false;
+            }
+        } else if (std::strcmp(key, "after_sequence") == 0) {
+            bit = 64U;
+            if (!cursor.unsigned_integer(&control->after_sequence)) {
+                return false;
+            }
+        } else {
+            return false;
+        }
+        if ((seen & bit) != 0) {
+            return false;
+        }
+        seen |= bit;
+        if (!cursor.object_separator(&done)) {
+            return false;
+        }
+    }
+    return has_kind && seen == required && cursor.finished();
 }

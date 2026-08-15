@@ -20,6 +20,7 @@ import (
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/history"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/protocol"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/serialhub"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/structuredprovider"
 )
 
@@ -61,6 +62,7 @@ type Runtime struct {
 	consoleAccess           *consoleAccessGrants
 	pairing                 *pairing.Service
 	deviceLink              *devicelink.Hub
+	serialHub               *serialhub.Service
 	codexCollector          CodexCollector
 	codexObserver           CodexObserver
 	cursorCollector         CursorCollector
@@ -110,13 +112,49 @@ func New(config Config) (*Runtime, error) {
 			}
 		}
 	}
+	serialService, err := serialhub.NewService(serialhub.ServiceConfig{})
+	if err != nil {
+		return nil, err
+	}
 	deviceLink, err := devicelink.New(devicelink.Config{
 		Authenticator:     normalized.Pairing,
 		HeartbeatInterval: normalized.DeviceHub.HeartbeatInterval,
 		HeartbeatTimeout:  normalized.DeviceHub.HeartbeatTimeout,
 		OnDeviceProfile:   onDeviceProfile,
+		OnSerialState: func(deviceID string, sessionID uint64, state string) error {
+			return serialService.Reconcile(deviceID, sessionID, serialhub.State(state))
+		},
+		OnSerialFrame: serialService.Ingest,
+		OnSerialOwnerResult: func(deviceID string, result devicelink.SerialOwnerResult) error {
+			status := serialService.Status()
+			if deviceID != status.DeviceID {
+				return serialhub.ErrStaleOwnerResult
+			}
+			owner := serialhub.OwnerUnavailable
+			if result.SerialState == "usb_tx" {
+				owner = serialhub.OwnerUSB
+			} else if result.SerialState == "web_tx" {
+				owner = serialhub.OwnerWeb
+			}
+			ownerResult := serialhub.OwnerResult{
+				SessionID: result.SerialSessionID, RequestID: result.RequestID,
+				Owner: owner, LeaseID: result.LeaseID,
+			}
+			if result.Code == "applied" || result.Code == "no_change" {
+				return serialService.Leases().ApplyOwnerResult(ownerResult)
+			}
+			return serialService.Leases().ApplyOwnerRejection(ownerResult)
+		},
+		SerialHistoryCursor: func(deviceID string, sessionID uint64) (uint64, bool) {
+			status := serialService.Status()
+			if status.DeviceID != deviceID || status.SessionID != sessionID {
+				return 0, false
+			}
+			return serialService.Ring().Stats().NewestSequence, true
+		},
 	})
 	if err != nil {
+		serialService.Close()
 		return nil, err
 	}
 	return &Runtime{
@@ -126,6 +164,7 @@ func New(config Config) (*Runtime, error) {
 		consoleAccess:        &consoleAccessGrants{},
 		pairing:              normalized.Pairing,
 		deviceLink:           deviceLink,
+		serialHub:            serialService,
 		codexCollector:       normalized.CodexCollector,
 		codexObserver:        normalized.CodexObserver,
 		cursorCollector:      normalized.CursorCollector,
@@ -294,7 +333,12 @@ func (application *Runtime) Run(ctx context.Context) error {
 		serveResults <- serveResult{name: "Device Hub", err: deviceHubServer.Serve(deviceHubListener)}
 	}()
 	collectorContext, stopCollector := context.WithCancel(ctx)
-	collectorDone := make([]chan error, 0, 4+len(application.structuredCollectors))
+	collectorDone := make([]chan error, 0, 5+len(application.structuredCollectors))
+	serialLeaseDone := make(chan error, 1)
+	collectorDone = append(collectorDone, serialLeaseDone)
+	go func() {
+		serialLeaseDone <- application.runSerialLeaseSupervisor(collectorContext)
+	}()
 	if application.deviceProfileUpdates != nil {
 		done := make(chan error, 1)
 		collectorDone = append(collectorDone, done)
@@ -379,6 +423,7 @@ func (application *Runtime) Run(ctx context.Context) error {
 	shutdownContext, cancel := context.WithTimeout(context.Background(), application.shutdownTimeout)
 	defer cancel()
 	application.deviceLink.Close()
+	application.serialHub.Close()
 	shutdownErrors := shutdownServers(shutdownContext, managementServer, deviceHubServer)
 	for _, done := range collectorDone {
 		select {
