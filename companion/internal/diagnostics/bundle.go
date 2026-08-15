@@ -28,11 +28,13 @@ type BundleFile struct {
 }
 
 type BundleManifest struct {
-	SchemaVersion uint32       `json:"schema_version"`
-	CreatedUTC    string       `json:"created_utc"`
-	BuildVersion  string       `json:"build_version"`
-	BuildCommit   string       `json:"build_commit"`
-	Files         []BundleFile `json:"files"`
+	SchemaVersion    uint32       `json:"schema_version"`
+	CreatedUTC       string       `json:"created_utc"`
+	BuildVersion     string       `json:"build_version"`
+	BuildCommit      string       `json:"build_commit"`
+	EventWindowHours uint32       `json:"event_window_hours"`
+	EventsTruncated  bool         `json:"events_truncated"`
+	Files            []BundleFile `json:"files"`
 }
 
 type schemaKeysDocument struct {
@@ -81,7 +83,11 @@ func (service *Service) Export(
 		return nil, BundleManifest{}, err
 	}
 	now := service.now().UTC()
-	events, err := service.snapshot(ctx, now.Add(-24*time.Hour), service.maximumExportBytes/2)
+	events, eventsTruncated, err := service.snapshot(
+		ctx,
+		now.Add(-24*time.Hour),
+		service.maximumExportBytes/2,
+	)
 	if err != nil {
 		return nil, BundleManifest{}, err
 	}
@@ -109,6 +115,7 @@ func (service *Service) Export(
 	manifest := BundleManifest{
 		SchemaVersion: 1, CreatedUTC: now.Format(time.RFC3339Nano),
 		BuildVersion: input.BuildVersion, BuildCommit: input.BuildCommit,
+		EventWindowHours: 24, EventsTruncated: eventsTruncated,
 		Files: make([]BundleFile, 0, len(paths)),
 	}
 	for _, filePath := range paths {

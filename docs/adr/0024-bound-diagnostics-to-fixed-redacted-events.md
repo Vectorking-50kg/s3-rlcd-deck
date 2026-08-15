@@ -7,11 +7,12 @@ field for an exception string, path, URL, header, request/response, Provider raw
 tool argument, Pairing/device Token, or Serial payload. Panic recovery records a fixed code and
 never the recovered value.
 
-One private Companion worker owns an in-memory queue and writes immutable owner-only JSONL
-`Diagnostic Log Segment`s. Producers never wait for disk I/O; queue or storage pressure drops new
-events within a fixed bound and later records only the numeric dropped count. Segments rotate at
-256 KiB, retain at most seven days or 50 MiB by default, and are strictly revalidated before
-export. A restart cannot replace a segment that already exists.
+One private Companion worker owns an in-memory queue and writes owner-only JSONL `Diagnostic Log
+Segment`s. Producers never wait for disk I/O; queue or storage pressure drops new events within a
+fixed bound and later records only the numeric dropped count. The current segment is atomically
+replaced for durability and sealed after one hour or 256 KiB; sealed segments are immutable.
+Segments retain at most seven days or 50 MiB by default and are strictly revalidated before export.
+A restart cannot replace a segment that already exists.
 
 Release firmware owns one volatile 64-event `Deck Diagnostic Ring` whose public API accepts only
 enums and integers. An Active Device Link advertising the `diagnostics` capability answers an exact

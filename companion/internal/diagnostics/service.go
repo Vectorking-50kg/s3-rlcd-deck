@@ -26,6 +26,7 @@ const (
 	defaultMaximumSegmentBytes = 256 << 10
 	defaultMaximumExportBytes  = 8 << 20
 	defaultQueueCapacity       = 1024
+	maximumSegmentAge          = time.Hour
 	maximumSegmentEntries      = 4096
 )
 
@@ -61,6 +62,7 @@ type Service struct {
 	storageFaulted      atomic.Bool
 	stateMu             sync.RWMutex
 	closed              bool
+	terminalErr         error
 }
 
 type Status struct {
@@ -115,7 +117,7 @@ func Open(config Config) (*Service, error) {
 		maximumExportBytes:  config.MaximumExportBytes, now: config.Now,
 		commands: make(chan workerCommand, config.QueueCapacity), done: make(chan struct{}),
 	}
-	if err := service.enforceRetention(config.Now().UTC(), 0); err != nil {
+	if err := service.enforceRetention(config.Now().UTC(), 0, ""); err != nil {
 		return nil, err
 	}
 	go service.run(config.FlushInterval)
@@ -203,7 +205,10 @@ func (service *Service) Close(ctx context.Context) error {
 		service.stateMu.Unlock()
 		select {
 		case <-service.done:
-			return nil
+			service.stateMu.RLock()
+			err := service.terminalErr
+			service.stateMu.RUnlock()
+			return err
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -232,8 +237,12 @@ func (service *Service) run(flushInterval time.Duration) {
 	defer ticker.Stop()
 	batch := make([]storedEvent, 0, 64)
 	batchBytes := 0
+	activeCreated := time.Time{}
+	activePath := ""
+	activePersistedBytes := 0
+	lastSegmentNS := int64(-1)
 	var sequence uint64
-	persist := func() error {
+	persist := func(seal bool) error {
 		if len(batch) == 0 {
 			return nil
 		}
@@ -252,24 +261,45 @@ func (service *Service) run(flushInterval time.Duration) {
 		if now.Year() < 0 || now.Year() > 9999 || now.UnixNano() < 0 {
 			return errors.New("diagnostic clock is outside the supported range")
 		}
-		if err := service.enforceRetention(now, int64(buffer.Len())); err != nil {
+		if activeCreated.IsZero() {
+			activeCreated = now
+		}
+		reserve := int64(buffer.Len() - activePersistedBytes)
+		if reserve < 0 {
+			reserve = 0
+		}
+		if err := service.enforceRetention(now, reserve, activePath); err != nil {
 			return err
 		}
-		path, nextErr := service.nextSegmentPath(now, &sequence)
-		if nextErr != nil {
-			return nextErr
+		if activePath == "" {
+			if createdNS := activeCreated.UnixNano(); createdNS != lastSegmentNS {
+				lastSegmentNS = createdNS
+				sequence = 0
+			}
+			path, nextErr := service.nextSegmentPath(activeCreated, &sequence)
+			if nextErr != nil {
+				return nextErr
+			}
+			activePath = path
 		}
-		if _, err := protectedfile.Replace(path, buffer.Bytes()); err != nil {
+		if _, err := protectedfile.Replace(activePath, buffer.Bytes()); err != nil {
 			return err
 		}
-		batch = batch[:0]
-		batchBytes = 0
+		activePersistedBytes = buffer.Len()
+		if seal {
+			batch = batch[:0]
+			batchBytes = 0
+			activeCreated = time.Time{}
+			activePath = ""
+			activePersistedBytes = 0
+		}
 		return nil
 	}
-	commit := func() error {
+	commit := func(seal bool) error {
 		if count := service.dropped.Swap(0); count != 0 {
+			now := service.now().UTC()
 			droppedEvent := storedEvent{
-				TimestampUTC: service.now().UTC().Format(time.RFC3339Nano),
+				TimestampUTC: now.Format(time.RFC3339Nano),
 				Event: Event{Level: LevelWarning, Module: ModuleDiagnostics,
 					Code: CodeQueueOverflow, Count: count},
 			}
@@ -279,18 +309,21 @@ func (service *Service) run(flushInterval time.Duration) {
 				return errors.New("diagnostic overflow event exceeds segment bound")
 			}
 			if batchBytes+len(encoded)+1 > service.maximumSegmentBytes && len(batch) != 0 {
-				if err := persist(); err != nil {
+				if err := persist(true); err != nil {
 					service.dropped.Add(count)
 					return err
 				}
 			}
+			if len(batch) == 0 {
+				activeCreated = now
+			}
 			batch = append(batch, droppedEvent)
 			batchBytes += len(encoded) + 1
 		}
-		return persist()
+		return persist(seal)
 	}
-	commitWithStatus := func() error {
-		err := commit()
+	commitWithStatus := func(seal bool) error {
+		err := commit(seal)
 		service.storageFaulted.Store(err != nil)
 		return err
 	}
@@ -298,8 +331,16 @@ func (service *Service) run(flushInterval time.Duration) {
 		select {
 		case command := <-service.commands:
 			if command.event != nil {
+				now := service.now().UTC()
+				if len(batch) != 0 && !activeCreated.IsZero() &&
+					now.Sub(activeCreated) >= maximumSegmentAge {
+					if commitWithStatus(true) != nil {
+						service.dropped.Add(1)
+						continue
+					}
+				}
 				stored := storedEvent{
-					TimestampUTC: service.now().UTC().Format(time.RFC3339Nano),
+					TimestampUTC: now.Format(time.RFC3339Nano),
 					Event:        *command.event,
 				}
 				encoded, _ := json.Marshal(stored)
@@ -308,25 +349,35 @@ func (service *Service) run(flushInterval time.Duration) {
 					continue
 				}
 				if batchBytes+len(encoded)+1 > service.maximumSegmentBytes && len(batch) != 0 {
-					if commitWithStatus() != nil {
+					if commitWithStatus(true) != nil {
 						// Preserve the bounded batch for a later retry. The new
 						// event is represented by the fixed queue-overflow count.
 						service.dropped.Add(1)
 						continue
 					}
 				}
+				if len(batch) == 0 {
+					activeCreated = now
+				}
 				batch = append(batch, stored)
 				batchBytes += len(encoded) + 1
 			}
 			if command.flush != nil {
-				command.flush <- commitWithStatus()
+				command.flush <- commitWithStatus(false)
 			}
 			if command.stop != nil {
-				command.stop <- commitWithStatus()
+				err := commitWithStatus(true)
+				service.stateMu.Lock()
+				service.terminalErr = err
+				service.stateMu.Unlock()
+				command.stop <- err
 				return
 			}
 		case <-ticker.C:
-			_ = commitWithStatus()
+			now := service.now().UTC()
+			seal := len(batch) != 0 && !activeCreated.IsZero() &&
+				now.Sub(activeCreated) >= maximumSegmentAge
+			_ = commitWithStatus(seal)
 		}
 	}
 }
@@ -376,8 +427,10 @@ func (service *Service) segments() ([]segmentMeta, error) {
 		createdNS, parseErr := strconv.ParseInt(parts[0], 10, 64)
 		_, sequenceErr := strconv.ParseUint(parts[1], 10, 64)
 		info, statErr := entry.Info()
+		protectionErr := protectedfile.VerifyPrivate(filepath.Join(service.directory, name))
 		if len(parts[0]) != 19 || len(parts[1]) != 8 || parseErr != nil ||
-			sequenceErr != nil || statErr != nil || !info.Mode().IsRegular() ||
+			sequenceErr != nil || statErr != nil || protectionErr != nil ||
+			!info.Mode().IsRegular() ||
 			info.Size() < 0 || info.Size() > int64(service.maximumSegmentBytes) {
 			return nil, errors.New("invalid diagnostic segment")
 		}
@@ -387,7 +440,11 @@ func (service *Service) segments() ([]segmentMeta, error) {
 	return segments, nil
 }
 
-func (service *Service) enforceRetention(now time.Time, reserve int64) error {
+func (service *Service) enforceRetention(
+	now time.Time,
+	reserve int64,
+	preservePath string,
+) error {
 	segments, err := service.segments()
 	if err != nil {
 		return err
@@ -399,8 +456,11 @@ func (service *Service) enforceRetention(now time.Time, reserve int64) error {
 	}
 	remaining := len(segments)
 	for _, segment := range segments {
-		if segment.createdNS >= cutoff && total+reserve <= service.maximumBytes &&
-			remaining < maximumSegmentEntries {
+		if preservePath != "" && segment.name == filepath.Base(preservePath) {
+			continue
+		}
+		if segment.createdNS+maximumSegmentAge.Nanoseconds() > cutoff &&
+			total+reserve <= service.maximumBytes {
 			continue
 		}
 		if removeErr := os.Remove(filepath.Join(service.directory, segment.name)); removeErr != nil {
@@ -409,28 +469,37 @@ func (service *Service) enforceRetention(now time.Time, reserve int64) error {
 		total -= segment.size
 		remaining--
 	}
+	if remaining >= maximumSegmentEntries {
+		return errors.New("diagnostic segment count reached its safety bound")
+	}
 	return nil
 }
 
-func (service *Service) snapshot(ctx context.Context, since time.Time, maximumBytes int) ([]byte, error) {
+func (service *Service) snapshot(
+	ctx context.Context,
+	since time.Time,
+	maximumBytes int,
+) ([]byte, bool, error) {
+	if maximumBytes <= 0 {
+		return nil, false, errors.New("diagnostic snapshot size must be positive")
+	}
 	segments, err := service.segments()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	var output bytes.Buffer
+	lines := make([][]byte, 0, 128)
+	selectedBytes := 0
+	truncated := false
 	for _, segment := range segments {
 		if err = ctx.Err(); err != nil {
-			return nil, err
-		}
-		if segment.createdNS < since.UnixNano() {
-			continue
+			return nil, false, err
 		}
 		contents, readErr := protectedfile.Read(
 			filepath.Join(service.directory, segment.name),
 			service.maximumSegmentBytes,
 		)
 		if readErr != nil {
-			return nil, readErr
+			return nil, false, readErr
 		}
 		scanner := bufio.NewScanner(bytes.NewReader(contents))
 		scanner.Buffer(make([]byte, 1024), service.maximumSegmentBytes)
@@ -440,26 +509,41 @@ func (service *Service) snapshot(ctx context.Context, since time.Time, maximumBy
 			decoder.DisallowUnknownFields()
 			if decoder.Decode(&event) != nil || decoder.Decode(&struct{}{}) != io.EOF ||
 				!validEvent(event.Event) {
-				return nil, errors.New("invalid persisted diagnostic event")
+				return nil, false, errors.New("invalid persisted diagnostic event")
 			}
 			parsed, parseErr := time.Parse(time.RFC3339Nano, event.TimestampUTC)
 			if parseErr != nil || parsed.Location() != time.UTC ||
 				parsed.Format(time.RFC3339Nano) != event.TimestampUTC {
-				return nil, errors.New("invalid diagnostic event timestamp")
+				return nil, false, errors.New("invalid diagnostic event timestamp")
 			}
 			if parsed.Before(since) {
 				continue
 			}
 			line, _ := json.Marshal(event)
-			if output.Len()+len(line)+1 > maximumBytes {
-				return output.Bytes(), nil
+			if len(line)+1 > maximumBytes {
+				truncated = true
+				continue
 			}
-			output.Write(line)
-			output.WriteByte('\n')
+			owned := append([]byte(nil), line...)
+			lines = append(lines, owned)
+			selectedBytes += len(owned) + 1
+			for selectedBytes > maximumBytes {
+				selectedBytes -= len(lines[0]) + 1
+				clear(lines[0])
+				lines[0] = nil
+				lines = lines[1:]
+				truncated = true
+			}
 		}
 		if err = scanner.Err(); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
-	return output.Bytes(), nil
+	var output bytes.Buffer
+	output.Grow(selectedBytes)
+	for _, line := range lines {
+		output.Write(line)
+		output.WriteByte('\n')
+	}
+	return output.Bytes(), truncated, nil
 }

@@ -29,6 +29,44 @@ int main()
         ),
         "invalid enum must fail closed"
     );
+    require(
+        deck_diagnostic_ring_record(
+            100,
+            DECK_DIAGNOSTIC_LEVEL_INFO,
+            DECK_DIAGNOSTIC_COMPONENT_SYSTEM,
+            DECK_DIAGNOSTIC_CODE_BOOT,
+            0
+        ) &&
+            deck_diagnostic_ring_record(
+                50,
+                DECK_DIAGNOSTIC_LEVEL_WARNING,
+                DECK_DIAGNOSTIC_COMPONENT_SYSTEM,
+                DECK_DIAGNOSTIC_CODE_TIMEOUT,
+                0
+            ),
+        "concurrent late observations must remain accepted"
+    );
+    deck_diagnostic_snapshot_t concurrent_snapshot{};
+    deck_diagnostic_ring_snapshot(&concurrent_snapshot);
+    require(
+        concurrent_snapshot.count == 2U &&
+            concurrent_snapshot.events[1].monotonic_ms == 100U,
+        "late observation must be clamped under the ring lock"
+    );
+    char concurrent_document[1024]{};
+    size_t concurrent_document_size = 0;
+    require(
+        deck_diagnostic_snapshot_format(
+            &concurrent_snapshot,
+            1,
+            concurrent_document,
+            sizeof(concurrent_document),
+            &concurrent_document_size
+        ),
+        "every accepted concurrent ring must remain formattable"
+    );
+
+    deck_diagnostic_ring_reset();
     for (size_t index = 0; index < DECK_DIAGNOSTIC_RING_CAPACITY + 7U; ++index) {
         require(
             deck_diagnostic_ring_record(

@@ -267,7 +267,8 @@ for a Companion restart.
 ## Redacted diagnostics
 
 The Companion writes only fixed `Diagnostic Event` fields through one nonblocking worker under
-`<data-directory>/diagnostics`. Owner-only immutable JSONL segments rotate at 256 KiB and retain at
+`<data-directory>/diagnostics`. The owner-only active JSONL segment is atomically replaced for
+durability, sealed after one hour or 256 KiB, and then remains immutable; sealed segments retain at
 most seven days or 50 MiB by default. Queue/storage pressure is bounded and represented only by a
 dropped-event count. Arbitrary log strings, errors, paths, URLs, request/response content,
 credentials, Provider raw values, prompts, tool arguments, and Serial payloads cannot enter the
@@ -276,8 +277,9 @@ error code, and a hashed Provider identifier.
 
 Authenticated management clients read `GET /api/v1/diagnostics` and export through the
 Origin/CSRF/rate-limited `POST /api/v1/diagnostics/export`. Export builds the ZIP in bounded memory;
-it creates no temporary archive and never uploads it. `manifest.json` records build identity plus
-the byte length and SHA-256 of `companion/events.jsonl`, `deck/ring.json`, and
+it creates no temporary archive and never uploads it. `manifest.json` records build identity, the
+24-hour event window and whether its bounded newest-event projection was truncated, plus the byte
+length and SHA-256 of `companion/events.jsonl`, `deck/ring.json`, and
 `configuration/schema-keys.json`. The Device Hub collects only exact-response, shared-contract Deck
 memory rings and retains at most 32 in memory. See
 [`ADR 0024`](../docs/adr/0024-bound-diagnostics-to-fixed-redacted-events.md).

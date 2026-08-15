@@ -2,6 +2,7 @@ package diagnostics
 
 import (
 	"archive/zip"
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -119,6 +120,86 @@ func TestSegmentsRotateConcurrentlyAndRespectRetentionBounds(t *testing.T) {
 	}
 }
 
+func TestLowVolumeFlushesShareHourlyActiveSegmentsAcrossSevenDays(t *testing.T) {
+	base := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	var clockMu sync.Mutex
+	now := base
+	service := openTestService(t, Config{
+		Now: func() time.Time {
+			clockMu.Lock()
+			defer clockMu.Unlock()
+			return now
+		},
+		MaximumBytes: 4 << 20, MaximumSegmentBytes: 64 << 10,
+	})
+	for hour := 0; hour < 7*24; hour++ {
+		clockMu.Lock()
+		now = base.Add(time.Duration(hour) * time.Hour)
+		clockMu.Unlock()
+		if !service.Record(Event{
+			Level: LevelInfo, Module: ModuleRuntime, Code: CodeRuntimeReady,
+		}) {
+			t.Fatalf("record hour %d failed", hour)
+		}
+		flushTestService(t, service)
+	}
+	entries, err := os.ReadDir(service.directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) < 7*24-1 || len(entries) > 7*24 {
+		t.Fatalf("seven days of hourly logs used %d segments", len(entries))
+	}
+	assertSegmentBudget(t, service.directory, 4<<20)
+}
+
+func TestSnapshotTruncationKeepsTheNewestEvents(t *testing.T) {
+	base := time.Date(2026, 8, 15, 8, 0, 0, 0, time.UTC)
+	service := openTestService(t, Config{Now: func() time.Time { return base }})
+	for latency := 1; latency <= 12; latency++ {
+		if !service.RecordProvider(ProviderDiagnostic{
+			ProviderID: "provider-a", HTTPStatus: 200,
+			LatencyMS: int64(latency), SchemaVersion: "v1",
+		}) {
+			t.Fatalf("record latency %d failed", latency)
+		}
+	}
+	flushTestService(t, service)
+	all := readAllSegments(t, service.directory)
+	maximumBytes := len(all) / 4
+	if maximumBytes == 0 {
+		t.Fatal("persisted diagnostics were empty")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	document, truncated, err := service.snapshot(
+		ctx,
+		base.Add(-time.Second),
+		maximumBytes,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !truncated {
+		t.Fatal("bounded snapshot did not report truncation")
+	}
+	var latencies []uint32
+	scanner := bufio.NewScanner(bytes.NewReader(document))
+	for scanner.Scan() {
+		var event storedEvent
+		if err = json.Unmarshal(scanner.Bytes(), &event); err != nil {
+			t.Fatal(err)
+		}
+		latencies = append(latencies, event.LatencyMS)
+	}
+	if err = scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(latencies) == 0 || latencies[0] == 1 || latencies[len(latencies)-1] != 12 {
+		t.Fatalf("snapshot did not retain the newest events: %v", latencies)
+	}
+}
+
 func TestRestartAtTheSameClockValueDoesNotOverwriteAnImmutableSegment(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "diagnostics")
 	fixed := time.Date(2026, 8, 15, 8, 0, 0, 123, time.UTC)
@@ -167,6 +248,7 @@ func TestExportRejectsTrailingOrUnexpectedPersistedContent(t *testing.T) {
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("segments = %d, %v", len(entries), err)
 	}
+	closeTestService(t, service)
 	path := filepath.Join(service.directory, entries[0].Name())
 	contents := readAllSegments(t, service.directory)
 	contents = bytes.TrimSuffix(contents, []byte("\n"))
@@ -175,9 +257,14 @@ func TestExportRejectsTrailingOrUnexpectedPersistedContent(t *testing.T) {
 	if _, err = protectedfile.Replace(path, contents); err != nil {
 		t.Fatal(err)
 	}
+	reopened, err := Open(Config{Directory: service.directory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { closeTestService(t, reopened) })
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if _, _, err = service.Export(ctx, BundleInput{
+	if _, _, err = reopened.Export(ctx, BundleInput{
 		BuildVersion: "v1", BuildCommit: "unknown",
 	}); err == nil {
 		t.Fatal("bundle accepted trailing persisted content")
@@ -211,6 +298,9 @@ func TestExportBundleIsBoundedHashedAndTraversalSafe(t *testing.T) {
 	}
 	if len(bundle) > 1<<20 || len(manifest.Files) != 3 {
 		t.Fatalf("unexpected bundle size/files: %d/%d", len(bundle), len(manifest.Files))
+	}
+	if manifest.EventWindowHours != 24 || manifest.EventsTruncated {
+		t.Fatalf("unexpected event window metadata: %#v", manifest)
 	}
 	reader, err := zip.NewReader(bytes.NewReader(bundle), int64(len(bundle)))
 	if err != nil {

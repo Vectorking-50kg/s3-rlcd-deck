@@ -82,6 +82,13 @@ bool deck_diagnostic_ring_record(
         return false;
     }
     std::lock_guard<std::mutex> lock(ring_mutex);
+    if (ring_count != 0) {
+        const size_t last_index =
+            (ring_start + ring_count - 1U) % DECK_DIAGNOSTIC_RING_CAPACITY;
+        if (monotonic_ms < ring_events[last_index].monotonic_ms) {
+            monotonic_ms = ring_events[last_index].monotonic_ms;
+        }
+    }
     const size_t index = (ring_start + ring_count) % DECK_DIAGNOSTIC_RING_CAPACITY;
     ring_events[index] = {monotonic_ms, level, component, code, value};
     if (ring_count < DECK_DIAGNOSTIC_RING_CAPACITY) {

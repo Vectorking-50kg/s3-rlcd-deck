@@ -137,8 +137,9 @@ data, prompts, tool arguments, or serial bodies.
 _Avoid_: Log message, debug string
 
 **Diagnostic Log Segment**:
-One immutable, owner-only JSONL file written by the Companion's sole diagnostic worker and removed
-only by the time/size retention policy.
+One owner-only JSONL file written by the Companion's sole diagnostic worker. Its hourly active
+segment is atomically replaced; after rotation the sealed segment is immutable and removed only by
+the time/size retention policy.
 _Avoid_: Log file, trace dump
 
 **Deck Diagnostic Ring**:

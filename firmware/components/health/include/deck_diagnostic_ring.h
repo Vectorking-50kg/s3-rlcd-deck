@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -59,6 +60,7 @@ typedef struct {
 /* Release-safe fixed ring. It stores no caller strings or payload bytes. */
 void deck_diagnostic_ring_reset(void);
 
+/* Late concurrent observations are clamped to the last accepted monotonic time. */
 bool deck_diagnostic_ring_record(
     uint64_t monotonic_ms,
     deck_diagnostic_level_t level,
