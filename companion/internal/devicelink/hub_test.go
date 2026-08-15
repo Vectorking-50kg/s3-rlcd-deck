@@ -1,18 +1,26 @@
 package devicelink
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/aisnapshot"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/configmodel"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/protocol"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/serialhub"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/serialprotocol"
 	"github.com/coder/websocket"
 )
 
@@ -96,6 +104,31 @@ func validHello() []byte {
 		Board:           BoardESP32S3RLCD42,
 		Capabilities:    []string{"display", "serial", "ota"},
 		SerialState:     "disarmed",
+		SerialSessionID: 0,
+	})
+	return message
+}
+
+func diagnosticsHello() []byte {
+	message, _ := json.Marshal(DeviceHello{
+		Type:            MessageDeviceHello,
+		ProtocolVersion: ProtocolVersion,
+		DeviceID:        testDeviceID,
+		FirmwareVersion: "0.2.0-dev",
+		Board:           BoardESP32S3RLCD42,
+		Capabilities:    []string{"display", "diagnostics"},
+		SerialState:     "disarmed",
+		SerialSessionID: 0,
+	})
+	return message
+}
+
+func activeHello(sessionID uint64) []byte {
+	message, _ := json.Marshal(DeviceHello{
+		Type: MessageDeviceHello, ProtocolVersion: ProtocolVersion,
+		DeviceID: testDeviceID, FirmwareVersion: "0.2.0-dev", Board: BoardESP32S3RLCD42,
+		Capabilities: []string{"display", "serial", "ota"},
+		SerialState:  "usb_tx", SerialSessionID: sessionID,
 	})
 	return message
 }
@@ -128,6 +161,20 @@ func readText(t *testing.T, connection *websocket.Conn, timeout time.Duration) [
 	return message
 }
 
+func readControlType(t *testing.T, connection *websocket.Conn, wanted string) []byte {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		message := readText(t, connection, time.Until(deadline))
+		envelope, err := protocol.ParseEnvelope(message)
+		if err == nil && envelope.Type == wanted {
+			return message
+		}
+	}
+	t.Fatalf("Device Link control %q was not received", wanted)
+	return nil
+}
+
 func TestHubAuthenticatesThenRequiresDeviceHelloBeforeHeartbeat(t *testing.T) {
 	_, _, server := newTestHub(t)
 	connection, response, err := dialTestDeck(t, server, testDeviceID, testDeviceToken)
@@ -148,6 +195,433 @@ func TestHubAuthenticatesThenRequiresDeviceHelloBeforeHeartbeat(t *testing.T) {
 	if heartbeat.Type != MessageHeartbeat || heartbeat.ProtocolVersion != ProtocolVersion ||
 		heartbeat.UTC == "" || heartbeat.RXQueueCapacity == 0 || heartbeat.TXQueueCapacity == 0 {
 		t.Fatalf("heartbeat = %#v", heartbeat)
+	}
+}
+
+func TestHubRequestsAndRetainsOnlyMatchingDeckDiagnosticRing(t *testing.T) {
+	hub, _, server := newTestHub(t)
+	connection, _, err := dialTestDeck(t, server, testDeviceID, testDeviceToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.CloseNow()
+	if err = connection.Write(context.Background(), websocket.MessageText, diagnosticsHello()); err != nil {
+		t.Fatal(err)
+	}
+	_ = readControlType(t, connection, MessageHeartbeat)
+	requestDocument := readControlType(t, connection, MessageDiagnosticsRequest)
+	var request DiagnosticsRequest
+	if err = json.Unmarshal(requestDocument, &request); err != nil || request.RequestID == 0 {
+		t.Fatalf("diagnostics request = %#v, %v", request, err)
+	}
+	snapshot := DiagnosticsSnapshot{
+		Type: MessageDiagnosticsSnapshot, ProtocolVersion: ProtocolVersion,
+		RequestID: request.RequestID, Dropped: 3,
+		Events: []DiagnosticEvent{{
+			MonotonicMS: 42, Level: "warning", Component: "wifi", Code: "unavailable", Value: 7,
+		}},
+	}
+	document, _ := json.Marshal(snapshot)
+	if err = connection.Write(context.Background(), websocket.MessageText, document); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for len(hub.DiagnosticRings()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	rings := hub.DiagnosticRings()
+	if len(rings) != 1 || rings[0].DeviceID != testDeviceID ||
+		rings[0].Snapshot.Dropped != 3 || len(rings[0].Snapshot.Events) != 1 ||
+		rings[0].Snapshot.Events[0].Code != "unavailable" {
+		t.Fatalf("diagnostic rings = %#v", rings)
+	}
+	// Returned slices are owned by the caller and cannot mutate Hub state.
+	rings[0].Snapshot.Events[0].Code = "boot"
+	if hub.DiagnosticRings()[0].Snapshot.Events[0].Code != "unavailable" {
+		t.Fatal("diagnostic ring ownership escaped")
+	}
+}
+
+func TestHubBoundsDeckDiagnosticRingCacheByMostRecentDevice(t *testing.T) {
+	hub, err := New(Config{Authenticator: &testAuthenticator{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hub.Close()
+	for index := 0; index < maximumDiagnosticRings+1; index++ {
+		deviceID := fmt.Sprintf("deck-%02d", index)
+		connection := &websocket.Conn{}
+		hub.sessions[deviceID] = connection
+		hub.diagnosticExpected[connection] = uint64(index + 1)
+		if !hub.acceptDiagnostics(connection, deviceID, DiagnosticsSnapshot{
+			Type: MessageDiagnosticsSnapshot, ProtocolVersion: ProtocolVersion,
+			RequestID: uint64(index + 1),
+		}) {
+			t.Fatalf("cache rejected device %d", index)
+		}
+	}
+	rings := hub.DiagnosticRings()
+	if len(rings) != maximumDiagnosticRings {
+		t.Fatalf("cached rings = %d, want %d", len(rings), maximumDiagnosticRings)
+	}
+	for _, ring := range rings {
+		if ring.DeviceID == "deck-00" {
+			t.Fatal("oldest diagnostic ring was not evicted")
+		}
+	}
+}
+
+func TestHubPublishesValidatedBinaryFramesIntoCurrentSerialSession(t *testing.T) {
+	authenticator := &testAuthenticator{}
+	serial, err := serialhub.NewService(serialhub.ServiceConfig{
+		RingConfig: serialhub.Config{CapacityBytes: 64, MaximumFrames: 8, MaximumObservers: 2},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serial.Close()
+	hub, err := New(Config{
+		Authenticator: authenticator, HeartbeatInterval: 20 * time.Millisecond, HeartbeatTimeout: 100 * time.Millisecond,
+		OnSerialState: func(deviceID string, sessionID uint64, state string) error {
+			return serial.Reconcile(deviceID, sessionID, serialhub.State(state))
+		},
+		OnSerialFrame: serial.Ingest,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewTLSServer(hub)
+	defer func() { hub.Close(); server.Close() }()
+	connection, _, err := dialTestDeck(t, server, testDeviceID, testDeviceToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.CloseNow()
+	if err = connection.Write(context.Background(), websocket.MessageText, activeHello(77)); err != nil {
+		t.Fatal(err)
+	}
+	_ = readText(t, connection, time.Second)
+	document, err := serialprotocol.Encode(serialprotocol.Frame{
+		Channel: serialprotocol.ChannelTargetRX, SessionID: 77, Sequence: 1,
+		MonotonicMS: 123, Payload: []byte{0x00, 0xff, 'A'},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = connection.Write(context.Background(), websocket.MessageBinary, document); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for serial.Status().BufferedBytes != 3 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := serial.Status(); got.DeviceID != testDeviceID || got.SessionID != 77 || got.BufferedBytes != 3 {
+		t.Fatalf("Serial Hub status = %#v", got)
+	}
+	if err = connection.Write(context.Background(), websocket.MessageBinary, document); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	for {
+		_, _, readErr := connection.Read(ctx)
+		if readErr != nil {
+			if websocket.CloseStatus(readErr) != websocket.StatusPolicyViolation {
+				t.Fatalf("duplicate Serial sequence close = %v", readErr)
+			}
+			break
+		}
+	}
+}
+
+func TestHubSerialControlHistoryAndWebFrameRoundTrip(t *testing.T) {
+	authenticator := &testAuthenticator{}
+	ownerResults := make(chan SerialOwnerResult, 1)
+	hub, err := New(Config{
+		Authenticator: authenticator, HeartbeatInterval: time.Second, HeartbeatTimeout: 5 * time.Second,
+		OnSerialState: func(string, uint64, string) error { return nil },
+		OnSerialOwnerResult: func(_ string, result SerialOwnerResult) error {
+			ownerResults <- result
+			return nil
+		},
+		SerialHistoryCursor: func(_ string, sessionID uint64) (uint64, bool) {
+			return 41, sessionID == 77
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewTLSServer(hub)
+	defer func() { hub.Close(); server.Close() }()
+	connection, _, err := dialTestDeck(t, server, testDeviceID, testDeviceToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.CloseNow()
+	if err = connection.Write(context.Background(), websocket.MessageText, activeHello(77)); err != nil {
+		t.Fatal(err)
+	}
+	_ = readControlType(t, connection, MessageHeartbeat)
+	var history SerialHistoryRequest
+	if err = json.Unmarshal(readControlType(t, connection, MessageSerialHistoryRequest), &history); err != nil ||
+		history.SerialSessionID != 77 || history.AfterSequence != 41 {
+		t.Fatalf("history request = %#v, %v", history, err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	err = hub.RequestSerialOwner(ctx, testDeviceID, SerialOwnerRequest{
+		SerialSessionID: 77, RequestID: 9, Enable: true,
+	})
+	cancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ownerRequest SerialOwnerRequest
+	if err = json.Unmarshal(readControlType(t, connection, MessageSerialOwnerRequest), &ownerRequest); err != nil ||
+		ownerRequest.RequestID != 9 || !ownerRequest.Enable {
+		t.Fatalf("owner request = %#v, %v", ownerRequest, err)
+	}
+	ownerResult, _ := json.Marshal(SerialOwnerResult{
+		Type: MessageSerialOwnerResult, ProtocolVersion: ProtocolVersion,
+		SerialSessionID: 77, RequestID: 9, Code: "applied", SerialState: "web_tx",
+		OwnerGeneration: 3, LeaseID: 9,
+	})
+	if err = connection.Write(context.Background(), websocket.MessageText, ownerResult); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case result := <-ownerResults:
+		if result.RequestID != 9 || result.LeaseID != 9 {
+			t.Fatalf("owner result = %#v", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("owner result callback timed out")
+	}
+
+	webFrame := serialprotocol.Frame{
+		Channel: serialprotocol.ChannelWebTX, SessionID: 77, Sequence: 1,
+		MonotonicMS: 12, Payload: []byte("input"),
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+	err = hub.SendSerialWebFrame(ctx, testDeviceID, webFrame)
+	cancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+	messageType, document, readErr := connection.Read(ctx)
+	cancel()
+	if readErr != nil || messageType != websocket.MessageBinary {
+		t.Fatalf("Web TX frame type=%v error=%v", messageType, readErr)
+	}
+	decoded, decodeErr := serialprotocol.Decode(document)
+	if decodeErr != nil || decoded.SessionID != 77 || decoded.Sequence != 1 || string(decoded.Payload) != "input" {
+		t.Fatalf("Web TX frame = %#v, %v", decoded, decodeErr)
+	}
+
+	state, _ := json.Marshal(SerialState{
+		Type: MessageSerialState, ProtocolVersion: ProtocolVersion,
+		SerialState: "usb_tx", SerialSessionID: 77, OwnerGeneration: 4,
+	})
+	if err = connection.Write(context.Background(), websocket.MessageText, state); err != nil {
+		t.Fatal(err)
+	}
+	if err = json.Unmarshal(readControlType(t, connection, MessageSerialHistoryRequest), &history); err != nil ||
+		history.AfterSequence != 41 {
+		t.Fatalf("state history request = %#v, %v", history, err)
+	}
+}
+
+func TestHubNotifiesOnlyWhenTheAuthenticatedDeckSessionDisconnects(t *testing.T) {
+	disconnected := make(chan string, 1)
+	hub, err := New(Config{
+		Authenticator: &testAuthenticator{}, HeartbeatInterval: time.Second,
+		HeartbeatTimeout: 5 * time.Second,
+		OnSerialState:    func(string, uint64, string) error { return nil },
+		OnDisconnect:     func(deviceID string) { disconnected <- deviceID },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewTLSServer(hub)
+	defer func() { hub.Close(); server.Close() }()
+	connection, _, err := dialTestDeck(t, server, testDeviceID, testDeviceToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = connection.Write(context.Background(), websocket.MessageText, activeHello(77)); err != nil {
+		t.Fatal(err)
+	}
+	_ = readControlType(t, connection, MessageHeartbeat)
+	connection.CloseNow()
+	select {
+	case deviceID := <-disconnected:
+		if deviceID != testDeviceID {
+			t.Fatalf("disconnect device=%q", deviceID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("active Deck disconnect callback timed out")
+	}
+}
+
+func TestHubFencesReplacementUntilDisconnectRevocationIsRegistered(t *testing.T) {
+	disconnectStarted := make(chan struct{})
+	releaseDisconnect := make(chan struct{})
+	disconnectReturned := make(chan struct{})
+	var firstDisconnect sync.Once
+	hub, err := New(Config{
+		Authenticator:     &testAuthenticator{},
+		HeartbeatInterval: time.Second,
+		HeartbeatTimeout:  5 * time.Second,
+		OnDisconnect: func(string) {
+			firstDisconnect.Do(func() {
+				close(disconnectStarted)
+				<-releaseDisconnect
+			})
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hub.Close()
+	oldConnection := new(websocket.Conn)
+	replacementConnection := new(websocket.Conn)
+	if !hub.reserve(testDeviceID, oldConnection) {
+		t.Fatal("initial Device Link reservation was rejected")
+	}
+	go func() {
+		hub.removeConnection(oldConnection, testDeviceID)
+		close(disconnectReturned)
+	}()
+	select {
+	case <-disconnectStarted:
+	case <-time.After(time.Second):
+		t.Fatal("disconnect callback did not start")
+	}
+	if hub.reserve(testDeviceID, replacementConnection) {
+		t.Fatal("replacement entered before old-generation revocation was registered")
+	}
+	close(releaseDisconnect)
+	select {
+	case <-disconnectReturned:
+	case <-time.After(time.Second):
+		t.Fatal("disconnect callback did not return")
+	}
+	if !hub.reserve(testDeviceID, replacementConnection) {
+		t.Fatal("replacement remained fenced after revocation registration")
+	}
+	hub.removeConnection(replacementConnection, testDeviceID)
+}
+
+func TestHubBroadcastsTheLatestBoundedSnapshotWithoutBlockingPublishers(t *testing.T) {
+	hub, _, server := newTestHub(t)
+	connection, _, err := dialTestDeck(t, server, testDeviceID, testDeviceToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.CloseNow()
+	if err = connection.Write(context.Background(), websocket.MessageText, validHello()); err != nil {
+		t.Fatal(err)
+	}
+	_ = readText(t, connection, time.Second)
+
+	first := validSnapshot(t, "first")
+	second := validSnapshot(t, "second")
+	started := time.Now()
+	if err = hub.PublishSnapshot(first); err != nil {
+		t.Fatal(err)
+	}
+	if err = hub.PublishSnapshot(second); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed > 50*time.Millisecond {
+		t.Fatalf("PublishSnapshot blocked for %v", elapsed)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		message := readText(t, connection, time.Second)
+		if bytes.Equal(message, second) {
+			return
+		}
+	}
+	t.Fatal("latest snapshot was not delivered")
+}
+
+func validSnapshot(t *testing.T, displayName string) []byte {
+	t.Helper()
+	now := time.Now().UTC()
+	document, err := aisnapshot.Encode(aisnapshot.Snapshot{
+		Type: "snapshot.ai", ProtocolVersion: protocol.CurrentVersion,
+		SchemaVersion: aisnapshot.SchemaVersion{Major: 1, Minor: 0},
+		GeneratedAt:   now.Format(time.RFC3339Nano), GeneratedAtUnixMS: now.UnixMilli(),
+		ProviderOrder: []string{"codex"},
+		Providers: []aisnapshot.Provider{{
+			SchemaVersion: aisnapshot.SchemaVersion{Major: 1, Minor: 0},
+			ID:            "codex", DisplayName: displayName, Status: aisnapshot.ProviderOK,
+			Source:     aisnapshot.ProviderSourceCodexAppServer,
+			Confidence: aisnapshot.ConfidenceVerified, Windows: []aisnapshot.QuotaWindow{},
+		}},
+		Sessions: []aisnapshot.Session{}, NextRefresh: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return document
+}
+
+func TestHubRejectsMalformedOrOversizedSnapshotBeforePublication(t *testing.T) {
+	hub, _, _ := newTestHub(t)
+	for _, document := range [][]byte{nil, []byte("{}"), make([]byte, MaxSnapshotMessageBytes+1)} {
+		if err := hub.PublishSnapshot(document); err == nil {
+			t.Fatalf("PublishSnapshot(%d bytes) succeeded", len(document))
+		}
+	}
+}
+
+func TestHubPublishesOnlyNonSecretDeviceProfileAfterValidHello(t *testing.T) {
+	authenticator := &testAuthenticator{}
+	profiles := make(chan configmodel.DeviceProfile, 1)
+	hub, err := New(Config{
+		Authenticator:     authenticator,
+		HeartbeatInterval: 20 * time.Millisecond,
+		HeartbeatTimeout:  100 * time.Millisecond,
+		Now: func() time.Time {
+			return time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+		},
+		OnDeviceProfile: func(profile configmodel.DeviceProfile) { profiles <- profile },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewTLSServer(hub)
+	defer func() {
+		hub.Close()
+		server.Close()
+	}()
+	connection, _, err := dialTestDeck(t, server, testDeviceID, testDeviceToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.CloseNow()
+	if err = connection.Write(context.Background(), websocket.MessageText, validHello()); err != nil {
+		t.Fatal(err)
+	}
+	_ = readText(t, connection, time.Second)
+	select {
+	case profile := <-profiles:
+		if profile.DeviceID != testDeviceID || profile.Board != BoardESP32S3RLCD42 ||
+			profile.LastSeenUTC != "2026-08-15T12:00:00Z" ||
+			!reflect.DeepEqual(profile.Capabilities, []string{"display", "ota", "serial"}) {
+			t.Fatalf("device profile = %#v", profile)
+		}
+		serialized, _ := json.Marshal(profile)
+		if bytes.Contains(serialized, []byte(testDeviceToken)) ||
+			bytes.Contains(serialized, []byte(testDeviceIdentity)) {
+			t.Fatalf("device profile crossed trust boundary: %s", serialized)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("device profile was not published")
 	}
 }
 

@@ -1,0 +1,1 @@
+{"type":"ota.result","protocol_version":1,"transaction_id":"00112233445566778899aabbccddeeff","state":"receiving","code":"hash_mismatch","received_bytes":3072,"image_length":4096}

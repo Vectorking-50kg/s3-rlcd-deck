@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/protocol"
 )
 
 type fixtureManifest struct {
@@ -54,6 +56,18 @@ func TestSharedDeviceLinkFixtures(t *testing.T) {
 					fixture.PreviousMonotonicMS,
 					fixture.HasPrevious,
 				)
+			case "serial_state":
+				_, parseErr = parseSerialState(message)
+			case "serial_owner_result":
+				_, parseErr = parseSerialOwnerResult(message)
+			case "ota_result":
+				_, parseErr = parseOTAResult(message)
+			case "diagnostics_snapshot":
+				_, parseErr = parseDiagnosticsSnapshot(message)
+			case "diagnostics_request":
+				parseErr = parseDiagnosticsRequestFixture(message)
+			case "serial_control":
+				parseErr = parseSerialControlFixture(message)
 			default:
 				t.Fatalf("unsupported fixture kind %q", fixture.Kind)
 			}
@@ -62,4 +76,55 @@ func TestSharedDeviceLinkFixtures(t *testing.T) {
 			}
 		})
 	}
+}
+
+func parseDiagnosticsRequestFixture(message []byte) error {
+	envelope, err := protocol.ParseEnvelope(message)
+	if err != nil || envelope.Type != MessageDiagnosticsRequest {
+		return os.ErrInvalid
+	}
+	var request DiagnosticsRequest
+	if err = protocol.DecodeStrictDocument(message, &request); err != nil {
+		return err
+	}
+	if request.ProtocolVersion != ProtocolVersion || request.RequestID == 0 {
+		return os.ErrInvalid
+	}
+	return nil
+}
+
+func parseSerialControlFixture(message []byte) error {
+	envelope, err := protocol.ParseEnvelope(message)
+	if err != nil {
+		return err
+	}
+	switch envelope.Type {
+	case MessageSerialOwnerRequest:
+		var request SerialOwnerRequest
+		if err = protocol.DecodeStrictDocument(message, &request); err != nil {
+			return err
+		}
+		if request.ProtocolVersion != ProtocolVersion || request.SerialSessionID == 0 || request.RequestID == 0 {
+			return os.ErrInvalid
+		}
+	case MessageSerialOwnerActivity:
+		var activity SerialOwnerActivity
+		if err = protocol.DecodeStrictDocument(message, &activity); err != nil {
+			return err
+		}
+		if activity.ProtocolVersion != ProtocolVersion || activity.SerialSessionID == 0 || activity.LeaseID == 0 {
+			return os.ErrInvalid
+		}
+	case MessageSerialHistoryRequest:
+		var request SerialHistoryRequest
+		if err = protocol.DecodeStrictDocument(message, &request); err != nil {
+			return err
+		}
+		if request.ProtocolVersion != ProtocolVersion || request.SerialSessionID == 0 {
+			return os.ErrInvalid
+		}
+	default:
+		return os.ErrInvalid
+	}
+	return nil
 }

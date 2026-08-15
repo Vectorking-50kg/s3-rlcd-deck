@@ -1,22 +1,32 @@
 #include "sdkconfig.h"
 
+#include <atomic>
 #include <cstring>
+#include <new>
 
 #include "deck_application_ui.h"
 #include "deck_peripherals.h"
 #include "deck_boot_diagnostics.h"
+#include "deck_diagnostic_ring.h"
 #include "deck_companion_link.h"
 #include "deck_device_settings.h"
 #include "deck_display.h"
 #include "deck_m0_view_model.h"
+#include "deck_ota_service.h"
 #include "deck_rlcd_panel.h"
 #include "deck_setup_service.h"
+#include "deck_serial_service.h"
 
 #include "esp_app_desc.h"
+#include "esp_heap_caps.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
+#include "freertos/queue.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 
 namespace {
 
@@ -28,10 +38,34 @@ deck_rlcd_panel_t *application_panel = nullptr;
 deck_display_service_t *application_display = nullptr;
 deck_peripherals_t *application_peripherals = nullptr;
 deck_setup_service_t *application_setup = nullptr;
+deck_serial_service_t *application_serial = nullptr;
 deck_companion_link_t *application_companion_link = nullptr;
+struct AiPageTaskContext {
+    deck_companion_link_t *link;
+    char *document;
+    deck_ai_snapshot_codex_projection_t *codex_projection;
+    deck_ai_snapshot_pages_projection_t *pages_projection;
+    deck_m0_view_model_t *published_model;
+    EventGroupHandle_t lifecycle;
+    TaskHandle_t task;
+    std::atomic<bool> stop_requested;
+};
+struct SerialViewTaskContext {
+    QueueHandle_t events;
+    EventGroupHandle_t lifecycle;
+    TaskHandle_t task;
+    std::atomic<bool> stop_requested;
+};
+AiPageTaskContext *application_ai_page_task = nullptr;
+SerialViewTaskContext *application_serial_view_task = nullptr;
 deck_m0_view_model_t application_model{};
 SemaphoreHandle_t application_model_mutex = nullptr;
+EventGroupHandle_t application_ui_lifecycle = nullptr;
 uint32_t handled_boot_long_press_count = 0;
+uint32_t handled_boot_short_press_count = 0;
+uint32_t handled_key_short_press_count = 0;
+uint32_t handled_key_long_press_count = 0;
+std::atomic<bool> application_serial_requested{false};
 int16_t application_temperature_offset_tenths_c =
     DECK_DEVICE_SETTINGS_DEFAULT_TEMPERATURE_OFFSET_TENTHS_C;
 
@@ -171,6 +205,49 @@ void display_start_error(const char *stage)
 
 namespace {
 
+constexpr EventBits_t kAiPageTaskStoppedBit = BIT0;
+constexpr EventBits_t kSerialViewTaskReadyBit = BIT0;
+constexpr EventBits_t kSerialViewTaskStoppedBit = BIT1;
+constexpr EventBits_t kApplicationUiReadyBit = BIT0;
+constexpr EventBits_t kApplicationUiFailedBit = BIT1;
+constexpr TickType_t kSerialViewPollTicks = pdMS_TO_TICKS(100);
+constexpr TickType_t kSerialViewLifecycleTicks = pdMS_TO_TICKS(2'000);
+
+bool stop_ai_page_task();
+bool stop_serial_view_task();
+
+bool release_companion_resources()
+{
+    if (!stop_ai_page_task()) {
+        return false;
+    }
+    if (application_companion_link != nullptr) {
+        if (!deck_companion_link_stop(application_companion_link)) {
+            return false;
+        }
+        application_companion_link = nullptr;
+    }
+    return true;
+}
+
+bool release_serial_resources()
+{
+    if (application_serial != nullptr) {
+        if (application_companion_link != nullptr &&
+            !deck_companion_link_detach_serial(
+                application_companion_link,
+                application_serial
+            )) {
+            return false;
+        }
+        if (!deck_serial_service_stop(application_serial)) {
+            return false;
+        }
+        application_serial = nullptr;
+    }
+    return stop_serial_view_task();
+}
+
 struct ButtonEventMapping {
     deck_button_event_t view;
     deck_diagnostic_button_event_t diagnostic;
@@ -252,6 +329,12 @@ void emit_companion_link_diagnostics()
 
 bool release_display_resources()
 {
+    if (!release_serial_resources()) {
+        return false;
+    }
+    if (!release_companion_resources()) {
+        return false;
+    }
     if (application_display != nullptr) {
         if (!deck_display_service_destroy(application_display)) {
             return false;
@@ -300,6 +383,8 @@ deck_m0_view_model_t make_initial_model(
         0,
         uptime_seconds,
         minimum_free_heap_bytes,
+        {},
+        {},
     };
     return model;
 }
@@ -315,6 +400,145 @@ bool publish_application_model(deck_m0_view_model_t *published)
     return deck_application_ui_update(published);
 }
 
+deck_serial_view_state_t serial_view_state(deck_serial_state_t state)
+{
+    switch (state) {
+        case DECK_SERIAL_USB_TX:
+            return DECK_SERIAL_VIEW_USB_TX;
+        case DECK_SERIAL_WEB_TX:
+            return DECK_SERIAL_VIEW_WEB_TX;
+        case DECK_SERIAL_DISARMED:
+        default:
+            return DECK_SERIAL_VIEW_DISARMED;
+    }
+}
+
+void apply_serial_event(const deck_serial_service_event_t &event)
+{
+    application_serial_requested.store(
+        event.snapshot.state != DECK_SERIAL_DISARMED,
+        std::memory_order_release
+    );
+    deck_m0_view_model_t published{};
+    bool has_published = false;
+    if (application_model_mutex != nullptr &&
+        xSemaphoreTake(application_model_mutex, portMAX_DELAY) == pdTRUE) {
+        application_model.serial = {
+            serial_view_state(event.snapshot.state),
+            event.snapshot.session_id,
+            event.snapshot.owner_generation,
+            event.snapshot.usb_tx_rejected,
+            event.snapshot.uart_install_failures,
+            event.has_router_stats ? event.router_stats.uart_fifo_overflows : 0,
+            event.has_router_stats ? event.router_stats.uart_driver_buffer_full : 0,
+            event.snapshot.uart_install_failed,
+            event.snapshot.uart_installed,
+        };
+        published = application_model;
+        has_published = true;
+        xSemaphoreGive(application_model_mutex);
+    }
+    if (has_published) {
+        (void)deck_application_ui_update(&published);
+    }
+}
+
+void serial_view_task(void *context)
+{
+    auto *task = static_cast<SerialViewTaskContext *>(context);
+    xEventGroupSetBits(task->lifecycle, kSerialViewTaskReadyBit);
+    while (!task->stop_requested.load(std::memory_order_acquire)) {
+        deck_serial_service_event_t event{};
+        if (xQueueReceive(task->events, &event, kSerialViewPollTicks) == pdTRUE) {
+            deck_serial_service_event_t newer{};
+            while (xQueueReceive(task->events, &newer, 0) == pdTRUE) {
+                event = newer;
+            }
+            apply_serial_event(event);
+        }
+    }
+    xEventGroupSetBits(task->lifecycle, kSerialViewTaskStoppedBit);
+    vTaskSuspend(nullptr);
+}
+
+SerialViewTaskContext *start_serial_view_task()
+{
+    auto *context = new (std::nothrow) SerialViewTaskContext{};
+    if (context == nullptr) {
+        return nullptr;
+    }
+    context->events = xQueueCreate(1, sizeof(deck_serial_service_event_t));
+    context->lifecycle = xEventGroupCreate();
+    context->stop_requested.store(false, std::memory_order_release);
+    if (context->events == nullptr || context->lifecycle == nullptr ||
+        xTaskCreatePinnedToCore(
+            serial_view_task,
+            "serial_view",
+            4'096,
+            context,
+            2,
+            &context->task,
+            0
+        ) != pdPASS) {
+        if (context->events != nullptr) {
+            vQueueDelete(context->events);
+        }
+        if (context->lifecycle != nullptr) {
+            vEventGroupDelete(context->lifecycle);
+        }
+        delete context;
+        return nullptr;
+    }
+    const EventBits_t ready = xEventGroupWaitBits(
+        context->lifecycle,
+        kSerialViewTaskReadyBit,
+        pdFALSE,
+        pdTRUE,
+        kSerialViewLifecycleTicks
+    );
+    if ((ready & kSerialViewTaskReadyBit) == 0) {
+        vTaskDelete(context->task);
+        vQueueDelete(context->events);
+        vEventGroupDelete(context->lifecycle);
+        delete context;
+        return nullptr;
+    }
+    return context;
+}
+
+bool stop_serial_view_task()
+{
+    if (application_serial_view_task == nullptr) {
+        return true;
+    }
+    SerialViewTaskContext *context = application_serial_view_task;
+    context->stop_requested.store(true, std::memory_order_release);
+    const EventBits_t stopped = xEventGroupWaitBits(
+        context->lifecycle,
+        kSerialViewTaskStoppedBit,
+        pdFALSE,
+        pdTRUE,
+        kSerialViewLifecycleTicks
+    );
+    if ((stopped & kSerialViewTaskStoppedBit) == 0) {
+        return false;
+    }
+    vTaskDelete(context->task);
+    vQueueDelete(context->events);
+    vEventGroupDelete(context->lifecycle);
+    delete context;
+    application_serial_view_task = nullptr;
+    return true;
+}
+
+void serial_event(void *context, const deck_serial_service_event_t *event)
+{
+    auto *view_task = static_cast<SerialViewTaskContext *>(context);
+    if (view_task != nullptr && event != nullptr) {
+        (void)xQueueOverwrite(view_task->events, event);
+    }
+}
+
 void peripheral_snapshot(void *, const deck_peripheral_snapshot_t *snapshot)
 {
     if (snapshot == nullptr) {
@@ -322,8 +546,18 @@ void peripheral_snapshot(void *, const deck_peripheral_snapshot_t *snapshot)
     }
     const ButtonEventMapping key_event = map_button_event(snapshot->key_event);
     const ButtonEventMapping boot_event = map_button_event(snapshot->boot_event);
+    deck_serial_session_snapshot_t serial_snapshot{};
+    const bool serial_active =
+        application_serial_requested.load(std::memory_order_acquire) ||
+        (application_serial != nullptr &&
+         deck_serial_service_snapshot(application_serial, &serial_snapshot) &&
+         serial_snapshot.state != DECK_SERIAL_DISARMED);
     bool enter_setup = false;
+    bool enter_serial = false;
+    bool exit_serial = false;
     uint32_t pending_boot_long_press_count = 0;
+    uint32_t pending_boot_short_press_count = 0;
+    uint32_t pending_key_long_press_count = 0;
     if (application_model_mutex != nullptr &&
         xSemaphoreTake(application_model_mutex, portMAX_DELAY) == pdTRUE) {
         application_model.data_source = DECK_DATA_VERIFIED;
@@ -337,20 +571,67 @@ void peripheral_snapshot(void *, const deck_peripheral_snapshot_t *snapshot)
             snapshot->calibrated_temperature_tenths_c;
         application_model.humidity_tenths_percent = snapshot->humidity_tenths_percent;
         application_model.sensor_error_count = snapshot->sensor_error_count;
+        application_model.ai_page.rtc_available = snapshot->rtc_available;
+        application_model.ai_page.rtc_hour = snapshot->rtc_hour;
+        application_model.ai_page.rtc_minute = snapshot->rtc_minute;
+        application_model.ai_page.temperature_available = snapshot->sensor_available;
+        application_model.ai_page.calibrated_temperature_tenths_c =
+            snapshot->calibrated_temperature_tenths_c;
         application_model.buttons_available = snapshot->buttons_available;
         application_model.key_event = key_event.view;
         application_model.key_event_count = snapshot->key_event_count;
         application_model.boot_event = boot_event.view;
         application_model.boot_event_count = snapshot->boot_event_count;
+        if (snapshot->key_event == DECK_BUTTON_INPUT_SHORT_PRESS &&
+            snapshot->key_event_count > handled_key_short_press_count) {
+            handled_key_short_press_count = snapshot->key_event_count;
+            if (!serial_active && application_model.ai_page.active &&
+                application_model.setup_state != DECK_SETUP_ACTIVE) {
+                deck_ai_page_view_model_next(&application_model.ai_page);
+            }
+        }
+        if (snapshot->key_event == DECK_BUTTON_INPUT_LONG_PRESS &&
+            snapshot->key_event_count > handled_key_long_press_count) {
+            pending_key_long_press_count = snapshot->key_event_count;
+            if (application_serial != nullptr && !serial_active &&
+                application_model.setup_state != DECK_SETUP_ACTIVE) {
+                enter_serial = true;
+            } else {
+                handled_key_long_press_count = pending_key_long_press_count;
+            }
+        }
+        if (snapshot->boot_event == DECK_BUTTON_INPUT_SHORT_PRESS &&
+            snapshot->boot_event_count > handled_boot_short_press_count) {
+            pending_boot_short_press_count = snapshot->boot_event_count;
+            if (application_serial != nullptr) {
+                exit_serial = true;
+            } else {
+                handled_boot_short_press_count = pending_boot_short_press_count;
+            }
+        }
         if (snapshot->boot_event == DECK_BUTTON_INPUT_LONG_PRESS &&
             snapshot->boot_event_count > handled_boot_long_press_count) {
             pending_boot_long_press_count = snapshot->boot_event_count;
-            enter_setup = true;
+            if (!serial_active) {
+                enter_setup = true;
+            } else {
+                handled_boot_long_press_count = pending_boot_long_press_count;
+            }
         }
         xSemaphoreGive(application_model_mutex);
     }
     deck_m0_view_model_t published{};
     (void)publish_application_model(&published);
+    if (enter_serial && application_serial != nullptr &&
+        deck_serial_service_enter(application_serial)) {
+        application_serial_requested.store(true, std::memory_order_release);
+        handled_key_long_press_count = pending_key_long_press_count;
+    }
+    if (exit_serial && application_serial != nullptr &&
+        deck_serial_service_exit(application_serial)) {
+        application_serial_requested.store(false, std::memory_order_release);
+        handled_boot_short_press_count = pending_boot_short_press_count;
+    }
     if (enter_setup && application_setup != nullptr &&
         deck_setup_service_enter_from_boot(application_setup)) {
         handled_boot_long_press_count = pending_boot_long_press_count;
@@ -435,6 +716,268 @@ deck_wifi_record_view_status_t wifi_record_view_status(deck_wifi_record_status_t
         default:
             return DECK_WIFI_RECORD_VIEW_EMPTY;
     }
+}
+
+deck_ai_page_companion_state_t ai_page_companion_state(deck_companion_link_state_t state)
+{
+    switch (state) {
+        case DECK_COMPANION_LINK_ONLINE:
+            return DECK_AI_PAGE_COMPANION_ONLINE;
+        case DECK_COMPANION_LINK_CONNECTING:
+            return DECK_AI_PAGE_COMPANION_CONNECTING;
+        case DECK_COMPANION_LINK_OFFLINE:
+            return DECK_AI_PAGE_COMPANION_OFFLINE;
+        case DECK_COMPANION_LINK_UNPAIRED:
+        default:
+            return DECK_AI_PAGE_COMPANION_UNPAIRED;
+    }
+}
+
+deck_ai_page_snapshot_state_t ai_page_snapshot_state(deck_ai_snapshot_store_state_t state)
+{
+    switch (state) {
+        case DECK_AI_SNAPSHOT_STORE_FRESH:
+            return DECK_AI_PAGE_SNAPSHOT_FRESH;
+        case DECK_AI_SNAPSHOT_STORE_STALE:
+            return DECK_AI_PAGE_SNAPSHOT_STALE;
+        case DECK_AI_SNAPSHOT_STORE_UNAVAILABLE:
+            return DECK_AI_PAGE_SNAPSHOT_UNAVAILABLE;
+        case DECK_AI_SNAPSHOT_STORE_EMPTY:
+        default:
+            return DECK_AI_PAGE_SNAPSHOT_EMPTY;
+    }
+}
+
+void ai_page_task(void *task_context)
+{
+    auto *context = static_cast<AiPageTaskContext *>(task_context);
+    if (context == nullptr || context->link == nullptr || context->document == nullptr ||
+        context->lifecycle == nullptr) {
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    uint64_t projected_generated_at = 0;
+    size_t projected_size = 0;
+    while (!context->stop_requested.load(std::memory_order_acquire)) {
+        deck_companion_link_snapshot_t link_snapshot{};
+        if (!deck_companion_link_snapshot(context->link, &link_snapshot)) {
+            (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1'000));
+            continue;
+        }
+
+        deck_ai_snapshot_store_snapshot_t stored{};
+        size_t document_size = 0;
+        bool copied = false;
+        if (link_snapshot.has_trusted_utc) {
+            copied = deck_companion_link_copy_ai_snapshot(
+                context->link,
+                link_snapshot.trusted_utc_ms,
+                context->document,
+                DECK_AI_SNAPSHOT_MAX_BYTES,
+                &document_size,
+                &stored
+            );
+        }
+
+        bool projection_changed = false;
+        bool projection_valid = true;
+        wifi_ap_record_t access_point{};
+        const bool wifi_signal_available = esp_wifi_sta_get_ap_info(&access_point) == ESP_OK;
+        if (copied && stored.document_visible && document_size != 0U &&
+            (stored.metadata.generated_at_unix_ms != projected_generated_at ||
+             document_size != projected_size)) {
+            std::memset(
+                context->codex_projection,
+                0,
+                sizeof(*context->codex_projection)
+            );
+            std::memset(
+                context->pages_projection,
+                0,
+                sizeof(*context->pages_projection)
+            );
+            projection_valid = deck_ai_snapshot_project_codex(
+                context->document,
+                document_size,
+                context->codex_projection
+            ) && deck_ai_snapshot_project_pages(
+                context->document,
+                document_size,
+                context->pages_projection
+            );
+            projection_changed = projection_valid;
+        }
+
+        if (application_model_mutex != nullptr &&
+            xSemaphoreTake(application_model_mutex, portMAX_DELAY) == pdTRUE) {
+            application_model.ai_page.companion_state =
+                ai_page_companion_state(link_snapshot.state);
+            application_model.ai_page.wifi_signal_bars =
+                wifi_signal_available ? deck_ai_page_wifi_signal_bars(access_point.rssi) : 0;
+            if (link_snapshot.has_trusted_utc) {
+                application_model.ai_page.trusted_utc_ms = link_snapshot.trusted_utc_ms;
+            } else {
+                application_model.ai_page.trusted_utc_ms = 0;
+                if (application_model.ai_page.active) {
+                    application_model.ai_page.snapshot_state =
+                        DECK_AI_PAGE_SNAPSHOT_UNAVAILABLE;
+                }
+            }
+            if (copied) {
+                if (stored.has_snapshot) {
+                    application_model.ai_page.active = true;
+                }
+                application_model.ai_page.snapshot_state =
+                    projection_valid ? ai_page_snapshot_state(stored.state)
+                                     : DECK_AI_PAGE_SNAPSHOT_UNAVAILABLE;
+                if (projection_changed) {
+                    application_model.ai_page.codex = *context->codex_projection;
+                    projection_valid = deck_ai_page_view_model_apply_pages(
+                        &application_model.ai_page,
+                        context->pages_projection
+                    );
+                    projected_generated_at = stored.metadata.generated_at_unix_ms;
+                    projected_size = document_size;
+                }
+            }
+            xSemaphoreGive(application_model_mutex);
+        }
+        if (document_size != 0U) {
+            std::memset(context->document, 0, document_size);
+        }
+        std::memset(context->published_model, 0, sizeof(*context->published_model));
+        (void)publish_application_model(context->published_model);
+        (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1'000));
+    }
+    xEventGroupSetBits(context->lifecycle, kAiPageTaskStoppedBit);
+    // The owner deletes this suspended task after observing the stopped bit.
+    // Keeping the handle alive makes a timed-out stop safely retryable.
+    vTaskSuspend(nullptr);
+}
+
+AiPageTaskContext *start_ai_page_task(deck_companion_link_t *link)
+{
+    if (link == nullptr) {
+        return nullptr;
+    }
+    auto *context = new (std::nothrow) AiPageTaskContext{};
+    if (context == nullptr) {
+        return nullptr;
+    }
+    context->link = link;
+    context->document = static_cast<char *>(heap_caps_malloc(
+        DECK_AI_SNAPSHOT_MAX_BYTES,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+    ));
+    context->codex_projection = static_cast<deck_ai_snapshot_codex_projection_t *>(
+        heap_caps_calloc(
+            1,
+            sizeof(*context->codex_projection),
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+        )
+    );
+    context->pages_projection = static_cast<deck_ai_snapshot_pages_projection_t *>(
+        heap_caps_calloc(
+            1,
+            sizeof(*context->pages_projection),
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+        )
+    );
+    context->published_model = static_cast<deck_m0_view_model_t *>(heap_caps_calloc(
+        1,
+        sizeof(*context->published_model),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+    ));
+    context->lifecycle = xEventGroupCreate();
+    context->stop_requested.store(false, std::memory_order_release);
+    if (context->document == nullptr || context->codex_projection == nullptr ||
+        context->pages_projection == nullptr || context->published_model == nullptr ||
+        context->lifecycle == nullptr ||
+        xTaskCreatePinnedToCore(
+            ai_page_task,
+            "ai_page_model",
+            4'096,
+            context,
+            2,
+            &context->task,
+            0
+        ) != pdPASS) {
+        if (context->lifecycle != nullptr) {
+            vEventGroupDelete(context->lifecycle);
+        }
+        if (context->document != nullptr) {
+            std::memset(context->document, 0, DECK_AI_SNAPSHOT_MAX_BYTES);
+            heap_caps_free(context->document);
+        }
+        if (context->codex_projection != nullptr) {
+            std::memset(
+                context->codex_projection,
+                0,
+                sizeof(*context->codex_projection)
+            );
+            heap_caps_free(context->codex_projection);
+        }
+        if (context->pages_projection != nullptr) {
+            std::memset(
+                context->pages_projection,
+                0,
+                sizeof(*context->pages_projection)
+            );
+            heap_caps_free(context->pages_projection);
+        }
+        if (context->published_model != nullptr) {
+            std::memset(context->published_model, 0, sizeof(*context->published_model));
+            heap_caps_free(context->published_model);
+        }
+        delete context;
+        return nullptr;
+    }
+    return context;
+}
+
+bool stop_ai_page_task()
+{
+    if (application_ai_page_task == nullptr) {
+        return true;
+    }
+    AiPageTaskContext *context = application_ai_page_task;
+    const bool first_stop =
+        !context->stop_requested.exchange(true, std::memory_order_acq_rel);
+    if (first_stop) {
+        xTaskNotifyGive(context->task);
+    }
+    const EventBits_t stopped = xEventGroupWaitBits(
+        context->lifecycle,
+        kAiPageTaskStoppedBit,
+        pdFALSE,
+        pdTRUE,
+        pdMS_TO_TICKS(2'000)
+    );
+    if ((stopped & kAiPageTaskStoppedBit) == 0) {
+        return false;
+    }
+    vTaskDelete(context->task);
+    std::memset(context->document, 0, DECK_AI_SNAPSHOT_MAX_BYTES);
+    heap_caps_free(context->document);
+    std::memset(
+        context->codex_projection,
+        0,
+        sizeof(*context->codex_projection)
+    );
+    heap_caps_free(context->codex_projection);
+    std::memset(
+        context->pages_projection,
+        0,
+        sizeof(*context->pages_projection)
+    );
+    heap_caps_free(context->pages_projection);
+    std::memset(context->published_model, 0, sizeof(*context->published_model));
+    heap_caps_free(context->published_model);
+    vEventGroupDelete(context->lifecycle);
+    delete context;
+    application_ai_page_task = nullptr;
+    return true;
 }
 
 #ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
@@ -633,6 +1176,12 @@ void setup_event(void *, const deck_setup_service_event_t *event)
                                            : event->wifi.state == DECK_WIFI_CONFIG_ACTIVE
                                                  ? DECK_WIFI_CONNECTED
                                                  : DECK_WIFI_DISCONNECTED;
+        application_model.ai_page.wifi_state =
+            application_model.wifi_state == DECK_WIFI_CONNECTED
+                ? DECK_AI_PAGE_WIFI_CONNECTED
+                : application_model.wifi_state == DECK_WIFI_DISCONNECTED
+                      ? DECK_AI_PAGE_WIFI_DISCONNECTED
+                      : DECK_AI_PAGE_WIFI_UNAVAILABLE;
         application_model.wifi_config_state = wifi_config_view_state(event->wifi.state);
         application_model.wifi_record_status = wifi_record_view_status(
             event->wifi.record_status
@@ -707,6 +1256,9 @@ void start_setup_after_ui_ready()
             deck_setup_service_wait_companion_profiles(application_setup, 10'000),
             app->version
         );
+        if (application_companion_link != nullptr) {
+            application_ai_page_task = start_ai_page_task(application_companion_link);
+        }
     }
 #ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
     if (application_setup == nullptr) {
@@ -730,6 +1282,10 @@ void start_setup_after_ui_ready()
             static constexpr char link_error[] =
                 "{\"type\":\"diagnostic_error\",\"stage\":\"companion_link\"}\n";
             write_stdout(nullptr, link_error, sizeof(link_error) - 1);
+        } else if (application_ai_page_task == nullptr) {
+            static constexpr char ai_page_error[] =
+                "{\"type\":\"diagnostic_error\",\"stage\":\"ai_page\"}\n";
+            write_stdout(nullptr, ai_page_error, sizeof(ai_page_error) - 1);
         }
         if (xTaskCreatePinnedToCore(
                 diagnostic_control_task,
@@ -748,6 +1304,38 @@ void start_setup_after_ui_ready()
 #endif
 }
 
+void confirm_ota_boot_when_healthy(deck_ota_boot_guard_t *guard)
+{
+    if (guard == nullptr) {
+        return;
+    }
+    constexpr uint64_t kHealthWaitMs = 50'000;
+    const uint64_t started_ms = static_cast<uint64_t>(esp_timer_get_time() / 1'000);
+    while (static_cast<uint64_t>(esp_timer_get_time() / 1'000) - started_ms <
+           kHealthWaitMs) {
+        deck_companion_link_snapshot_t link{};
+        const bool companion_online =
+            application_companion_link != nullptr &&
+            deck_companion_link_snapshot(application_companion_link, &link) &&
+            link.state == DECK_COMPANION_LINK_ONLINE;
+        if (application_peripherals != nullptr && application_setup != nullptr &&
+            companion_online) {
+            (void)deck_ota_boot_guard_confirm(
+                guard,
+                true,
+                true,
+                true,
+                true
+            );
+            return;
+        }
+        vTaskDelay(pdMS_TO_TICKS(250));
+    }
+    // The guard owns rollback at its 60 second deadline. Leaving it active is
+    // deliberate: a boot that cannot re-establish Wi-Fi + Device Link is not
+    // marked valid merely because its local tasks were created.
+}
+
 void ui_event(void *, const deck_application_ui_event_t *event)
 {
     if (event == nullptr) {
@@ -759,10 +1347,15 @@ void ui_event(void *, const deck_application_ui_event_t *event)
         write_stdout(nullptr, error, sizeof(error) - 1);
 #endif
         (void)release_display_resources();
+        if (application_ui_lifecycle != nullptr) {
+            xEventGroupSetBits(application_ui_lifecycle, kApplicationUiFailedBit);
+        }
         return;
     }
     if (event->state == DECK_APPLICATION_UI_READY) {
-        start_setup_after_ui_ready();
+        if (application_ui_lifecycle != nullptr) {
+            xEventGroupSetBits(application_ui_lifecycle, kApplicationUiReadyBit);
+        }
     }
 
 #ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
@@ -790,6 +1383,25 @@ void ui_event(void *, const deck_application_ui_event_t *event)
 extern "C" void app_main(void)
 {
     const esp_app_desc_t *app = esp_app_get_description();
+    deck_diagnostic_ring_reset();
+    (void)deck_diagnostic_ring_record(
+        static_cast<uint64_t>(esp_timer_get_time() / 1'000),
+        DECK_DIAGNOSTIC_LEVEL_INFO,
+        DECK_DIAGNOSTIC_COMPONENT_SYSTEM,
+        DECK_DIAGNOSTIC_CODE_BOOT,
+        static_cast<uint32_t>(esp_reset_reason())
+    );
+    deck_ota_boot_guard_t *ota_boot_guard = deck_ota_boot_guard_start(60'000);
+    if (!deck_serial_service_prepare_disarmed()) {
+        (void)deck_diagnostic_ring_record(
+            static_cast<uint64_t>(esp_timer_get_time() / 1'000),
+            DECK_DIAGNOSTIC_LEVEL_ERROR,
+            DECK_DIAGNOSTIC_COMPONENT_SERIAL,
+            DECK_DIAGNOSTIC_CODE_UNAVAILABLE,
+            1
+        );
+        return;
+    }
 #ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
     const bool diagnostic_console_ready = initialize_diagnostic_console_driver();
     wait_for_diagnostic_host_ready();
@@ -810,12 +1422,27 @@ extern "C" void app_main(void)
 
     application_panel = deck_rlcd_panel_create();
     if (application_panel == nullptr) {
+        (void)deck_diagnostic_ring_record(
+            static_cast<uint64_t>(esp_timer_get_time() / 1'000),
+            DECK_DIAGNOSTIC_LEVEL_ERROR,
+            DECK_DIAGNOSTIC_COMPONENT_DISPLAY,
+            DECK_DIAGNOSTIC_CODE_UNAVAILABLE,
+            1
+        );
 #ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
         display_start_error("panel_create");
 #endif
+        (void)release_display_resources();
         return;
     }
     if (!deck_rlcd_panel_initialize(application_panel)) {
+        (void)deck_diagnostic_ring_record(
+            static_cast<uint64_t>(esp_timer_get_time() / 1'000),
+            DECK_DIAGNOSTIC_LEVEL_ERROR,
+            DECK_DIAGNOSTIC_COMPONENT_DISPLAY,
+            DECK_DIAGNOSTIC_CODE_UNAVAILABLE,
+            2
+        );
 #ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
         display_start_error("panel_initialize");
 #endif
@@ -826,6 +1453,13 @@ extern "C" void app_main(void)
     application_display =
         deck_display_service_create(deck_rlcd_panel_adapter(application_panel), 100);
     if (application_display == nullptr) {
+        (void)deck_diagnostic_ring_record(
+            static_cast<uint64_t>(esp_timer_get_time() / 1'000),
+            DECK_DIAGNOSTIC_LEVEL_ERROR,
+            DECK_DIAGNOSTIC_COMPONENT_DISPLAY,
+            DECK_DIAGNOSTIC_CODE_UNAVAILABLE,
+            3
+        );
 #ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
         display_start_error("service_create");
 #endif
@@ -839,8 +1473,17 @@ extern "C" void app_main(void)
         esp_get_minimum_free_heap_size()
     );
     application_model_mutex = xSemaphoreCreateMutex();
-    if (application_model_mutex == nullptr) {
+    application_ui_lifecycle = xEventGroupCreate();
+    if (application_model_mutex == nullptr || application_ui_lifecycle == nullptr) {
         (void)release_display_resources();
+        if (application_model_mutex != nullptr) {
+            vSemaphoreDelete(application_model_mutex);
+            application_model_mutex = nullptr;
+        }
+        if (application_ui_lifecycle != nullptr) {
+            vEventGroupDelete(application_ui_lifecycle);
+            application_ui_lifecycle = nullptr;
+        }
         return;
     }
     if (!deck_application_ui_start(
@@ -855,8 +1498,56 @@ extern "C" void app_main(void)
         (void)release_display_resources();
         vSemaphoreDelete(application_model_mutex);
         application_model_mutex = nullptr;
+        vEventGroupDelete(application_ui_lifecycle);
+        application_ui_lifecycle = nullptr;
         return;
     }
+    const EventBits_t ui_state = xEventGroupWaitBits(
+        application_ui_lifecycle,
+        kApplicationUiReadyBit | kApplicationUiFailedBit,
+        pdFALSE,
+        pdFALSE,
+        portMAX_DELAY
+    );
+    if ((ui_state & kApplicationUiReadyBit) == 0) {
+        vSemaphoreDelete(application_model_mutex);
+        application_model_mutex = nullptr;
+        return;
+    }
+    (void)deck_diagnostic_ring_record(
+        static_cast<uint64_t>(esp_timer_get_time() / 1'000),
+        DECK_DIAGNOSTIC_LEVEL_INFO,
+        DECK_DIAGNOSTIC_COMPONENT_DISPLAY,
+        DECK_DIAGNOSTIC_CODE_READY,
+        0
+    );
+    start_setup_after_ui_ready();
+    application_serial_view_task = start_serial_view_task();
+    if (application_serial_view_task != nullptr) {
+        application_serial = deck_serial_service_start(
+            serial_event,
+            application_serial_view_task
+        );
+    }
+    if (application_serial != nullptr && application_companion_link != nullptr &&
+        !deck_companion_link_attach_serial(
+            application_companion_link,
+            application_serial
+        )) {
+        if (deck_serial_service_stop(application_serial)) {
+            application_serial = nullptr;
+        }
+    }
+    if (application_serial == nullptr) {
+        (void)stop_serial_view_task();
+    }
+#ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
+    if (application_serial == nullptr) {
+        static constexpr char error[] =
+            "{\"type\":\"diagnostic_error\",\"stage\":\"serial_service\"}\n";
+        write_stdout(nullptr, error, sizeof(error) - 1);
+    }
+#endif
     if (xSemaphoreTake(application_model_mutex, portMAX_DELAY) == pdTRUE) {
         application_peripherals = deck_peripherals_start(
             application_temperature_offset_tenths_c,
@@ -871,4 +1562,12 @@ extern "C" void app_main(void)
         write_stdout(nullptr, error, sizeof(error) - 1);
     }
 #endif
+    confirm_ota_boot_when_healthy(ota_boot_guard);
+    (void)deck_diagnostic_ring_record(
+        static_cast<uint64_t>(esp_timer_get_time() / 1'000),
+        DECK_DIAGNOSTIC_LEVEL_INFO,
+        DECK_DIAGNOSTIC_COMPONENT_SYSTEM,
+        DECK_DIAGNOSTIC_CODE_READY,
+        0
+    );
 }

@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -8,7 +9,15 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/backup"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/codexappserver"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/codexobserver"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/configmodel"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/cursorprovider"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/diagnostics"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/history"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/structuredprovider"
 )
 
 const (
@@ -23,10 +32,70 @@ var (
 )
 
 type Config struct {
-	Version    string
-	Management ManagementConfig
-	DeviceHub  DeviceHubConfig
-	Pairing    *pairing.Service
+	Version              string
+	Commit               string
+	Management           ManagementConfig
+	DeviceHub            DeviceHubConfig
+	Pairing              *pairing.Service
+	CodexCollector       CodexCollector
+	CodexObserver        CodexObserver
+	CursorCollector      CursorCollector
+	StructuredCollectors []StructuredCollector
+	StructuredProviders  *structuredprovider.Service
+	History              *history.Store
+	Backup               BackupService
+	Configuration        ConfigurationOwner
+	Diagnostics          *diagnostics.Service
+}
+
+type BackupService interface {
+	Export(context.Context, []byte) ([]byte, error)
+	Preview(context.Context, []byte, []byte, backup.ImportMode) (backup.Preview, error)
+	Import(
+		context.Context,
+		[]byte,
+		[]byte,
+		backup.ImportMode,
+		map[string]backup.ConflictDecision,
+		string,
+	) (backup.ImportResult, error)
+}
+
+type ConfigurationOwner interface {
+	UpdateApplicationSettings(context.Context, configmodel.ApplicationSettings) error
+	UpdateHistoryEnabled(context.Context, bool) error
+	SerialPresets(context.Context) ([]configmodel.SerialPreset, error)
+	UpdateSerialPresets(context.Context, []configmodel.SerialPreset) error
+	UpdateSerialPreset(context.Context, configmodel.SerialPreset) (bool, error)
+	DeleteSerialPreset(context.Context, string) (bool, error)
+	UpdateDeviceProfile(context.Context, configmodel.DeviceProfile) error
+}
+
+// CodexCollector is intentionally narrow: the runtime can supervise normalized
+// updates and explicitly load an owned thread, but it cannot reach raw App
+// Server responses or process details.
+type CodexCollector interface {
+	Run(context.Context, codexappserver.Publisher) error
+	LoadThread(context.Context, string) error
+}
+
+// CodexObserver is deliberately publish-only. It cannot load, resume, or
+// otherwise take ownership of a user session.
+type CodexObserver interface {
+	Run(context.Context, codexobserver.Publisher) error
+}
+
+// CursorCollector is publish-only. The runtime cannot read raw Cursor state,
+// access credentials, or invoke the private endpoint itself.
+type CursorCollector interface {
+	Run(context.Context, cursorprovider.Publisher) error
+}
+
+// StructuredCollector is publish-only. Runtime never receives the request
+// definition, upstream response, URL, headers, or Provider credentials.
+type StructuredCollector interface {
+	ProviderID() string
+	Run(context.Context, structuredprovider.Publisher) error
 }
 
 type ManagementConfig struct {
@@ -51,6 +120,7 @@ type ManagementLimits struct {
 
 type DeviceHubConfig struct {
 	Address               string
+	AdvertisedAddress     string
 	TLSCertificate        *tls.Certificate
 	HeartbeatInterval     time.Duration
 	HeartbeatTimeout      time.Duration
@@ -76,6 +146,9 @@ type DeviceHubLimits struct {
 func normalizeConfig(config Config) (Config, error) {
 	if config.Version == "" {
 		return Config{}, errors.New("companion version is required")
+	}
+	if config.Commit == "" {
+		config.Commit = "unknown"
 	}
 	if config.Management.Address == "" {
 		config.Management.Address = defaultManagementAddress
@@ -117,6 +190,10 @@ func normalizeConfig(config Config) (Config, error) {
 	if !deviceHubIP.IsLoopback() && !hasTLSCertificate {
 		return Config{}, ErrDeviceHubTLSRequired
 	}
+	if config.DeviceHub.AdvertisedAddress != "" &&
+		!validAdvertisedDeviceHubAddress(config.DeviceHub.AdvertisedAddress) {
+		return Config{}, errors.New("Device Hub advertised address must be a routable IP address and non-zero port")
+	}
 	if config.DeviceHub.HeartbeatInterval < 0 || config.DeviceHub.HeartbeatTimeout < 0 ||
 		(config.DeviceHub.HeartbeatTimeout != 0 &&
 			config.DeviceHub.HeartbeatInterval >= config.DeviceHub.HeartbeatTimeout) {
@@ -127,6 +204,23 @@ func normalizeConfig(config Config) (Config, error) {
 	}
 	config.DeviceHub.Limits = normalizeDeviceHubLimits(config.DeviceHub.Limits)
 	config.Management.Limits = normalizeManagementLimits(config.Management.Limits)
+	if len(config.StructuredCollectors) > 6 {
+		return Config{}, errors.New("at most six structured Provider collectors are supported")
+	}
+	if config.StructuredProviders != nil && len(config.StructuredCollectors) != 0 {
+		return Config{}, errors.New("dynamic and fixed structured Provider collectors are mutually exclusive")
+	}
+	structuredIDs := make(map[string]struct{}, len(config.StructuredCollectors))
+	for _, collector := range config.StructuredCollectors {
+		if collector == nil || collector.ProviderID() == "" {
+			return Config{}, errors.New("structured Provider collector is invalid")
+		}
+		if _, duplicate := structuredIDs[collector.ProviderID()]; duplicate {
+			return Config{}, errors.New("structured Provider IDs must be unique")
+		}
+		structuredIDs[collector.ProviderID()] = struct{}{}
+	}
+	config.StructuredCollectors = append([]StructuredCollector(nil), config.StructuredCollectors...)
 	return config, nil
 }
 

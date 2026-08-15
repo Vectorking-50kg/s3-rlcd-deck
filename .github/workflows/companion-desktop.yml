@@ -6,18 +6,28 @@ on:
       - ".github/workflows/companion-desktop.yml"
       - "companion/**"
       - "tools/test_companion.sh"
+      - "tools/package_companion.py"
+      - "tools/package_companion.sh"
       - "tools/smoke_companion_artifact.py"
+      - "tools/smoke_companion_installation.py"
       - "tools/m1_acceptance.py"
+      - "tools/m1_setup_client.py"
       - "tests/host/test_m1_acceptance.py"
+      - "tests/host/test_m1_setup_client.py"
   push:
     branches: [main]
     paths:
       - ".github/workflows/companion-desktop.yml"
       - "companion/**"
       - "tools/test_companion.sh"
+      - "tools/package_companion.py"
+      - "tools/package_companion.sh"
       - "tools/smoke_companion_artifact.py"
+      - "tools/smoke_companion_installation.py"
       - "tools/m1_acceptance.py"
+      - "tools/m1_setup_client.py"
       - "tests/host/test_m1_acceptance.py"
+      - "tests/host/test_m1_setup_client.py"
 
 permissions:
   contents: read
@@ -34,42 +44,62 @@ jobs:
           - runner: macos-15-intel
             arch: amd64
     runs-on: ${{ matrix.runner }}
+    env:
+      VALIDATED_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - name: Verify source identity
-        env:
-          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          ref: ${{ env.VALIDATED_COMMIT }}
+      - name: Verify checkout identity
+        run: test "$(git rev-parse HEAD)" = "$VALIDATED_COMMIT"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version: "1.26.x"
           cache-dependency-path: companion/go.sum
       - name: Verify and build Companion
         run: ./tools/test_companion.sh
+      - name: Verify native Keychain secret store
+        working-directory: companion
+        env:
+          S3DECK_NATIVE_SECRET_STORE_TEST: "1"
+        run: go test -count=1 -run '^TestNative' ./internal/secretstore
       - name: Run native menu-bar smoke
         run: |
           python3 tools/smoke_companion_artifact.py \
             --executable "build/companion/darwin-${{ matrix.arch }}/s3deck-companion" \
             --expected-version 0.1.0-dev \
             --expected-commit "$(git rev-parse HEAD)"
+      - name: Run per-user install and upgrade smoke
+        run: |
+          commit="$(git rev-parse HEAD)"
+          mkdir -p "build/companion/darwin-${{ matrix.arch }}-previous"
+          cd companion
+          CGO_ENABLED=0 GOOS=darwin GOARCH=${{ matrix.arch }} go build \
+            -trimpath -buildvcs=false \
+            -ldflags "-buildid= -X main.version=0.0.0-smoke -X main.commit=000000000000" \
+            -o "../build/companion/darwin-${{ matrix.arch }}-previous/s3deck-companion" \
+            ./cmd/s3deck-companion
+          cd ..
+          python3 tools/smoke_companion_installation.py \
+            --previous-executable "build/companion/darwin-${{ matrix.arch }}-previous/s3deck-companion" \
+            --executable "build/companion/darwin-${{ matrix.arch }}/s3deck-companion" \
+            --previous-version 0.0.0-smoke \
+            --expected-version 0.1.0-dev \
+            --expected-commit "$commit"
 
   windows-native:
     name: Windows native (amd64)
     runs-on: windows-2025
+    env:
+      VALIDATED_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - name: Verify source identity
+          ref: ${{ env.VALIDATED_COMMIT }}
+      - name: Verify checkout identity
         shell: pwsh
-        env:
-          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          if ((git rev-parse HEAD) -ne $env:EXPECTED_SHA) {
-            throw "checkout does not match the reviewed source commit"
-          }
+          if ((git rev-parse HEAD) -ne $env:VALIDATED_COMMIT) { throw "checkout commit mismatch" }
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version: "1.26.x"
@@ -80,6 +110,11 @@ jobs:
         run: |
           $unformatted = gofmt -l .
           if ($unformatted) { throw "Go source requires gofmt: $unformatted" }
+          node --check web/dist/app.js
+          node --check web/dist/serial-terminal.js
+          node --check web/serial_terminal_browser_test.mjs
+          node --test web/serial_terminal_test.mjs
+          node web/serial_terminal_browser_test.mjs
           go vet ./...
           go test ./...
           go test -race ./...
@@ -94,11 +129,34 @@ jobs:
             -o ../build/companion/windows-amd64/s3deck-companion.exe `
             ./cmd/s3deck-companion
           Pop-Location
+      - name: Verify native Credential Manager secret store
+        shell: pwsh
+        working-directory: companion
+        env:
+          S3DECK_NATIVE_SECRET_STORE_TEST: "1"
+        run: go test -count=1 -run '^TestNative' ./internal/secretstore
       - name: Run native tray smoke
         shell: pwsh
         run: |
           $commit = git rev-parse HEAD
           python tools/smoke_companion_artifact.py `
             --executable build/companion/windows-amd64/s3deck-companion.exe `
+            --expected-version 0.1.0-dev `
+            --expected-commit $commit
+      - name: Run per-user install and upgrade smoke
+        shell: pwsh
+        run: |
+          $commit = git rev-parse HEAD
+          New-Item -ItemType Directory -Force build/companion/windows-amd64-previous | Out-Null
+          Push-Location companion
+          go build -trimpath -buildvcs=false `
+            -ldflags "-buildid= -X main.version=0.0.0-smoke -X main.commit=000000000000" `
+            -o ../build/companion/windows-amd64-previous/s3deck-companion.exe `
+            ./cmd/s3deck-companion
+          Pop-Location
+          python tools/smoke_companion_installation.py `
+            --previous-executable build/companion/windows-amd64-previous/s3deck-companion.exe `
+            --executable build/companion/windows-amd64/s3deck-companion.exe `
+            --previous-version 0.0.0-smoke `
             --expected-version 0.1.0-dev `
             --expected-commit $commit

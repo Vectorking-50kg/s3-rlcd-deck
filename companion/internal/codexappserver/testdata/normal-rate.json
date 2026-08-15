@@ -1,0 +1,39 @@
+{
+  "rateLimits": {
+    "credits": null,
+    "individualLimit": null,
+    "limitId": "fallback",
+    "limitName": "Fallback",
+    "planType": null,
+    "primary": {
+      "resetsAt": 1786698000,
+      "usedPercent": 1,
+      "windowDurationMins": 60
+    },
+    "rateLimitReachedType": null,
+    "secondary": null,
+    "spendControlReached": false
+  },
+  "rateLimitsByLimitId": {
+    "dynamic-limit": {
+      "credits": null,
+      "individualLimit": null,
+      "limitId": "dynamic-limit",
+      "limitName": "dynamic-window",
+      "planType": null,
+      "primary": {
+        "resetsAt": 1786698000,
+        "usedPercent": 25,
+        "windowDurationMins": 300
+      },
+      "rateLimitReachedType": null,
+      "secondary": {
+        "resetsAt": 1787302800,
+        "usedPercent": 60,
+        "windowDurationMins": 10080
+      },
+      "spendControlReached": false
+    }
+  },
+  "rateLimitResetCredits": null
+}

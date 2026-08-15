@@ -101,12 +101,137 @@ bool data_is_available(uint8_t source)
     return source == DECK_DATA_SIMULATED || source == DECK_DATA_VERIFIED;
 }
 
+bool serial_page_visible(const deck_serial_view_model_t &serial)
+{
+    return serial.state == DECK_SERIAL_VIEW_USB_TX ||
+           serial.state == DECK_SERIAL_VIEW_WEB_TX;
+}
+
+const char *serial_owner_name(deck_serial_view_state_t state)
+{
+    return state == DECK_SERIAL_VIEW_WEB_TX ? "WEB TX" : "USB TX";
+}
+
+bool serial_equal(
+    const deck_serial_view_model_t &left,
+    const deck_serial_view_model_t &right
+)
+{
+    return left.state == right.state && left.session_id == right.session_id &&
+           left.owner_generation == right.owner_generation &&
+           left.usb_tx_rejected == right.usb_tx_rejected &&
+           left.uart_install_failures == right.uart_install_failures &&
+           left.uart_fifo_overflows == right.uart_fifo_overflows &&
+           left.uart_driver_buffer_full == right.uart_driver_buffer_full &&
+           left.uart_install_failed == right.uart_install_failed &&
+           left.uart_installed == right.uart_installed;
+}
+
+void format_uart_error_count(uint64_t count, char output[8])
+{
+    if (count > 999'999U) {
+        memcpy(output, "999999+", 8);
+        return;
+    }
+    (void)snprintf(output, 8, "%" PRIu64, count);
+}
+
+const char *serial_footer(const deck_serial_view_model_t &serial)
+{
+    if (serial.state == DECK_SERIAL_VIEW_UNAVAILABLE) {
+        return "TX UNAVAILABLE";
+    }
+    if (serial.uart_install_failed) {
+        return "TX UART ERROR";
+    }
+    return "TX DISARMED";
+}
+
+bool overlay_serial_footer(
+    const deck_serial_view_model_t &serial,
+    char *buffer,
+    size_t buffer_size
+)
+{
+    static constexpr char placeholder[] = "TX DISARMED";
+    char *position = strstr(buffer, placeholder);
+    if (position == nullptr) {
+        return true;
+    }
+    const char *replacement = serial_footer(serial);
+    const size_t old_size = sizeof(placeholder) - 1U;
+    const size_t new_size = strlen(replacement);
+    const size_t prefix_size = static_cast<size_t>(position - buffer);
+    const size_t tail_size = strlen(position + old_size) + 1U;
+    if (prefix_size + new_size + tail_size > buffer_size) {
+        return false;
+    }
+    memmove(position + new_size, position + old_size, tail_size);
+    memcpy(position, replacement, new_size);
+    return true;
+}
+
+bool format_serial_page(
+    const deck_serial_view_model_t &serial,
+    char *buffer,
+    size_t buffer_size
+)
+{
+    if (!serial_page_visible(serial) || buffer == nullptr || buffer_size == 0) {
+        return false;
+    }
+    char fifo_overflows[8]{};
+    char driver_buffer_full[8]{};
+    format_uart_error_count(serial.uart_fifo_overflows, fifo_overflows);
+    format_uart_error_count(serial.uart_driver_buffer_full, driver_buffer_full);
+    const bool uart_data_lost = serial.uart_fifo_overflows != 0 ||
+                                serial.uart_driver_buffer_full != 0;
+    const int size = snprintf(
+        buffer,
+        buffer_size,
+        "SERIAL          %s\n"
+        "%s F%s B%s\n"
+        "--------------------------------\n"
+        "115200  8N1  UART %s\n"
+        "SESSION #%" PRIu64 "\n"
+        "OWNER GEN %" PRIu64 "\n"
+        "USB REJECTED %" PRIu64 " B\n"
+        "UART INSTALL ERR %" PRIu32 "\n"
+        "ROUTER ACTIVE / STATS LATEST\n"
+        "--------------------------------\n"
+        "KEY: Stats    BOOT: Exit",
+        serial_owner_name(serial.state),
+        uart_data_lost ? "!! UART RX LOSS" : "UART RX OK",
+        fifo_overflows,
+        driver_buffer_full,
+        serial.uart_installed ? "OK" : "FAULT",
+        serial.session_id,
+        serial.owner_generation,
+        serial.usb_tx_rejected,
+        serial.uart_install_failures
+    );
+    return size >= 0 && static_cast<size_t>(size) < buffer_size;
+}
+
 }  // namespace
 
 bool deck_m0_view_model_equal(const deck_m0_view_model_t *left, const deck_m0_view_model_t *right)
 {
     if (left == nullptr || right == nullptr) {
         return left == right;
+    }
+    const bool left_serial_visible = serial_page_visible(left->serial);
+    const bool right_serial_visible = serial_page_visible(right->serial);
+    if (left_serial_visible || right_serial_visible) {
+        return left_serial_visible == right_serial_visible &&
+               serial_equal(left->serial, right->serial);
+    }
+    const bool left_ai_visible = left->ai_page.active && left->setup_state != DECK_SETUP_ACTIVE;
+    const bool right_ai_visible = right->ai_page.active && right->setup_state != DECK_SETUP_ACTIVE;
+    if (left_ai_visible || right_ai_visible) {
+        return left_ai_visible == right_ai_visible &&
+               deck_ai_page_view_model_equal(&left->ai_page, &right->ai_page) &&
+               strcmp(serial_footer(left->serial), serial_footer(right->serial)) == 0;
     }
     return same_text(left->firmware_version, right->firmware_version) &&
            left->data_source == right->data_source && left->rtc_available == right->rtc_available &&
@@ -271,6 +396,28 @@ bool deck_m0_view_model_format(const deck_m0_view_model_t *model, char *buffer, 
         model->minimum_free_heap_bytes / 1024U
     );
     return size >= 0 && static_cast<size_t>(size) < buffer_size;
+}
+
+bool deck_m0_view_model_format_active_page(
+    const deck_m0_view_model_t *model,
+    char *buffer,
+    size_t buffer_size,
+    bool *ai_page_visible
+)
+{
+    if (model == nullptr || ai_page_visible == nullptr) {
+        return false;
+    }
+    if (serial_page_visible(model->serial)) {
+        *ai_page_visible = false;
+        return format_serial_page(model->serial, buffer, buffer_size);
+    }
+    *ai_page_visible = model->ai_page.active && model->setup_state != DECK_SETUP_ACTIVE;
+    if (!*ai_page_visible) {
+        return deck_m0_view_model_format(model, buffer, buffer_size);
+    }
+    return deck_ai_page_view_model_format(&model->ai_page, buffer, buffer_size) &&
+           overlay_serial_footer(model->serial, buffer, buffer_size);
 }
 
 const char *deck_m0_required_glyphs(void)

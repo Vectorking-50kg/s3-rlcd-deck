@@ -38,6 +38,8 @@ deck_m0_view_model_t sample_model()
         42,
         754,
         7'192'576,
+        {},
+        {},
     };
 }
 
@@ -185,6 +187,123 @@ void renders_ephemeral_setup_credentials_on_the_deck()
     assert(page.find("HTTP http://192.168.4.1") != std::string::npos);
 }
 
+void valid_snapshot_activates_ai_page_but_setup_overrides_it()
+{
+    deck_m0_view_model_t model = sample_model();
+    model.ai_page.active = true;
+    model.ai_page.snapshot_state = DECK_AI_PAGE_SNAPSHOT_UNAVAILABLE;
+    bool ai_page_visible = false;
+    char text[1024];
+    assert(deck_m0_view_model_format_active_page(
+        &model, text, sizeof(text), &ai_page_visible
+    ));
+    assert(ai_page_visible);
+    assert(std::string(text).find("CODEX  UNAVAILABLE") != std::string::npos);
+
+    deck_m0_view_model_t hidden_diagnostic_change = model;
+    ++hidden_diagnostic_change.refresh_count;
+    assert(deck_m0_view_model_equal(&model, &hidden_diagnostic_change));
+
+    model.setup_state = DECK_SETUP_ACTIVE;
+    std::strcpy(model.setup_ssid, "S3-RLCD-A1B2");
+    std::strcpy(model.setup_password, "ABCD-EFGH-JKLM");
+    std::strcpy(model.setup_address, "192.168.4.1");
+    assert(deck_m0_view_model_format_active_page(
+        &model, text, sizeof(text), &ai_page_visible
+    ));
+    assert(!ai_page_visible);
+    assert(std::string(text).find("Setup ACTIVE") != std::string::npos);
+}
+
+void serial_session_replaces_ai_page_without_rendering_payload()
+{
+    deck_m0_view_model_t model = sample_model();
+    model.ai_page.active = true;
+    model.ai_page.snapshot_state = DECK_AI_PAGE_SNAPSHOT_FRESH;
+    model.serial.state = DECK_SERIAL_VIEW_USB_TX;
+    model.serial.session_id = 7;
+    model.serial.owner_generation = 11;
+    model.serial.usb_tx_rejected = 23;
+    model.serial.uart_install_failures = 2;
+    model.serial.uart_fifo_overflows = 3;
+    model.serial.uart_driver_buffer_full = 4;
+    model.serial.uart_installed = true;
+
+    bool ai_page_visible = true;
+    char text[1024];
+    assert(deck_m0_view_model_format_active_page(
+        &model, text, sizeof(text), &ai_page_visible
+    ));
+    assert(!ai_page_visible);
+    const std::string page(text);
+    assert(page.find("SERIAL          USB TX") != std::string::npos);
+    assert(page.find("115200  8N1") != std::string::npos);
+    assert(page.find("SESSION #7") != std::string::npos);
+    assert(page.find("OWNER GEN 11") != std::string::npos);
+    assert(page.find("USB REJECTED 23 B") != std::string::npos);
+    assert(page.find("UART INSTALL ERR 2") != std::string::npos);
+    assert(page.find("!! UART RX LOSS F3 B4") != std::string::npos);
+    assert(page.find("KEY: Stats    BOOT: Exit") != std::string::npos);
+    assert(page.find("TX DISARMED") == std::string::npos);
+
+    deck_m0_view_model_t same_visible_serial = model;
+    same_visible_serial.ai_page.snapshot_state = DECK_AI_PAGE_SNAPSHOT_UNAVAILABLE;
+    assert(deck_m0_view_model_equal(&model, &same_visible_serial));
+    ++same_visible_serial.serial.usb_tx_rejected;
+    assert(!deck_m0_view_model_equal(&model, &same_visible_serial));
+
+    same_visible_serial = model;
+    ++same_visible_serial.serial.uart_fifo_overflows;
+    assert(!deck_m0_view_model_equal(&model, &same_visible_serial));
+
+    model.serial.state = DECK_SERIAL_VIEW_DISARMED;
+    model.serial.uart_install_failed = true;
+    model.serial.uart_installed = false;
+    assert(deck_m0_view_model_format_active_page(
+        &model, text, sizeof(text), &ai_page_visible
+    ));
+    assert(ai_page_visible);
+    assert(std::string(text).find("TX UART ERROR") != std::string::npos);
+
+    model.serial.uart_install_failed = false;
+    assert(deck_m0_view_model_format_active_page(
+        &model, text, sizeof(text), &ai_page_visible
+    ));
+    assert(std::string(text).find("TX DISARMED") != std::string::npos);
+}
+
+void serial_degraded_states_are_visible_on_the_ai_page()
+{
+    deck_m0_view_model_t model = sample_model();
+    model.ai_page.active = true;
+    bool ai_page_visible = false;
+    char text[1024];
+
+    model.serial.state = DECK_SERIAL_VIEW_UNAVAILABLE;
+    assert(deck_m0_view_model_format_active_page(
+        &model, text, sizeof(text), &ai_page_visible
+    ));
+    assert(ai_page_visible);
+    assert(std::string(text).find("TX UNAVAILABLE") != std::string::npos);
+
+    deck_m0_view_model_t available = model;
+    available.serial.state = DECK_SERIAL_VIEW_DISARMED;
+    assert(!deck_m0_view_model_equal(&model, &available));
+    assert(deck_m0_view_model_format_active_page(
+        &available, text, sizeof(text), &ai_page_visible
+    ));
+    assert(std::string(text).find("TX DISARMED") != std::string::npos);
+
+    deck_m0_view_model_t install_failed = available;
+    install_failed.serial.uart_install_failures = 1;
+    install_failed.serial.uart_install_failed = true;
+    assert(!deck_m0_view_model_equal(&available, &install_failed));
+    assert(deck_m0_view_model_format_active_page(
+        &install_failed, text, sizeof(text), &ai_page_visible
+    ));
+    assert(std::string(text).find("TX UART ERROR") != std::string::npos);
+}
+
 }  // namespace
 
 int main()
@@ -197,5 +316,8 @@ int main()
     treats_unknown_data_sources_as_unavailable();
     renders_unavailable_button_inputs_explicitly();
     renders_ephemeral_setup_credentials_on_the_deck();
+    valid_snapshot_activates_ai_page_but_setup_overrides_it();
+    serial_session_replaces_ai_page_without_rendering_payload();
+    serial_degraded_states_are_visible_on_the_ai_page();
     return 0;
 }

@@ -2,8 +2,29 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
+
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/protectedfile"
 )
+
+type backupFileExporterStub struct {
+	path       string
+	passphrase []byte
+}
+
+func (exporter *backupFileExporterStub) ExportFile(
+	_ context.Context,
+	path string,
+	passphrase []byte,
+) error {
+	exporter.path = path
+	exporter.passphrase = append([]byte(nil), passphrase...)
+	return nil
+}
 
 func TestVersionFlagPrintsBuildIdentity(t *testing.T) {
 	var stdout bytes.Buffer
@@ -30,5 +51,72 @@ func TestRunFailsClosedWithMalformedPersistedManagementToken(t *testing.T) {
 	}
 	if !bytes.Contains(stderr.Bytes(), []byte("management admin token")) {
 		t.Fatalf("stderr = %q, want fail-closed management token error", stderr.String())
+	}
+}
+
+func TestMalformedStructuredProviderConfigurationDoesNotDisableCompanion(t *testing.T) {
+	t.Setenv(managementTokenEnvironment, "not-a-valid-token")
+	directory := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(directory, "structured-providers.json"),
+		[]byte(`{"schema_version":1,"secret":"PRIVATE_CONFIG_CANARY"}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := run([]string{"--headless", "--data-directory", directory}, &stdout, &stderr)
+	if exitCode != 2 || !bytes.Contains(stderr.Bytes(), []byte("management admin token")) {
+		t.Fatalf("run() exit=%d stderr=%q", exitCode, stderr.String())
+	}
+	if !bytes.Contains(stderr.Bytes(), []byte("structured Provider configuration is unavailable")) ||
+		bytes.Contains(stderr.Bytes(), []byte("PRIVATE_CONFIG_CANARY")) {
+		t.Fatalf("structured Provider degradation was not isolated/redacted: %q", stderr.String())
+	}
+}
+
+func TestCorruptProviderHistoryDoesNotDisableCompanionOrLeakContents(t *testing.T) {
+	t.Setenv(managementTokenEnvironment, "not-a-valid-token")
+	directory := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(directory, "provider-history.sqlite3"),
+		[]byte("PRIVATE_HISTORY_CANARY is not sqlite"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := run([]string{"--headless", "--data-directory", directory}, &stdout, &stderr)
+	if exitCode != 2 || !bytes.Contains(stderr.Bytes(), []byte("management admin token")) {
+		t.Fatalf("run() exit=%d stderr=%q", exitCode, stderr.String())
+	}
+	if !bytes.Contains(stderr.Bytes(), []byte("Provider history is unavailable")) ||
+		bytes.Contains(stderr.Bytes(), []byte("PRIVATE_HISTORY_CANARY")) {
+		t.Fatalf("Provider history degradation was not isolated/redacted: %q", stderr.String())
+	}
+}
+
+func TestBackupFileExportReadsOnlyAPrivatePassphraseFile(t *testing.T) {
+	directory := t.TempDir()
+	passphrasePath := filepath.Join(directory, "passphrase")
+	if committed, err := protectedfile.Replace(
+		passphrasePath, []byte("correct horse battery staple"),
+	); err != nil || !committed {
+		t.Fatalf("passphrase file committed=%v err=%v", committed, err)
+	}
+	exporter := &backupFileExporterStub{}
+	exportPath := filepath.Join(directory, "deck.age")
+	if err := exportBackupFile(exporter, exportPath, passphrasePath); err != nil {
+		t.Fatal(err)
+	}
+	if exporter.path != exportPath || string(exporter.passphrase) != "correct horse battery staple" {
+		t.Fatalf("export path=%q passphrase=%q", exporter.path, exporter.passphrase)
+	}
+	if err := os.Chmod(passphrasePath, 0o644); runtime.GOOS != "windows" && err == nil {
+		if err = exportBackupFile(exporter, exportPath, passphrasePath); err == nil {
+			t.Fatal("world-readable passphrase file was accepted")
+		}
 	}
 }

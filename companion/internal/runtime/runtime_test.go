@@ -138,6 +138,7 @@ func TestRuntimeServesAuthenticatedDeviceLinkOnlyOverTLS(t *testing.T) {
 		Board:           devicelink.BoardESP32S3RLCD42,
 		Capabilities:    []string{"display", "serial", "ota"},
 		SerialState:     "disarmed",
+		SerialSessionID: 0,
 	})
 	if err = connection.Write(context.Background(), websocket.MessageText, hello); err != nil {
 		t.Fatalf("write device.hello: %v", err)
@@ -429,7 +430,8 @@ func testConfigWithPairing(clock pairing.Clock, store pairing.Store) companionru
 			AdminToken: "management-test-token-000000000001",
 		},
 		DeviceHub: companionruntime.DeviceHubConfig{
-			Address: "127.0.0.1:0",
+			Address:           "127.0.0.1:0",
+			AdvertisedAddress: "192.168.50.8:7780",
 		},
 		Pairing: pairingService,
 	}

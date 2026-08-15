@@ -26,6 +26,17 @@ void shared_hello_fixtures_match_the_device_contract()
     assert(deck_device_protocol_validate_hello(
         valid.data(), valid.size(), "deck-001122334455"
     ));
+    const std::string active = fixture("hello-active-valid.json");
+    assert(deck_device_protocol_validate_hello(
+        active.data(), active.size(), "deck-001122334455"
+    ));
+    const std::string active_without_serial =
+        fixture("hello-active-without-serial.json");
+    assert(!deck_device_protocol_validate_hello(
+        active_without_serial.data(),
+        active_without_serial.size(),
+        "deck-001122334455"
+    ));
     const std::string wrong_board = fixture("hello-wrong-board.json");
     assert(!deck_device_protocol_validate_hello(
         wrong_board.data(), wrong_board.size(), "deck-001122334455"
@@ -93,6 +104,53 @@ void exact_certificate_pin_rejects_a_wrong_digest()
     ));
 }
 
+void serial_controls_are_strict_and_bounded()
+{
+    deck_device_serial_control_t control{};
+    const std::string request = fixture("serial-owner-request-valid.json");
+    assert(deck_device_protocol_parse_serial_control(
+        request.data(), request.size(), &control
+    ));
+    assert(control.kind == DECK_DEVICE_SERIAL_OWNER_REQUEST);
+    assert(control.session_id == 7 && control.request_id == 9 && control.enable);
+
+    const std::string activity = fixture("serial-owner-activity-valid.json");
+    assert(deck_device_protocol_parse_serial_control(
+        activity.data(), activity.size(), &control
+    ));
+    assert(control.kind == DECK_DEVICE_SERIAL_OWNER_ACTIVITY);
+
+    const std::string history = fixture("serial-history-request-valid.json");
+    assert(deck_device_protocol_parse_serial_control(
+        history.data(), history.size(), &control
+    ));
+    assert(control.kind == DECK_DEVICE_SERIAL_HISTORY_REQUEST);
+
+    constexpr char duplicate[] =
+        "{\"type\":\"serial.owner.request\",\"protocol_version\":1,"
+        "\"serial_session_id\":7,\"request_id\":9,\"request_id\":10,"
+        "\"enable\":true}";
+    assert(!deck_device_protocol_parse_serial_control(
+        duplicate, sizeof(duplicate) - 1U, &control
+    ));
+}
+
+void diagnostic_requests_are_strict_and_shared()
+{
+    deck_device_diagnostics_request_t request{};
+    const std::string valid = fixture("diagnostics-request-valid.json");
+    assert(deck_device_protocol_parse_diagnostics_request(
+        valid.data(), valid.size(), &request
+    ));
+    assert(request.request_id == 17);
+    constexpr char duplicate[] =
+        "{\"type\":\"diagnostics.request\",\"protocol_version\":1,"
+        "\"request_id\":17,\"request_id\":18}";
+    assert(!deck_device_protocol_parse_diagnostics_request(
+        duplicate, sizeof(duplicate) - 1U, &request
+    ));
+}
+
 }  // namespace
 
 int main()
@@ -100,5 +158,7 @@ int main()
     shared_hello_fixtures_match_the_device_contract();
     shared_heartbeat_fixtures_match_the_device_contract();
     exact_certificate_pin_rejects_a_wrong_digest();
+    serial_controls_are_strict_and_bounded();
+    diagnostic_requests_are_strict_and_shared();
     return 0;
 }

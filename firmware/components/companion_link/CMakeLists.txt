@@ -1,16 +1,26 @@
 idf_component_register(
     SRCS
         "deck_companion_link.cpp"
+        "deck_companion_failover.cpp"
+        "deck_companion_link_frame.cpp"
+        "deck_companion_link_message.cpp"
         "deck_companion_link_timing.cpp"
+        "deck_companion_transport_authority.cpp"
         "deck_device_protocol.cpp"
+        "deck_serial_frame.cpp"
+        "deck_serial_request_tracker.cpp"
     INCLUDE_DIRS "include"
     REQUIRES
+        ai_snapshot
         companion_profiles
         esp_timer
         espressif__esp_websocket_client
         freertos
+        health
         mbedtls
+        ota_service
         pthread
+        serial_service
 )
 
 target_compile_features(${COMPONENT_LIB} PRIVATE cxx_std_17)

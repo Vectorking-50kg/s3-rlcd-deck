@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "deck_boot_diagnostics.cpp"
+    SRCS "deck_boot_diagnostics.cpp" "deck_diagnostic_ring.cpp"
     INCLUDE_DIRS "include"
 )
 

@@ -35,7 +35,14 @@ constexpr char kPage[] =
     "active_profile_id==p.profile_id;b.onclick=async()=>{let r=await fetch(a[1],{method:"
     "'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new "
     "URLSearchParams({profile_id:p.profile_id})});show(await r.json());if(r.ok)setTimeout("
-    "load,250)};row.append(b)}companions.append(row)}}async function load(method='GET',"
+    "load,250)};row.append(b)}let q=document.createElement('input');q.type='number';q.min="
+    "'-2147483648';q.max='2147483647';q.value=p.priority;q.setAttribute('aria-label',"
+    "'Priority');let save=document.createElement("
+    "'button');save.textContent='Save priority';save.onclick=async()=>{let r=await fetch("
+    "'/api/companions/priority',{method:'POST',headers:{'Content-Type':"
+    "'application/x-www-form-urlencoded'},body:new URLSearchParams({profile_id:p.profile_id,"
+    "priority:q.value})});show(await r.json());if(r.ok)setTimeout(load,250)};row.append(q,save);"
+    "companions.append(row)}}async function load(method='GET',"
     "path='/api/status'){let r=await fetch(path,{method});show(await r.json())}"
     "scan.onclick=()=>load('POST','/api/scan');wifi.onsubmit=async e=>{e.preventDefault();"
     "let r=await fetch('/api/wifi',{method:'POST',headers:{'Content-Type':"
@@ -71,6 +78,7 @@ constexpr deck_setup_http_route_spec_t kRoutes[] = {
     {DECK_SETUP_HTTP_COMPANION_PAIR, DECK_SETUP_HTTP_POST, "/api/companions/pair"},
     {DECK_SETUP_HTTP_COMPANION_PAIR_ACK, DECK_SETUP_HTTP_POST, "/api/companions/pair/ack"},
     {DECK_SETUP_HTTP_COMPANION_SELECT, DECK_SETUP_HTTP_POST, "/api/companions/select"},
+    {DECK_SETUP_HTTP_COMPANION_PRIORITY, DECK_SETUP_HTTP_POST, "/api/companions/priority"},
     {DECK_SETUP_HTTP_COMPANION_REVOKE, DECK_SETUP_HTTP_POST, "/api/companions/revoke"},
 };
 
@@ -617,6 +625,104 @@ bool deck_setup_http_parse_companion_profile_request(
             return false;
         }
     }
+    return true;
+}
+
+bool deck_setup_http_parse_companion_priority_request(
+    const char *body,
+    size_t body_size,
+    char *profile_id,
+    size_t profile_id_capacity,
+    int32_t *priority
+)
+{
+    constexpr char kProfilePrefix[] = "profile_id=";
+    constexpr char kPrioritySeparator[] = "&priority=";
+    if (body == nullptr || profile_id == nullptr || priority == nullptr ||
+        profile_id_capacity < DECK_COMPANION_PROFILE_ID_CAPACITY ||
+        body_size == 0 || body_size > 160 ||
+        body_size <= sizeof(kProfilePrefix) - 1 +
+                         sizeof(kPrioritySeparator) - 1 ||
+        std::memcmp(body, kProfilePrefix, sizeof(kProfilePrefix) - 1) != 0) {
+        return false;
+    }
+    const char *separator = static_cast<const char *>(std::memchr(
+        body + sizeof(kProfilePrefix) - 1,
+        '&',
+        body_size - sizeof(kProfilePrefix) + 1
+    ));
+    if (separator == nullptr ||
+        static_cast<size_t>(body + body_size - separator) <=
+            sizeof(kPrioritySeparator) - 1 ||
+        std::memcmp(
+            separator,
+            kPrioritySeparator,
+            sizeof(kPrioritySeparator) - 1
+        ) != 0 ||
+        std::memchr(
+            separator + 1,
+            '&',
+            static_cast<size_t>(body + body_size - separator - 1)
+        ) !=
+            nullptr ||
+        !decode_form_component(
+            body + sizeof(kProfilePrefix) - 1,
+            static_cast<size_t>(separator - body) - sizeof(kProfilePrefix) + 1,
+            profile_id,
+            profile_id_capacity
+        ) ||
+        std::strlen(profile_id) != 71 ||
+        std::memcmp(profile_id, "sha256:", 7) != 0) {
+        profile_id[0] = '\0';
+        return false;
+    }
+    for (size_t index = 7; index < 71; ++index) {
+        if (!((profile_id[index] >= '0' && profile_id[index] <= '9') ||
+              (profile_id[index] >= 'a' && profile_id[index] <= 'f'))) {
+            profile_id[0] = '\0';
+            return false;
+        }
+    }
+    char decoded_priority[16]{};
+    const char *encoded_priority = separator + sizeof(kPrioritySeparator) - 1;
+    const size_t encoded_priority_size =
+        static_cast<size_t>(body + body_size - encoded_priority);
+    if (!decode_form_component(
+            encoded_priority,
+            encoded_priority_size,
+            decoded_priority,
+            sizeof(decoded_priority)
+        )) {
+        profile_id[0] = '\0';
+        return false;
+    }
+    const char *cursor = decoded_priority;
+    bool negative = false;
+    if (*cursor == '-') {
+        negative = true;
+        ++cursor;
+    }
+    if (*cursor == '\0') {
+        profile_id[0] = '\0';
+        return false;
+    }
+    uint64_t magnitude = 0;
+    const uint64_t maximum = negative
+                                 ? UINT64_C(2147483648)
+                                 : UINT64_C(2147483647);
+    for (; *cursor != '\0'; ++cursor) {
+        if (*cursor < '0' || *cursor > '9' ||
+            magnitude > (maximum - static_cast<uint64_t>(*cursor - '0')) / 10U) {
+            profile_id[0] = '\0';
+            return false;
+        }
+        magnitude = magnitude * 10U + static_cast<uint64_t>(*cursor - '0');
+    }
+    *priority = negative
+                    ? magnitude == UINT64_C(2147483648)
+                          ? INT32_MIN
+                          : -static_cast<int32_t>(magnitude)
+                    : static_cast<int32_t>(magnitude);
     return true;
 }
 

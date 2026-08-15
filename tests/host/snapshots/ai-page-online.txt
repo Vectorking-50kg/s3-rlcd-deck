@@ -1,0 +1,11 @@
+20:36  +24.8C  WIFI 3/4  AGENT ON
+----------------------------------------
+CODEX  VERIFIED
+PRIMARY [######----] R62% @2h30m
+WEEKLY  [##--------] U22% 7d
+TOKEN 146K
+----------------------------------------
+DECK DEVELOPMENT
+RUNNING / INFERRED / 12m
+18.4K TOK / CTX 41% / +2 SESS
+TX DISARMED

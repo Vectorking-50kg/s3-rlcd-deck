@@ -12,13 +12,78 @@ _Avoid_: Board, terminal device
 The trusted desktop application that collects provider data, manages credentials, serves the full Web console, and coordinates connected Decks.
 _Avoid_: Agent, PC service, host app
 
+**Installation Transaction**:
+The recoverable per-user operation that stages one immutable Companion executable, snapshots
+schema-bearing data before migration, updates login startup, and either commits one Installation
+State or restores the prior executable, data, and startup registration.
+_Avoid_: In-place update, setup script, auto-updater
+
+**Login Startup Registration**:
+The macOS LaunchAgent or Windows Task Scheduler entry owned by one Installation State. Disabling it
+changes future login startup; it is distinct from stopping the currently running Companion.
+_Avoid_: Background service, daemon install, system service
+
 **Provider**:
 An AI service or local AI tool whose quota, balance, usage, or session state is normalized for presentation.
 _Avoid_: Account, collector
 
+**Structured HTTP Provider**:
+A user-configured Provider whose balance or quota comes from one fixed GET/POST request and an
+explicit field mapping. It is data configuration, never executable code.
+_Avoid_: Script Provider, curl Provider, plugin
+
+**Secret Reference**:
+A non-secret, opaque identifier that maps one Companion-owned Provider credential to the current
+user's platform vault. Configuration may persist the identifier but never the credential value or
+a platform storage path.
+_Avoid_: API Key ID, Keychain path, credential filename
+
+**Backup Archive**:
+A password-encrypted, versioned `age` document containing only explicitly restorable Companion
+configuration and user-entered Provider credentials. It is not a copy of any live store and never
+contains discovered credentials, device trust, Web sessions, history, or serial data.
+_Avoid_: Config ZIP, database backup, Keychain export
+
+**Import Preview**:
+A redacted, side-effect-free plan for one Backup Archive and current Companion configuration. Its
+short-lived single-use receipt must be presented to commit the exact archive, mode, and current
+configuration that were previewed.
+_Avoid_: Dry-run import, confirmation dialog
+
+**Firmware Bundle**:
+A versioned, project-signed Deck firmware image plus the public metadata needed to prove its target,
+integrity, compatibility, and signing authority before installation.
+_Avoid_: Firmware ZIP, unsigned binary, update file
+
+**OTA Transaction**:
+The explicitly confirmed transfer of one validated Firmware Bundle to one Deck's inactive firmware
+slot. It ends before the candidate boot is trusted.
+_Avoid_: Background update, firmware upload
+
+**Boot Health Confirmation**:
+The first-boot decision that either trusts an OTA candidate after the Deck restores its critical
+subsystems and Active Companion connection, or returns to the previous firmware.
+_Avoid_: Boot success, startup delay
+
 **AI Snapshot**:
 A timestamped, display-safe view of normalized Provider data sent by a Companion to a Deck. It excludes upstream credentials and raw private content.
 _Avoid_: Raw snapshot, provider response
+
+**Provider Hour**:
+The latest validated Provider usage, balance, quota, and status observed within one UTC hour. It never includes Session Observation or upstream content.
+_Avoid_: Raw history, hourly response
+
+**Snapshot Store**:
+The Deck-owned module that immediately retains the latest valid AI Snapshot in memory and transactionally checkpoints it to Flash at a bounded rate. It alone applies offline visibility policy to cached quota data.
+_Avoid_: Raw cache, Provider database
+
+**Quota Window**:
+A Provider-defined interval whose normalized usage, remaining allowance, duration, and reset time may be presented in an AI Snapshot. Unknown values remain null rather than becoming zero.
+_Avoid_: Limit bucket, rate-limit response
+
+**Session Observation**:
+A privacy-safe, anonymous description of one Provider session with an explicit source and confidence. It never contains prompts, replies, commands, tool arguments, or absolute paths.
+_Avoid_: Thread record, conversation log
 
 **Active Companion**:
 The single paired Companion to which a Deck is currently connected. Other paired Companions are connection candidates, not simultaneous data sources.
@@ -31,6 +96,10 @@ _Avoid_: Login, device discovery
 **Companion Profile**:
 A Deck-owned record of one paired Companion's identity, trust material, connection location, preference, and last successful contact.
 _Avoid_: Server profile, account
+
+**Failover Round**:
+The bounded, priority-ordered attempt of the other Companion Profiles after the Active Companion has remained offline for 30 continuous seconds.
+_Avoid_: Discovery sweep, preemption
 
 **Device Hub**:
 The Companion-facing surface dedicated to paired Deck connections and minimal device health. It is distinct from the management Web used by people.
@@ -52,9 +121,47 @@ _Avoid_: Controller, writer
 The temporary, exclusive grant that allows one authenticated Web client to act as the Web TX Owner during a Serial Session.
 _Avoid_: Browser lock, Web session
 
+**Serial Hub**:
+The Companion-owned, volatile 8 MiB current-Session ring that validates Deck frames and gives each
+Serial Observer an independent read cursor. It is never a persistent history store.
+_Avoid_: Serial database, terminal log
+
+**Serial Observer**:
+An authenticated management Web connection that reads one Serial Session through its own bounded
+cursor. Observation alone grants no transmit authority; Web transmit additionally requires the sole
+Web TX Lease.
+_Avoid_: Serial owner, terminal session
+
+**Serial Preset**:
+A bounded command template that a user explicitly authors and saves before any Serial Session
+transmission. It is protected configuration, never captured Session data or implicit transmit authority.
+_Avoid_: Serial history, captured command, macro execution
+
 **Target**:
 The external 3.3 V TTL UART device connected to the Deck for monitoring or controlled transmission.
 _Avoid_: Client device, downstream board
+
+**Diagnostic Event**:
+A fixed-schema, privacy-safe operational fact selected from bounded level, module, code, numeric,
+and hashed-identifier fields. It cannot represent arbitrary text, paths, credentials, Provider raw
+data, prompts, tool arguments, or serial bodies.
+_Avoid_: Log message, debug string
+
+**Diagnostic Log Segment**:
+One owner-only JSONL file written by the Companion's sole diagnostic worker. Its hourly active
+segment is atomically replaced; after rotation the sealed segment is immutable and removed only by
+the time/size retention policy.
+_Avoid_: Log file, trace dump
+
+**Deck Diagnostic Ring**:
+The Deck's fixed 64-event release-safe memory ring of enum and numeric Diagnostic Events. It is
+volatile and can be read only through an authenticated Device Link request.
+_Avoid_: Device log, serial console
+
+**Diagnostic Bundle**:
+A bounded, locally generated ZIP containing only fixed-path redacted documents plus a manifest with
+the size and SHA-256 of every included document. It is never uploaded automatically.
+_Avoid_: Support dump, log archive
 
 **Verified State**:
 Session state reported through an official source that directly owns or observes the relevant session.

@@ -15,9 +15,13 @@ idf_component_register(
         esp_rom
         esp_system
         esp_timer
+        esp_wifi
         freertos
         health
+        heap
+        ota_service
         setup_mode
+        serial_service
 )
 
 target_compile_features(${COMPONENT_LIB} PRIVATE cxx_std_17)

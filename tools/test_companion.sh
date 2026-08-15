@@ -10,6 +10,10 @@ if ! command -v go >/dev/null 2>&1; then
     echo "Go is unavailable; install the Go 1.26.x toolchain" >&2
     exit 2
 fi
+if ! command -v node >/dev/null 2>&1; then
+    echo "Node.js is unavailable; install Node.js to verify the embedded Serial terminal" >&2
+    exit 2
+fi
 
 go_version="$(go env GOVERSION)"
 if [[ "$go_version" != go1.26.* ]]; then
@@ -25,9 +29,16 @@ if [[ -n "$unformatted" ]]; then
 fi
 
 cd "$companion_root"
+node --check web/dist/app.js
+node --check web/dist/serial-terminal.js
+node --check web/serial_terminal_browser_test.mjs
+node --test web/serial_terminal_test.mjs
+node web/serial_terminal_browser_test.mjs
 go vet ./...
-go test ./...
-go test -race ./...
+# AI Snapshot contract tests read canonical fixtures outside the Go module.
+# Disable the Go result cache so a fixture-only change is always re-evaluated.
+go test -count=1 ./...
+go test -count=1 -race ./...
 
 mkdir -p \
     "$artifact_root/darwin-arm64" \
@@ -36,20 +47,23 @@ mkdir -p \
 
 build_version="${S3DECK_BUILD_VERSION:-0.1.0-dev}"
 build_commit="${S3DECK_BUILD_COMMIT:-$(git -C "$repository_root" rev-parse HEAD 2>/dev/null || echo unknown)}"
-link_identity="-X main.version=$build_version -X main.commit=$build_commit"
+link_identity="-buildid= -X main.version=$build_version -X main.commit=$build_commit"
 
 CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build \
     -trimpath \
+	-buildvcs=false \
 	-ldflags "$link_identity" \
     -o "$artifact_root/darwin-arm64/s3deck-companion" \
     ./cmd/s3deck-companion
 CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build \
     -trimpath \
+	-buildvcs=false \
 	-ldflags "$link_identity" \
     -o "$artifact_root/darwin-amd64/s3deck-companion" \
     ./cmd/s3deck-companion
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
     -trimpath \
+	-buildvcs=false \
 	-ldflags "$link_identity" \
     -o "$artifact_root/windows-amd64/s3deck-companion.exe" \
     ./cmd/s3deck-companion

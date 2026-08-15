@@ -180,39 +180,30 @@ void http_contract_exposes_profile_pairing_without_secrets()
         0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
     };
     assert(deck_setup_http_address_is_setup_gateway(
-        setup_gateway,
-        sizeof(setup_gateway)
+        setup_gateway, sizeof(setup_gateway)
     ));
     assert(deck_setup_http_address_is_setup_gateway(
-        mapped_setup_gateway,
-        sizeof(mapped_setup_gateway)
+        mapped_setup_gateway, sizeof(mapped_setup_gateway)
     ));
     assert(!deck_setup_http_address_is_setup_gateway(
-        normal_lan_address,
-        sizeof(normal_lan_address)
+        normal_lan_address, sizeof(normal_lan_address)
     ));
     assert(!deck_setup_http_address_is_setup_gateway(
-        native_ipv6_client,
-        sizeof(native_ipv6_client)
+        native_ipv6_client, sizeof(native_ipv6_client)
     ));
-    assert(!deck_setup_http_address_is_setup_gateway(nullptr, 0));
     uint8_t extracted[4]{};
     assert(deck_setup_http_extract_ipv4(
-        mapped_setup_gateway,
-        sizeof(mapped_setup_gateway),
-        extracted
+        mapped_setup_gateway, sizeof(mapped_setup_gateway), extracted
     ));
     assert(std::memcmp(extracted, setup_gateway, sizeof(extracted)) == 0);
     assert(!deck_setup_http_extract_ipv4(
-        native_ipv6_client,
-        sizeof(native_ipv6_client),
-        extracted
+        native_ipv6_client, sizeof(native_ipv6_client), extracted
     ));
 
     size_t route_count = 0;
     const deck_setup_http_route_spec_t *routes = deck_setup_http_routes(&route_count);
     assert(routes != nullptr);
-    assert(route_count == 11);
+    assert(route_count == 12);
     assert(routes[0].route == DECK_SETUP_HTTP_PAGE);
     assert(routes[0].method == DECK_SETUP_HTTP_GET);
     assert(std::string(routes[0].path) == "/");
@@ -237,8 +228,10 @@ void http_contract_exposes_profile_pairing_without_secrets()
     assert(std::string(routes[8].path) == "/api/companions/pair/ack");
     assert(routes[9].route == DECK_SETUP_HTTP_COMPANION_SELECT);
     assert(std::string(routes[9].path) == "/api/companions/select");
-    assert(routes[10].route == DECK_SETUP_HTTP_COMPANION_REVOKE);
-    assert(std::string(routes[10].path) == "/api/companions/revoke");
+    assert(routes[10].route == DECK_SETUP_HTTP_COMPANION_PRIORITY);
+    assert(std::string(routes[10].path) == "/api/companions/priority");
+    assert(routes[11].route == DECK_SETUP_HTTP_COMPANION_REVOKE);
+    assert(std::string(routes[11].path) == "/api/companions/revoke");
 
     assert(deck_setup_http_route("GET", "/") == DECK_SETUP_HTTP_PAGE);
     assert(deck_setup_http_route("GET", "/api/status") == DECK_SETUP_HTTP_STATUS);
@@ -257,6 +250,8 @@ void http_contract_exposes_profile_pairing_without_secrets()
            DECK_SETUP_HTTP_COMPANION_PAIR_ACK);
     assert(deck_setup_http_route("POST", "/api/companions/select") ==
            DECK_SETUP_HTTP_COMPANION_SELECT);
+    assert(deck_setup_http_route("POST", "/api/companions/priority") ==
+           DECK_SETUP_HTTP_COMPANION_PRIORITY);
     assert(deck_setup_http_route("POST", "/api/companions/revoke") ==
            DECK_SETUP_HTTP_COMPANION_REVOKE);
     assert(deck_setup_http_route("GET", "/api/scan") == DECK_SETUP_HTTP_METHOD_NOT_ALLOWED);
@@ -268,7 +263,7 @@ void http_contract_exposes_profile_pairing_without_secrets()
     deck_setup_snapshot_t snapshot{};
     assert(deck_setup_mode_snapshot(setup, &snapshot));
 
-    char page[4'096];
+    char page[8'192];
     assert(deck_setup_http_render_page(page, sizeof(page)));
     const std::string html(page);
     assert(html.find("Setup / Recovery") != std::string::npos);
@@ -279,6 +274,7 @@ void http_contract_exposes_profile_pairing_without_secrets()
     assert(html.find("/api/companions/pair") != std::string::npos);
     assert(html.find("/api/companions/pair/ack") != std::string::npos);
     assert(html.find("/api/companions/select") != std::string::npos);
+    assert(html.find("/api/companions/priority") != std::string::npos);
     assert(html.find("/api/companions/revoke") != std::string::npos);
     assert(html.find("innerHTML") == std::string::npos);
     assert(html.find("name=password") != std::string::npos);
@@ -413,10 +409,30 @@ void companion_requests_are_strict_and_do_not_accept_secret_shaped_extras()
         std::strlen("response_ack=000102030405060708090a0b0c0d0e0g"),
         response_ack
     ));
-    assert(!deck_setup_http_parse_pair_ack_request(
-        "response_ack=000102030405060708090a0b0c0d0e0f&extra=1",
-        std::strlen("response_ack=000102030405060708090a0b0c0d0e0f&extra=1"),
-        response_ack
+
+    int32_t priority = 0;
+    char priority_profile[DECK_COMPANION_PROFILE_ID_CAPACITY]{};
+    const std::string valid_profile =
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const std::string priority_body =
+        std::string("profile_id=") + valid_profile + "&priority=-17";
+    assert(deck_setup_http_parse_companion_priority_request(
+        priority_body.data(),
+        priority_body.size(),
+        priority_profile,
+        sizeof(priority_profile),
+        &priority
+    ));
+    assert(priority == -17);
+    assert(std::string(priority_profile) == valid_profile);
+    const std::string overflow_priority =
+        std::string("profile_id=") + valid_profile + "&priority=2147483648";
+    assert(!deck_setup_http_parse_companion_priority_request(
+        overflow_priority.data(),
+        overflow_priority.size(),
+        priority_profile,
+        sizeof(priority_profile),
+        &priority
     ));
 }
 

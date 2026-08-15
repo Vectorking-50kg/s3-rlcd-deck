@@ -65,8 +65,97 @@ func (application *Runtime) managementRoutes() http.Handler {
 		limits.SensitiveRateWindow,
 		application.handleLogin,
 	))
+	mux.HandleFunc("POST /api/v1/session/refresh", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.requireManagementSession(application.handleSessionRefresh),
+	))
 	mux.HandleFunc("GET /api/v1/status", application.requireManagementSession(application.handleStatus))
 	mux.HandleFunc("GET /api/v1/devices", application.requireManagementSession(application.handleListDevices))
+	mux.HandleFunc("GET /api/v1/serial/status", application.requireManagementSession(application.handleSerialStatus))
+	mux.HandleFunc("GET /api/v1/serial/download", application.requireManagementSession(application.handleSerialDownload))
+	mux.HandleFunc("GET /api/v1/serial/observe", application.handleSerialObserve)
+	mux.HandleFunc("GET /api/v1/serial/presets", application.requireManagementSession(application.handleSerialPresets))
+	mux.HandleFunc("GET /api/v1/serial/presets/{presetID}", application.requireManagementSession(application.handleSerialPreset))
+	mux.HandleFunc("PUT /api/v1/serial/presets", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.requireManagementWrite(application.handleSerialPresetsUpdate),
+	))
+	mux.HandleFunc("PUT /api/v1/serial/presets/{presetID}", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.requireManagementWrite(application.handleSerialPresetUpdate),
+	))
+	mux.HandleFunc("DELETE /api/v1/serial/presets/{presetID}", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.requireManagementWrite(application.handleSerialPresetDelete),
+	))
+	mux.HandleFunc("GET /api/v1/console", application.requireManagementSession(application.handleConsoleView))
+	mux.HandleFunc("GET /api/v1/providers", application.requireManagementSession(application.handleProviders))
+	mux.HandleFunc("POST /api/v1/providers", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.requireManagementWrite(application.handleProviderCreate),
+	))
+	mux.HandleFunc("PUT /api/v1/providers/order", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.requireManagementWrite(application.handleProviderOrder),
+	))
+	mux.HandleFunc("PUT /api/v1/providers/{providerID}", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.requireManagementWrite(application.handleProviderUpdate),
+	))
+	mux.HandleFunc("DELETE /api/v1/providers/{providerID}", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.requireManagementWrite(application.handleProviderDelete),
+	))
+	mux.HandleFunc("POST /api/v1/providers/{providerID}/test", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.requireManagementWrite(application.handleProviderTest),
+	))
+	mux.HandleFunc("GET /api/v1/history", application.requireManagementSession(application.handleHistoryQuery))
+	mux.HandleFunc("GET /api/v1/history/export.csv", application.requireManagementSession(application.handleHistoryExport))
+	mux.HandleFunc("GET /api/v1/history/settings", application.requireManagementSession(application.handleHistorySettings))
+	mux.HandleFunc("PUT /api/v1/history/settings", application.requireManagementWrite(application.handleHistorySettingsUpdate))
+	mux.HandleFunc("DELETE /api/v1/history", application.requireManagementWrite(application.handleHistoryClear))
+	mux.HandleFunc("POST /api/v1/backups/export", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.requireManagementWrite(application.handleBackupExport),
+	))
+	mux.HandleFunc("POST /api/v1/backups/preview", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.requireManagementWrite(application.handleBackupPreview),
+	))
+	mux.HandleFunc("POST /api/v1/backups/import", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.requireManagementWrite(application.handleBackupImport),
+	))
+	mux.HandleFunc("POST /api/v1/ota/preview", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.requireManagementWrite(application.handleOTAPreview),
+	))
+	mux.HandleFunc("POST /api/v1/ota/apply", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.requireManagementWrite(application.handleOTAApply),
+	))
+	mux.HandleFunc("GET /api/v1/ota/status", application.requireManagementSession(application.handleOTAStatus))
+	mux.HandleFunc("GET /api/v1/diagnostics", application.requireManagementSession(application.handleDiagnosticsStatus))
+	mux.HandleFunc("POST /api/v1/diagnostics/export", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.requireManagementWrite(application.handleDiagnosticsExport),
+	))
 	mux.HandleFunc("POST /api/v1/logout", limitManagementRequests(
 		sensitiveRateLimiter,
 		limits.SensitiveRateWindow,
@@ -105,12 +194,20 @@ func secureManagementResponses(next http.Handler) http.Handler {
 }
 
 func (application *Runtime) handleIssuePairingCode(response http.ResponseWriter, request *http.Request) {
+	advertisedAddress := application.deviceHubAdvertisedAddress(request.Context())
+	if advertisedAddress == "" {
+		http.Error(response, "Device Hub advertised address unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	issued, err := application.pairing.Issue(request.Context())
 	if err != nil {
 		http.Error(response, "pairing code unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	writeManagementJSON(response, issued)
+	writeManagementJSON(response, struct {
+		pairing.IssuedCode
+		DeviceHubAddress string `json:"device_hub_address"`
+	}{IssuedCode: issued, DeviceHubAddress: advertisedAddress})
 }
 
 func (application *Runtime) handleRotateDeviceToken(response http.ResponseWriter, request *http.Request) {
@@ -209,9 +306,36 @@ func (application *Runtime) handleListDevices(response http.ResponseWriter, requ
 	}{Devices: devices})
 }
 
+func (application *Runtime) handleSessionRefresh(response http.ResponseWriter, request *http.Request) {
+	if !application.managementOriginValid(request) {
+		http.Error(response, "forbidden", http.StatusForbidden)
+		return
+	}
+	cookie, err := request.Cookie(managementSessionCookie)
+	if err != nil || cookie.Value == "" {
+		http.Error(response, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	csrfToken, err := randomWebToken()
+	if err != nil {
+		http.Error(response, "session unavailable", http.StatusInternalServerError)
+		return
+	}
+	if !application.sessions.rotateCSRF(cookie.Value, csrfToken, time.Now()) {
+		http.Error(response, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	writeManagementJSON(response, struct {
+		CSRFToken string `json:"csrf_token"`
+	}{CSRFToken: csrfToken})
+}
+
 func (application *Runtime) handleLogout(response http.ResponseWriter, request *http.Request) {
 	cookie, _ := request.Cookie(managementSessionCookie)
 	application.sessions.revoke(cookie.Value)
+	if application.ota != nil {
+		application.ota.RevokePreviews()
+	}
 	http.SetCookie(response, &http.Cookie{
 		Name:     managementSessionCookie,
 		Path:     "/",
@@ -288,6 +412,24 @@ func (sessions *managementSessions) revoke(sessionToken string) {
 	delete(sessions.entries, sha256.Sum256([]byte(sessionToken)))
 }
 
+func (sessions *managementSessions) rotateCSRF(
+	sessionToken string,
+	csrfToken string,
+	now time.Time,
+) bool {
+	sessions.mu.Lock()
+	defer sessions.mu.Unlock()
+	sessions.pruneExpired(now)
+	key := sha256.Sum256([]byte(sessionToken))
+	session, found := sessions.entries[key]
+	if !found {
+		return false
+	}
+	session.csrfHash = sha256.Sum256([]byte(csrfToken))
+	sessions.entries[key] = session
+	return true
+}
+
 func (sessions *managementSessions) pruneExpired(now time.Time) {
 	for key, session := range sessions.entries {
 		if !now.Before(session.expiresAt) {
@@ -320,21 +462,38 @@ func (application *Runtime) managementOriginValid(request *http.Request) bool {
 }
 
 func decodeManagementJSON(response http.ResponseWriter, request *http.Request, destination any) error {
+	return decodeManagementJSONLimit(
+		response, request, destination, managementLoginMaxBytes,
+	)
+}
+
+func decodeManagementJSONLimit(
+	response http.ResponseWriter,
+	request *http.Request,
+	destination any,
+	maximumBytes int,
+) error {
 	mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/json" {
 		return errors.New("content type must be application/json")
 	}
-	request.Body = http.MaxBytesReader(response, request.Body, managementLoginMaxBytes)
+	request.Body = http.MaxBytesReader(response, request.Body, int64(maximumBytes))
 	message, err := io.ReadAll(request.Body)
 	if err != nil {
 		return err
 	}
-	return protocol.DecodeStrictDocument(message, destination)
+	defer clear(message)
+	return protocol.DecodeStrictDocumentLimit(message, maximumBytes, destination)
 }
 
 func writeManagementJSON(response http.ResponseWriter, document any) {
+	writeManagementJSONStatus(response, http.StatusOK, document)
+}
+
+func writeManagementJSONStatus(response http.ResponseWriter, status int, document any) {
 	response.Header().Set("Content-Type", "application/json")
 	response.Header().Set("Cache-Control", "no-store")
+	response.WriteHeader(status)
 	_ = json.NewEncoder(response).Encode(document)
 }
 

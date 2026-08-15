@@ -34,6 +34,13 @@ deck_add_host_test(
     INCLUDE_DIRS ../../firmware/components/health/include
 )
 deck_add_host_test(
+    test_diagnostic_ring
+    SOURCES
+        test_diagnostic_ring.cpp
+        ../../firmware/components/health/deck_diagnostic_ring.cpp
+    INCLUDE_DIRS ../../firmware/components/health/include
+)
+deck_add_host_test(
     test_display_service
     SOURCES
         test_display_service.cpp
@@ -44,10 +51,25 @@ deck_add_host_test(
     test_m0_view_model
     SOURCES
         test_m0_view_model.cpp
+        ../../firmware/components/application_ui/deck_ai_page_view_model.cpp
         ../../firmware/components/application_ui/deck_m0_view_model.cpp
     INCLUDE_DIRS
+        ../../firmware/components/ai_snapshot/include
         ../../firmware/components/application_ui/include
         "${DECK_M0_GENERATED_DIR}"
+)
+deck_add_host_test(
+    test_ai_page_view_model
+    SOURCES
+        test_ai_page_view_model.cpp
+        ../../firmware/components/application_ui/deck_ai_page_view_model.cpp
+    INCLUDE_DIRS
+        ../../firmware/components/ai_snapshot/include
+        ../../firmware/components/application_ui/include
+)
+target_compile_definitions(
+    test_ai_page_view_model
+    PRIVATE DECK_REPOSITORY_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../.."
 )
 deck_add_host_test(
     test_button_input
@@ -55,6 +77,40 @@ deck_add_host_test(
         test_button_input.cpp
         ../../firmware/components/board_support/deck_button_input.cpp
     INCLUDE_DIRS ../../firmware/components/board_support/include
+)
+deck_add_host_test(
+    test_serial_session
+    SOURCES
+        test_serial_session.cpp
+        ../../firmware/components/serial_service/deck_serial_session.cpp
+    INCLUDE_DIRS ../../firmware/components/serial_service/include
+)
+deck_add_host_test(
+    test_serial_router
+    SOURCES
+        test_serial_router.cpp
+        ../../firmware/components/serial_service/deck_serial_router.cpp
+    INCLUDE_DIRS ../../firmware/components/serial_service/include
+)
+deck_add_host_test(
+    test_serial_usb_bridge
+    SOURCES
+        test_serial_usb_bridge.cpp
+        ../../firmware/components/serial_service/deck_serial_router.cpp
+        ../../firmware/components/serial_service/deck_serial_usb_bridge.cpp
+    INCLUDE_DIRS ../../firmware/components/serial_service/include
+)
+deck_add_host_test(
+    test_serial_frame
+    SOURCES
+        test_serial_frame.cpp
+        ../../firmware/components/companion_link/deck_serial_frame.cpp
+        ../../firmware/components/companion_link/deck_serial_request_tracker.cpp
+    INCLUDE_DIRS ../../firmware/components/companion_link/include
+)
+target_compile_definitions(
+    test_serial_frame
+    PRIVATE DECK_REPOSITORY_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../.."
 )
 deck_add_host_test(
     test_pcf85063
@@ -139,11 +195,96 @@ target_compile_definitions(
     PRIVATE DECK_REPOSITORY_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../.."
 )
 deck_add_host_test(
+    test_ai_snapshot
+    SOURCES
+        test_ai_snapshot.cpp
+        ../../firmware/components/ai_snapshot/deck_ai_snapshot.cpp
+    INCLUDE_DIRS ../../firmware/components/ai_snapshot/include
+)
+target_compile_definitions(
+    test_ai_snapshot
+    PRIVATE DECK_REPOSITORY_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../.."
+)
+deck_add_host_test(
+    test_ai_snapshot_store
+    SOURCES
+        test_ai_snapshot_store.cpp
+        ../../firmware/components/ai_snapshot/deck_ai_snapshot.cpp
+        ../../firmware/components/ai_snapshot/deck_ai_snapshot_store.cpp
+        ../../firmware/components/transaction_store/deck_transaction_store.cpp
+    INCLUDE_DIRS
+        ../../firmware/components/ai_snapshot/include
+        ../../firmware/components/transaction_store/include
+)
+deck_add_host_test(
     test_companion_link_timing
     SOURCES
         test_companion_link_timing.cpp
         ../../firmware/components/companion_link/deck_companion_link_timing.cpp
     INCLUDE_DIRS ../../firmware/components/companion_link/include
+)
+deck_add_host_test(
+    test_ota_transaction
+    SOURCES
+        test_ota_transaction.cpp
+        ../../firmware/components/ota_service/deck_ota_transaction.cpp
+    INCLUDE_DIRS ../../firmware/components/ota_service/include
+)
+deck_add_host_test(
+    test_ota_transport_fence
+    SOURCES
+        test_ota_transport_fence.cpp
+        ../../firmware/components/ota_service/deck_ota_transport_fence.cpp
+    INCLUDE_DIRS ../../firmware/components/ota_service
+)
+deck_add_host_test(
+    test_ota_boot_health
+    SOURCES
+        test_ota_boot_health.cpp
+        ../../firmware/components/ota_service/deck_ota_boot_health.cpp
+    INCLUDE_DIRS ../../firmware/components/ota_service/include
+)
+deck_add_host_test(
+    test_ota_signing_keys
+    SOURCES
+        test_ota_signing_keys.cpp
+        ../../firmware/components/ota_service/deck_ota_signing_keys.cpp
+    INCLUDE_DIRS ../../firmware/components/ota_service/include
+)
+target_compile_definitions(
+    test_ota_signing_keys
+    PRIVATE DECK_REPOSITORY_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../.."
+)
+deck_add_host_test(
+    test_companion_failover
+    SOURCES
+        test_companion_failover.cpp
+        ../../firmware/components/companion_link/deck_companion_failover.cpp
+        ../../firmware/components/companion_link/deck_companion_transport_authority.cpp
+    INCLUDE_DIRS
+        ../../firmware/components/companion_link/include
+        ../../firmware/components/companion_profiles/include
+        ../../firmware/components/transaction_store/include
+)
+deck_add_host_test(
+    test_companion_link_messages
+    SOURCES
+        test_companion_link_messages.cpp
+        ../../firmware/components/ai_snapshot/deck_ai_snapshot.cpp
+        ../../firmware/components/ai_snapshot/deck_ai_snapshot_store.cpp
+        ../../firmware/components/companion_link/deck_companion_link_frame.cpp
+        ../../firmware/components/companion_link/deck_companion_link_message.cpp
+        ../../firmware/components/companion_link/deck_device_protocol.cpp
+        ../../firmware/components/companion_link/deck_serial_frame.cpp
+        ../../firmware/components/transaction_store/deck_transaction_store.cpp
+    INCLUDE_DIRS
+        ../../firmware/components/ai_snapshot/include
+        ../../firmware/components/companion_link/include
+        ../../firmware/components/transaction_store/include
+)
+target_compile_definitions(
+    test_companion_link_messages
+    PRIVATE DECK_REPOSITORY_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../.."
 )
 deck_add_host_test(
     test_setup_confirmation
@@ -176,6 +317,10 @@ add_test(
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_hil_boot_smoke.py
 )
 add_test(
+    NAME ai_page_font_layout_contract
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_ai_page_font_layout.py
+)
+add_test(
     NAME hil_wifi_transaction_contract
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_hil_wifi_transaction.py
 )
@@ -195,7 +340,6 @@ add_test(
     NAME hil_app_flash_contract
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_hil_app_flash.py
 )
-
 add_test(
     NAME m1_acceptance_contract
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_m1_acceptance.py
@@ -203,4 +347,20 @@ add_test(
 add_test(
     NAME m1_setup_client_contract
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_m1_setup_client.py
+)
+add_test(
+    NAME companion_native_smoke_contract
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_smoke_companion_artifact.py
+)
+add_test(
+    NAME serial_release_config_contract
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_serial_release_config.py
+)
+add_test(
+    NAME sign_ota_bundle_contract
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_sign_ota_bundle.py
+)
+add_test(
+    NAME companion_package_contract
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_package_companion.py
 )

@@ -14,12 +14,22 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/backup"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/codexappserver"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/codexobserver"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/configmodel"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/cursorprovider"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/desktop"
 	desktopassets "github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/desktop/assets"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/deviceidentity"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/diagnostics"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/history"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/managementtoken"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/protectedfile"
 	companionruntime "github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/runtime"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/secretstore"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/structuredprovider"
 )
 
 var (
@@ -56,6 +66,11 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		"0.0.0.0:7780",
 		"independent address for Deck device traffic",
 	)
+	deviceHubAdvertisedAddress := flags.String(
+		"device-hub-advertised-address",
+		"",
+		"routable IP:port advertised to Decks (default: infer the default-route IP and listener port)",
+	)
 	allowLANManagement := flags.Bool(
 		"allow-lan-management",
 		false,
@@ -71,6 +86,22 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		"",
 		"protected directory for Companion identity and revocable device trust (defaults to the platform user-config directory)",
 	)
+	backupExportPath := flags.String(
+		"backup-export-file",
+		"",
+		"write one encrypted backup to an owner-only file and exit",
+	)
+	backupPassphraseFile := flags.String(
+		"backup-passphrase-file",
+		"",
+		"read exact backup passphrase bytes from an owner-only file",
+	)
+	installCompanion := flags.Bool("install", false, "install this Companion for the current user and enable login startup")
+	uninstallCompanion := flags.Bool("uninstall", false, "remove login startup while retaining user data and rollback files")
+	enableLogin := flags.Bool("enable-login", false, "enable the installed Companion at login")
+	disableLogin := flags.Bool("disable-login", false, "disable the installed Companion at login")
+	installationStatus := flags.Bool("installation-status", false, "print the current per-user installation status")
+	installationRoot := flags.String("installation-root", "", "override the per-user installation root")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
@@ -87,6 +118,8 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			return 2
 		}
 	}
+	explicitFlags := make(map[string]bool)
+	flags.Visit(func(visited *flag.Flag) { explicitFlags[visited.Name] = true })
 	if *showVersion {
 		fmt.Fprintf(stdout, "s3deck-companion %s (commit %s)\n", version, commit)
 		return 0
@@ -100,12 +133,43 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			return 2
 		}
 	}
-	instance, err := desktop.AcquireSingleInstance(resolvedDataDirectory)
+	if lifecycleCommandRequested(
+		*installCompanion, *uninstallCompanion, *enableLogin, *disableLogin, *installationStatus,
+	) {
+		return runInstallationCommand(installationCommandConfig{
+			Install: *installCompanion, Uninstall: *uninstallCompanion,
+			Enable: *enableLogin, Disable: *disableLogin, Status: *installationStatus,
+			Root: *installationRoot, DataDirectory: resolvedDataDirectory,
+			DeviceHubAddress: installedDeviceHubAddress(*deviceHubAddress, explicitFlags),
+			Version:          version, Commit: commit, ExplicitFlags: explicitFlags,
+		}, stdout, stderr)
+	}
+	instance, err := acquireRuntimeInstance(resolvedDataDirectory)
 	if err != nil {
 		fmt.Fprintf(stderr, "cannot start Companion: %v\n", err)
 		return 2
 	}
 	defer instance.Close()
+	if *backupExportPath != "" || *backupPassphraseFile != "" {
+		if *backupExportPath == "" || *backupPassphraseFile == "" ||
+			!onlyBackupExportFlags(explicitFlags) {
+			fmt.Fprintln(stderr, "backup export requires only --data-directory, --backup-export-file, and --backup-passphrase-file")
+			return 2
+		}
+		_, backupService, _, _, closeConfiguration := loadStructuredProviders(
+			resolvedDataDirectory,
+			stderr,
+		)
+		defer closeConfiguration()
+		if backupService == nil || exportBackupFile(
+			backupService, *backupExportPath, *backupPassphraseFile,
+		) != nil {
+			fmt.Fprintln(stderr, "encrypted backup export failed")
+			return 2
+		}
+		fmt.Fprintln(stdout, "encrypted backup exported")
+		return 0
+	}
 
 	managementTokenValue := os.Getenv(managementTokenEnvironment)
 	if managementTokenValue == "" {
@@ -143,8 +207,114 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "cannot configure pairing: %v\n", err)
 		return 2
 	}
+	structuredProviderService, backupService, configurationOwner, restorableConfiguration,
+		closeProviderDefinitions := loadStructuredProviders(
+		resolvedDataDirectory,
+		stderr,
+	)
+	defer closeProviderDefinitions()
+	diagnosticService, diagnosticErr := diagnostics.Open(diagnostics.Config{
+		Directory: filepath.Join(resolvedDataDirectory, "diagnostics"),
+	})
+	if diagnosticErr != nil {
+		fmt.Fprintln(stderr, "redacted diagnostics are unavailable")
+		diagnosticService = nil
+	} else {
+		defer func() {
+			closeContext, cancelClose := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = diagnosticService.Close(closeContext)
+			cancelClose()
+		}()
+	}
+	if configurationOwner != nil {
+		webSettings := restorableConfiguration.WebSettings
+		if explicitFlags["management-address"] {
+			webSettings.ManagementAddress = *managementAddress
+		} else {
+			*managementAddress = webSettings.ManagementAddress
+		}
+		if explicitFlags["allow-lan-management"] {
+			webSettings.AllowLAN = *allowLANManagement
+		} else {
+			*allowLANManagement = webSettings.AllowLAN
+		}
+		if explicitFlags["management-origin"] {
+			webSettings.AllowedOrigin = *managementOrigin
+		} else {
+			*managementOrigin = webSettings.AllowedOrigin
+		}
+		if explicitFlags["management-address"] || explicitFlags["allow-lan-management"] ||
+			explicitFlags["management-origin"] {
+			settingsContext, cancelSettings := context.WithTimeout(context.Background(), 5*time.Second)
+			settingsErr := configurationOwner.UpdateWebSettings(settingsContext, webSettings)
+			cancelSettings()
+			if settingsErr != nil {
+				fmt.Fprintln(stderr, "management Web settings could not be persisted")
+			}
+		}
+	}
+	structuredprovider.DestroyRestorableConfiguration(&restorableConfiguration)
+	providerHistory, closeProviderHistory := loadProviderHistory(resolvedDataDirectory, stderr)
+	defer closeProviderHistory()
+	if configurationOwner != nil && providerHistory != nil {
+		settingsContext, cancelSettings := context.WithTimeout(context.Background(), 5*time.Second)
+		applicationSettings, pending, settingsErr := configurationOwner.PendingApplicationSettings(settingsContext)
+		if settingsErr == nil && pending {
+			settingsErr = providerHistory.SetEnabled(settingsContext, applicationSettings.HistoryEnabled)
+			if settingsErr == nil {
+				settingsErr = configurationOwner.UpdateApplicationSettings(settingsContext, applicationSettings)
+			}
+		} else if settingsErr == nil {
+			currentSettings := configmodel.CloneApplicationSettings(applicationSettings)
+			currentSettings.HistoryEnabled = providerHistory.Enabled()
+			if currentSettings.HistoryEnabled != applicationSettings.HistoryEnabled {
+				settingsErr = configurationOwner.UpdateApplicationSettings(
+					settingsContext,
+					currentSettings,
+				)
+			}
+			configmodel.DestroySerialPresets(currentSettings.SerialPresets)
+		}
+		configmodel.DestroySerialPresets(applicationSettings.SerialPresets)
+		cancelSettings()
+		if settingsErr != nil {
+			fmt.Fprintln(stderr, "application settings synchronization is unavailable")
+		}
+	}
+	codexCollector, err := codexappserver.New(codexappserver.Config{
+		AdapterVersion: codexappserver.AdapterVersion,
+		ClientVersion:  version,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "cannot configure Codex collection: %v\n", err)
+		return 2
+	}
+	codexObserver, observerErr := codexobserver.New(codexobserver.Config{})
+	if observerErr != nil {
+		// Observation is optional and inferred. Do not include a path-bearing OS
+		// error in logs, and never make official quota collection unavailable.
+		fmt.Fprintln(stderr, "Codex session observation is unavailable")
+		codexObserver = nil
+	}
+	cursorCollector, err := cursorprovider.New(cursorprovider.Config{
+		AdapterVersion:        cursorprovider.AdapterVersion,
+		ResponseSchemaVersion: cursorprovider.ResponseSchemaVersion,
+	})
+	if err != nil {
+		fmt.Fprintln(stderr, "Cursor usage collection is unavailable")
+		cursorCollector = nil
+	}
 	config := companionruntime.Config{
-		Version: version,
+		Version:             version,
+		Commit:              commit,
+		CodexCollector:      codexCollector,
+		CodexObserver:       codexObserver,
+		CursorCollector:     cursorCollector,
+		StructuredProviders: structuredProviderService,
+		History:             providerHistory,
+		Backup:              backupService,
+		Configuration:       configurationOwner,
+		Diagnostics:         diagnosticService,
 		Management: companionruntime.ManagementConfig{
 			Address:       *managementAddress,
 			AllowLAN:      *allowLANManagement,
@@ -153,6 +323,7 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		},
 		DeviceHub: companionruntime.DeviceHubConfig{
 			Address:               *deviceHubAddress,
+			AdvertisedAddress:     *deviceHubAdvertisedAddress,
 			TLSCertificate:        &tlsCertificate,
 			ServerProtocolVersion: serverProtocolVersion,
 		},
@@ -216,10 +387,108 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	return 0
 }
 
+type backupFileExporter interface {
+	ExportFile(context.Context, string, []byte) error
+}
+
+func onlyBackupExportFlags(explicit map[string]bool) bool {
+	for name := range explicit {
+		switch name {
+		case "data-directory", "backup-export-file", "backup-passphrase-file":
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func exportBackupFile(exporter backupFileExporter, path, passphrasePath string) error {
+	if exporter == nil || path == "" || passphrasePath == "" {
+		return backup.ErrFile
+	}
+	passphrase, err := protectedfile.Read(passphrasePath, 1024)
+	if err != nil {
+		return backup.ErrFile
+	}
+	defer clear(passphrase)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	return exporter.ExportFile(ctx, path, passphrase)
+}
+
+func loadProviderHistory(dataDirectory string, stderr io.Writer) (*history.Store, func()) {
+	openContext, cancelOpen := context.WithTimeout(context.Background(), 5*time.Second)
+	store, err := history.Open(openContext, history.Config{
+		Path: filepath.Join(dataDirectory, "provider-history.sqlite3"),
+	})
+	cancelOpen()
+	if err != nil {
+		// Database paths and SQLite diagnostics may contain private filesystem
+		// context. History is non-critical and degrades behind a fixed message.
+		fmt.Fprintln(stderr, "Provider history is unavailable")
+		return nil, func() {}
+	}
+	return store, func() {
+		closeContext, cancelClose := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = store.Close(closeContext)
+		cancelClose()
+	}
+}
+
 func defaultDataDirectory() (string, error) {
 	base, err := os.UserConfigDir()
 	if err != nil || base == "" {
 		return "", errors.Join(errors.New("user configuration directory is unavailable"), err)
 	}
 	return filepath.Join(base, "s3-rlcd-deck"), nil
+}
+
+func loadStructuredProviders(
+	dataDirectory string,
+	stderr io.Writer,
+) (
+	*structuredprovider.Service,
+	*backup.Service,
+	*structuredprovider.ConfigurationStore,
+	structuredprovider.RestorableConfiguration,
+	func(),
+) {
+	closeStore := func() {}
+	providerSecrets, err := secretstore.OpenForDataDirectory(dataDirectory)
+	if err != nil {
+		fmt.Fprintln(stderr, "structured Providers are unavailable")
+		return nil, nil, nil, structuredprovider.RestorableConfiguration{}, closeStore
+	}
+	providerDefinitions, err := structuredprovider.OpenConfigurationStore(
+		filepath.Join(dataDirectory, "structured-providers.json"),
+	)
+	if err != nil {
+		fmt.Fprintln(stderr, "structured Provider configuration is unavailable")
+		return nil, nil, nil, structuredprovider.RestorableConfiguration{}, closeStore
+	}
+	closeStore = func() { _ = providerDefinitions.Close() }
+	cleanupContext, cancelCleanup := context.WithTimeout(context.Background(), 5*time.Second)
+	cleanupErr := providerDefinitions.ReconcileCleanup(cleanupContext, providerSecrets)
+	cancelCleanup()
+	if cleanupErr != nil {
+		// References are non-secret, but even they do not belong in logs. The
+		// protected journal remains authoritative for the next startup retry.
+		fmt.Fprintln(stderr, "structured Provider secret cleanup remains pending")
+	}
+	restorableConfiguration, err := providerDefinitions.Configuration(context.Background())
+	if err != nil {
+		fmt.Fprintln(stderr, "structured Provider configuration is unavailable")
+		return nil, nil, nil, structuredprovider.RestorableConfiguration{}, closeStore
+	}
+	backupService, err := backup.NewService(providerDefinitions, providerSecrets, nil)
+	if err != nil {
+		fmt.Fprintln(stderr, "encrypted backup service is unavailable")
+		backupService = nil
+	}
+	providerService, err := structuredprovider.NewService(providerDefinitions, providerSecrets)
+	if err != nil {
+		fmt.Fprintln(stderr, "structured Provider management is unavailable")
+		providerService = nil
+	}
+	return providerService, backupService, providerDefinitions, restorableConfiguration, closeStore
 }

@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "provider_error_codes": [
+    "auth_stale",
+    "permission_denied",
+    "timeout",
+    "process_exited",
+    "schema_changed",
+    "unavailable"
+  ],
+  "parser_results": [
+    "accepted",
+    "malformed",
+    "unsupported_version",
+    "private_data"
+  ]
+}

@@ -72,6 +72,7 @@ constexpr auto submit_temperature_offset =
 constexpr auto clear_wifi = DECK_SETUP_COMMAND_CLEAR_WIFI;
 constexpr auto pair_companion = DECK_SETUP_COMMAND_PAIR_COMPANION;
 constexpr auto select_companion = DECK_SETUP_COMMAND_SELECT_COMPANION;
+constexpr auto set_companion_priority = DECK_SETUP_COMMAND_SET_COMPANION_PRIORITY;
 constexpr auto revoke_companion = DECK_SETUP_COMMAND_REVOKE_COMPANION;
 }  // namespace CommandType
 
@@ -303,10 +304,9 @@ bool wait_for_pair_response(
         if (now_ms >= deadline_ms) {
             return false;
         }
-        const uint64_t remaining_ms = deadline_ms - now_ms;
         (void)ulTaskNotifyTake(
             pdTRUE,
-            pdMS_TO_TICKS(static_cast<uint32_t>(remaining_ms))
+            pdMS_TO_TICKS(static_cast<uint32_t>(deadline_ms - now_ms))
         );
     }
     deck_setup_response_barrier_release(
@@ -805,10 +805,7 @@ esp_err_t companion_pair_handler(httpd_req_t *request)
         sizeof(command.companion_pair)
     );
     if (!queued) {
-        secure_clear(
-            reinterpret_cast<char *>(response_ack),
-            sizeof(response_ack)
-        );
+        secure_clear(reinterpret_cast<char *>(response_ack), sizeof(response_ack));
         httpd_resp_set_status(request, "503 Service Unavailable");
         return send_json(request, "{\"accepted\":false,\"error\":\"busy\"}");
     }
@@ -823,10 +820,7 @@ esp_err_t companion_pair_handler(httpd_req_t *request)
     response[response_size++] = '"';
     response[response_size++] = '}';
     response[response_size] = '\0';
-    secure_clear(
-        reinterpret_cast<char *>(response_ack),
-        sizeof(response_ack)
-    );
+    secure_clear(reinterpret_cast<char *>(response_ack), sizeof(response_ack));
     const esp_err_t result = send_json(request, response);
     secure_clear(response, sizeof(response));
     return result;
@@ -843,16 +837,9 @@ esp_err_t companion_pair_ack_handler(httpd_req_t *request)
     size_t received = 0;
     uint8_t response_ack[DECK_SETUP_RESPONSE_ACK_SIZE]{};
     if (!receive_body(request, body, sizeof(body), &received) ||
-        !deck_setup_http_parse_pair_ack_request(
-            body,
-            received,
-            response_ack
-        )) {
+        !deck_setup_http_parse_pair_ack_request(body, received, response_ack)) {
         secure_clear(body, sizeof(body));
-        secure_clear(
-            reinterpret_cast<char *>(response_ack),
-            sizeof(response_ack)
-        );
+        secure_clear(reinterpret_cast<char *>(response_ack), sizeof(response_ack));
         httpd_resp_set_status(request, "400 Bad Request");
         return send_json(request, "{\"accepted\":false,\"error\":\"malformed\"}");
     }
@@ -862,23 +849,9 @@ esp_err_t companion_pair_ack_handler(httpd_req_t *request)
     const int socket_fd = httpd_req_to_sockfd(request);
     uint8_t peer_ipv4[4]{};
     if (socket_fd < 0 ||
-        getpeername(
-            socket_fd,
-            reinterpret_cast<sockaddr *>(&peer_address),
-            &peer_size
-        ) != 0) {
-        secure_clear(
-            reinterpret_cast<char *>(response_ack),
-            sizeof(response_ack)
-        );
-        httpd_resp_set_status(request, "400 Bad Request");
-        return send_json(request, "{\"accepted\":false,\"error\":\"invalid_peer\"}");
-    }
-    if (!extract_ipv4_address(peer_address, peer_ipv4)) {
-        secure_clear(
-            reinterpret_cast<char *>(response_ack),
-            sizeof(response_ack)
-        );
+        getpeername(socket_fd, reinterpret_cast<sockaddr *>(&peer_address), &peer_size) != 0 ||
+        !extract_ipv4_address(peer_address, peer_ipv4)) {
+        secure_clear(reinterpret_cast<char *>(response_ack), sizeof(response_ack));
         httpd_resp_set_status(request, "400 Bad Request");
         return send_json(request, "{\"accepted\":false,\"error\":\"invalid_peer\"}");
     }
@@ -889,17 +862,11 @@ esp_err_t companion_pair_ack_handler(httpd_req_t *request)
             peer_id,
             response_ack
         )) {
-        secure_clear(
-            reinterpret_cast<char *>(response_ack),
-            sizeof(response_ack)
-        );
+        secure_clear(reinterpret_cast<char *>(response_ack), sizeof(response_ack));
         httpd_resp_set_status(request, "409 Conflict");
         return send_json(request, "{\"accepted\":false,\"error\":\"not_pending\"}");
     }
-    secure_clear(
-        reinterpret_cast<char *>(response_ack),
-        sizeof(response_ack)
-    );
+    secure_clear(reinterpret_cast<char *>(response_ack), sizeof(response_ack));
     if (service->service_task != nullptr) {
         xTaskNotifyGive(service->service_task);
     }
@@ -960,37 +927,70 @@ bool extract_ipv4_address(
     const uint8_t *address = nullptr;
     size_t address_size = 0;
     if (socket_address.ss_family == AF_INET) {
-        const auto *ipv4_address =
-            reinterpret_cast<const sockaddr_in *>(&socket_address);
+        const auto *ipv4_address = reinterpret_cast<const sockaddr_in *>(&socket_address);
         address = reinterpret_cast<const uint8_t *>(&ipv4_address->sin_addr.s_addr);
         address_size = sizeof(ipv4_address->sin_addr.s_addr);
     } else if (socket_address.ss_family == AF_INET6) {
-        const auto *ipv6_address =
-            reinterpret_cast<const sockaddr_in6 *>(&socket_address);
+        const auto *ipv6_address = reinterpret_cast<const sockaddr_in6 *>(&socket_address);
         address = reinterpret_cast<const uint8_t *>(&ipv6_address->sin6_addr);
         address_size = sizeof(ipv6_address->sin6_addr);
     }
     return deck_setup_http_extract_ipv4(address, address_size, ipv4);
 }
 
-esp_err_t accept_ap_session(httpd_handle_t server, int socket_fd)
+esp_err_t companion_priority_handler(httpd_req_t *request)
 {
-    (void)server;
+    auto *service = static_cast<deck_setup_service_t *>(request->user_ctx);
+    if (!mark_activity(service)) {
+        httpd_resp_set_status(request, "503 Service Unavailable");
+        return send_json(request, "{\"accepted\":false,\"error\":\"setup_inactive\"}");
+    }
+    char body[192]{};
+    char profile_id[DECK_COMPANION_PROFILE_ID_CAPACITY]{};
+    int32_t priority = 0;
+    size_t received = 0;
+    const bool parsed = receive_body(request, body, sizeof(body), &received) &&
+                        deck_setup_http_parse_companion_priority_request(
+                            body,
+                            received,
+                            profile_id,
+                            sizeof(profile_id),
+                            &priority
+                        );
+    secure_clear(body, sizeof(body));
+    if (!parsed) {
+        secure_clear(profile_id, sizeof(profile_id));
+        httpd_resp_set_status(request, "400 Bad Request");
+        return send_json(request, "{\"accepted\":false,\"error\":\"malformed\"}");
+    }
+    const bool queued = deck_setup_service_set_companion_priority(
+        service,
+        profile_id,
+        priority
+    );
+    secure_clear(profile_id, sizeof(profile_id));
+    if (!queued) {
+        httpd_resp_set_status(request, "503 Service Unavailable");
+        return send_json(request, "{\"accepted\":false,\"error\":\"busy\"}");
+    }
+    httpd_resp_set_status(request, "202 Accepted");
+    return send_json(request, "{\"accepted\":true,\"state\":\"queued\"}");
+}
+
+esp_err_t accept_ap_session(httpd_handle_t, int socket_fd)
+{
     sockaddr_storage local_address{};
-    socklen_t local_address_size = sizeof(local_address);
+    socklen_t address_size = sizeof(local_address);
     if (getsockname(
             socket_fd,
             reinterpret_cast<sockaddr *>(&local_address),
-            &local_address_size
+            &address_size
         ) != 0) {
         return ESP_FAIL;
     }
     uint8_t local_ipv4[4]{};
     return extract_ipv4_address(local_address, local_ipv4) &&
-                   deck_setup_http_address_is_setup_gateway(
-                       local_ipv4,
-                       sizeof(local_ipv4)
-                   )
+                   deck_setup_http_address_is_setup_gateway(local_ipv4, sizeof(local_ipv4))
                ? ESP_OK : ESP_FAIL;
 }
 
@@ -1019,6 +1019,8 @@ HttpHandler handler_for_route(deck_setup_http_route_t route)
             return companion_pair_ack_handler;
         case DECK_SETUP_HTTP_COMPANION_SELECT:
             return companion_select_handler;
+        case DECK_SETUP_HTTP_COMPANION_PRIORITY:
+            return companion_priority_handler;
         case DECK_SETUP_HTTP_COMPANION_REVOKE:
             return companion_revoke_handler;
         case DECK_SETUP_HTTP_NOT_FOUND:
@@ -1701,11 +1703,7 @@ void service_task(void *task_context)
                                 service->pair_response_barrier,
                                 command.response_generation
                             );
-                            notify(
-                                service,
-                                DECK_SETUP_SERVICE_ERROR,
-                                "pair_response"
-                            );
+                            notify(service, DECK_SETUP_SERVICE_ERROR, "pair_response");
                             break;
                         }
                         if (xSemaphoreTake(service->state_mutex, portMAX_DELAY) == pdTRUE) {
@@ -1737,6 +1735,7 @@ void service_task(void *task_context)
                     break;
                 }
                 case CommandType::select_companion:
+                case CommandType::set_companion_priority:
                 case CommandType::revoke_companion: {
                     deck_companion_profile_update_result_t result =
                         DECK_COMPANION_PROFILE_STORAGE_FAILURE;
@@ -1745,15 +1744,24 @@ void service_task(void *task_context)
                         deck_setup_snapshot_t setup{};
                         setup_active = snapshot_locked(service, &setup) && setup.active;
                         if (setup_active) {
-                            result = command.type == CommandType::select_companion
-                                         ? deck_companion_profiles_select_active(
-                                               service->companion_profiles,
-                                               command.companion_profile_id
-                                           )
-                                         : deck_companion_profiles_revoke(
-                                               service->companion_profiles,
-                                               command.companion_profile_id
-                                           );
+                            if (command.type == CommandType::select_companion) {
+                                result = deck_companion_profiles_select_active(
+                                    service->companion_profiles,
+                                    command.companion_profile_id
+                                );
+                            } else if (command.type ==
+                                       CommandType::set_companion_priority) {
+                                result = deck_companion_profiles_set_priority(
+                                    service->companion_profiles,
+                                    command.companion_profile_id,
+                                    command.companion_priority
+                                );
+                            } else {
+                                result = deck_companion_profiles_revoke(
+                                    service->companion_profiles,
+                                    command.companion_profile_id
+                                );
+                            }
                         }
                         xSemaphoreGive(service->state_mutex);
                     }
@@ -2028,10 +2036,7 @@ bool deck_setup_service_pair_companion(
             reinterpret_cast<char *>(&command.companion_pair),
             sizeof(command.companion_pair)
         );
-        secure_clear(
-            reinterpret_cast<char *>(response_ack),
-            sizeof(response_ack)
-        );
+        secure_clear(reinterpret_cast<char *>(response_ack), sizeof(response_ack));
         return false;
     }
     const bool queued = enqueue_command(service, command);
@@ -2051,10 +2056,7 @@ bool deck_setup_service_pair_companion(
         reinterpret_cast<char *>(&command.companion_pair),
         sizeof(command.companion_pair)
     );
-    secure_clear(
-        reinterpret_cast<char *>(response_ack),
-        sizeof(response_ack)
-    );
+    secure_clear(reinterpret_cast<char *>(response_ack), sizeof(response_ack));
     return queued;
 }
 
@@ -2115,6 +2117,38 @@ bool deck_setup_service_revoke_companion(
         profile_id,
         CommandType::revoke_companion
     );
+}
+
+bool deck_setup_service_set_companion_priority(
+    deck_setup_service_t *service,
+    const char *profile_id,
+    int32_t priority
+)
+{
+    if (service == nullptr || profile_id == nullptr ||
+        strnlen(profile_id, DECK_COMPANION_PROFILE_ID_CAPACITY) != 71 ||
+        !service->accepting_commands.load(std::memory_order_acquire)) {
+        return false;
+    }
+    deck_setup_snapshot_t setup{};
+    if (xSemaphoreTake(service->state_mutex, portMAX_DELAY) != pdTRUE) {
+        return false;
+    }
+    const bool setup_active = snapshot_locked(service, &setup) && setup.active;
+    xSemaphoreGive(service->state_mutex);
+    if (!setup_active) {
+        return false;
+    }
+    Command command{};
+    command.type = CommandType::set_companion_priority;
+    command.companion_priority = priority;
+    std::memcpy(command.companion_profile_id, profile_id, 72);
+    const bool queued = enqueue_command(service, command);
+    secure_clear(
+        command.companion_profile_id,
+        sizeof(command.companion_profile_id)
+    );
+    return queued;
 }
 
 deck_companion_profiles_t *deck_setup_service_wait_companion_profiles(

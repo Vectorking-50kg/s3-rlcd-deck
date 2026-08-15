@@ -284,12 +284,19 @@ func issuePairingCode(
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("POST pairing code = %d, want 200", response.StatusCode)
 	}
-	var issued pairing.IssuedCode
-	if err = json.NewDecoder(response.Body).Decode(&issued); err != nil {
+	var document struct {
+		pairing.IssuedCode
+		DeviceHubAddress string `json:"device_hub_address"`
+	}
+	if err = json.NewDecoder(response.Body).Decode(&document); err != nil {
 		t.Fatalf("decode pairing code: %v", err)
 	}
+	issued := document.IssuedCode
 	if len(issued.Code) != 6 || issued.ExpiresAt.IsZero() {
 		t.Fatalf("issued code = %#v", issued)
+	}
+	if document.DeviceHubAddress == "" {
+		t.Fatal("issued pairing code omitted its freshly resolved Device Hub address")
 	}
 	return issued
 }

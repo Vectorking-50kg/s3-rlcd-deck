@@ -199,16 +199,17 @@ UI、Wi-Fi、Web 客户端或 USB 主机变慢时，只允许对应 sink 丢弃�
 ### 5.2 Codex 默认首页
 
 ```text
-┌──────────────────────────────────────────────┐
-│ 10:36  24.8°C   Wi-Fi ▮▮▮   AGENT ●          │
-├──────────────────────────────────────────────┤
-│ CODEX                         INFERRED        │
-│ Primary  [██████░░░░]  62% left   02:44     │
-│ Weekly   [████░░░░░░]  78% left   Tue       │
-├──────────────────────────────────────────────┤
-│ s3-rlcd-deck     RUNNING?       12m          │
-│ 146k tokens      Context 41%     +2 sessions │
-└──────────────────────────────────────────────┘
+20:36  +24.8C  WIFI 3/4  AGENT ON
+----------------------------------------
+CODEX  VERIFIED
+PRIMARY [######----] R62% @2h30m
+WEEKLY  [##--------] U22% 7d
+TOKEN 146K
+----------------------------------------
+DECK DEVELOPMENT
+RUNNING / INFERRED / 12m
+18.4K TOK / CTX 41% / +2 SESS
+TX DISARMED
 ```
 
 显示优先级：
@@ -220,6 +221,19 @@ UI、Wi-Fi、Web 客户端或 USB 主机变慢时，只允许对应 sink 丢弃�
 5. Credits 仅在官方接口实际返回时显示。
 
 不把窗口名称或时长写死为固定产品规则；按接口返回动态渲染。
+额度行用 `R` 表示剩余比例、`U` 表示已用比例、`@` 表示重置倒计时；倒计时超过
+999 天时显示 `999d+`，避免异常远期时间破坏固定布局。
+
+固件只把完整校验通过的快照投影为有界 Codex ViewModel；页面最多显示四个动态额度
+窗口和一个按确定性优先级选择的脱敏会话。未知数值用 `--` 或整行隐藏，绝不渲染为
+零。页面最多 13 行，ASCII 进度条、`VERIFIED`/`INFERRED`/`UNAVAILABLE` 与 `STALE`
+文字状态不依赖灰度或颜色。名称按 UTF-8 字符边界和生成字体的最坏 glyph advance
+截断，使每条动态行保持在 384 px 标签内；固定 400×300 黑白布局的
+在线、离线不足 24 小时、离线达到 24 小时、无会话和 Provider 错误状态由 Host golden
+snapshots 固定。Setup 页面始终拥有更高显示优先级；收到首个可读快照后，AI Page
+成为默认页并保持 `TX DISARMED`。状态栏优先用可信 UTC 和快照中经验证的时区
+换算本地时间；当时区不在固件的有界规则集内时，回退到已缓存 RTC，两者均不可用
+则显示 `--:--`，不猜测偏移。
 
 ### 5.3 其他 Provider 页面
 
@@ -359,6 +373,11 @@ Companion 使用 Codex App Server 的结构化能力：
 - `account/usage/read`：Token 活动和聚合统计。
 - `thread/*`、`turn/*`：只对同一 App Server 实例拥有或加载的线程提供准确事件。
 
+App Server 由版本化私有适配器以 `codex app-server --stdio` 启动。JSONL、初始化、请求
+关联、通知和重连都封装在适配器内部；原始响应不得进入 Runtime、持久化或日志。额度通知
+只触发重新读取额度与用量，不能单独覆盖当前快照。连接重建后必须清空此前的 thread
+所有权；只有同一连接成功 `thread/resume` 的 thread 才能产生 Verified State。
+
 V1 不接管用户的 Codex Desktop、IDE 或 CLI 会话，因此另启的 App Server 不能被描述为全局任务注册表。会话状态分级：
 
 | source | confidence | 允许显示的状态 |
@@ -374,6 +393,20 @@ V1 不接管用户的 Codex Desktop、IDE 或 CLI 会话，因此另启的 App S
 - Windows 上进程与会话文件无法唯一匹配时降级为 Unknown。
 - 不上传 Prompt、回复、命令输出、工具参数或绝对路径。
 - 会话标题默认隐藏；屏幕只显示用户别名或工程目录最后一级。
+
+外部 Codex 会话观察器是独立的只读深模块：它不启动、恢复、附加、接管或向用户会话
+发送信号。进程身份必须包含 PID 与启动时间；只有 macOS 上唯一进程与唯一文件的强映射，
+并且同一身份下连续两次观察到文件增长，才允许输出 Running。首次观察、PID 复用、轮转、
+重复 Session ID、多候选或 Windows 弱映射都不能继承 Running。文件停止增长只能变为
+Recent/Unknown，失去 owner 且超过 recency 窗口后才变为 Ended。
+
+扫描只读取一个完整且不超过 64 KiB 的 `session_meta` 首行，只提取上游 ID 做单向匿名化；
+文件正文、文件名、绝对路径、进程名和所有原始 JSON 都不能越过观察器边界。目录遍历、候选
+数量和保留窗口必须有界；macOS/Windows 必须从固定目录句柄相对 no-follow 打开后代，拒绝
+symlink。平台进程枚举、辅助进程执行时间与输出同样必须有界，且不得把 Session 绝对路径放入
+辅助进程 argv；权限错误、截断、轮转、partial JSON 或平台发现失败
+只清空 inferred sessions 并重试，不能阻塞或覆盖官方 App Server 的额度、用量和 Verified
+State。两源匿名 ID 相同时，Runtime 必须让 Verified State 胜出，总数仍受 16 项上限约束。
 
 ### 7.3 Cursor
 
@@ -411,7 +444,7 @@ Companion 提供内置模板，同时提供结构化 HTTP Provider：
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": {"major": 1, "minor": 0},
   "provider_id": "codex",
   "display_name": "Codex",
   "status": "ok",
@@ -421,12 +454,11 @@ Companion 提供内置模板，同时提供结构化 HTTP Provider：
   "updated_at": "2026-08-09T10:36:05Z",
   "stale_after_seconds": 120,
   "balance": null,
-  "currency": null,
   "windows": [
     {
       "name": "primary",
-      "used_percent": 38.0,
-      "remaining_percent": 62.0,
+      "used_basis_points": 3800,
+      "remaining_basis_points": 6200,
       "window_minutes": 300,
       "resets_at": "2026-08-09T13:20:00Z"
     }
@@ -442,25 +474,39 @@ Companion 提供内置模板，同时提供结构化 HTTP Provider：
 }
 ```
 
-未知值使用 `null`，不能使用零代替。ESP32 对未知字段前向兼容，对未知 schema major version 拒绝并保留最后有效快照。
+余额非空时使用 `{ "amount_micros": integer, "currency": "CNY" }`。百分比以
+`0..10000` 基点整数表达，计数不超过 JSON safe integer `2^53-1`。未知值使用
+`null`，不能使用零代替；两个百分比同时存在时合计必须为 10000。
+
+未知 schema major 被拒绝并保留最后有效快照。更高 minor 只能增加 null、布尔或
+有界整数字段；字符串、数组和对象必须经过新 major 的隐私审查。Provider 错误码固定为
+`auth_stale`、`permission_denied`、`timeout`、`process_exited`、
+`schema_changed`、`unavailable`。
+每个带 `schema_version` 的对象最多包含 16 个 forward 字段，完整文档最多包含 2048
+个 JSON syntax nodes；无独立版本的额度、Token、货币和错误子对象不接受扩展字段。
 
 ### 7.6 会话 DTO
 
 ```json
 {
+  "schema_version": {"major": 1, "minor": 0},
   "session_id": "anonymous-stable-id",
+  "provider_id": "codex",
   "display_name": "s3-rlcd-deck",
   "state": "running",
+  "source": "process_jsonl_observer",
   "confidence": "inferred",
   "started_at": "2026-08-09T10:24:00Z",
   "last_activity_at": "2026-08-09T10:36:01Z",
   "duration_seconds": 721,
   "turn_tokens": 18420,
-  "context_used_percent": 41.0
+  "context_used_basis_points": 4100
 }
 ```
 
-不得包含原始线程标题、Prompt、完整工程路径、文件名、命令或工具参数。
+会话 `source/confidence/state` 必须来自 7.2 的组合。匿名 ID 只用于同一 Provider 内的
+稳定关联；显示名是用户别名或工程目录最后一级。DTO 不得包含原始线程标题、Prompt、
+回复、完整工程路径、文件名、命令、工具参数、凭据或上游 raw/attributes。
 
 ## 8. Companion 设计
 
@@ -475,6 +521,27 @@ Companion 提供内置模板，同时提供结构化 HTTP Provider：
 
 V1 不引入 Electron。若未来需要独立原生窗口，可在同一 SPA 外增加轻量 WebView 外壳，不改变后端接口。
 
+#### 8.1.1 安装、启动与升级事务
+
+- `s3deck-companion --install` 是无管理员权限的当前用户安装入口。可执行文件按
+  `version-commit` 写入私有 installation root；不覆盖或删除旧版本。
+- macOS 使用带 installation-root 哈希后缀的 LaunchAgent；Windows 使用同样隔离的
+  ONLOGON/LIMITED Task Scheduler 任务。`--enable-login`、`--disable-login`、
+  `--installation-status` 与 `--uninstall` 共享同一状态机。
+- 安装/升级在任何 schema 迁移之前为 Pairing trust、Device Hub identity、Provider 配置和
+  Provider history SQLite/WAL/SHM 创建带逐文件 SHA-256 的私有快照。Installation Journal
+  删除前的进程终止都按未提交处理；下次操作先恢复旧数据、旧可执行文件和旧启动注册。
+- 安装事务持有 Maintenance Fence 与 Companion single-instance lock。安装期间被 LaunchAgent/
+  Task Scheduler 拉起的新进程有界等待该 fence；普通重复启动仍立即失败。安装器不杀死未知
+  进程，升级前必须退出正在运行的 Companion。
+- 卸载结束登录启动并删除 Installation State，但保留用户数据、迁移快照和旧可执行文件，避免
+  把“卸载应用”误当成“删除信任/凭据”。
+- 安装默认 Device Hub 为 `127.0.0.1:7780`，管理 Web 仍为 `127.0.0.1:7777`。只有显式传入
+  `--device-hub-address` 才允许 LAN 监听；安装器从不自动创建防火墙规则。
+- 发布 ZIP 必须包含嵌入版本/commit、SPDX 2.3 SBOM、完整第三方许可证、逐文件 manifest、
+  `SHA256SUMS` 和固定 `SOURCE_DATE_EPOCH` 的复现说明。平台签名/公证使用外部发布凭据，私钥
+  不进入仓库、构建日志或未签名开发包。
+
 ### 8.2 推荐模块
 
 ```text
@@ -488,12 +555,13 @@ companion/
 │   ├── sessions/          # App Server + passive observer
 │   ├── normalize/         # Provider / session DTO
 │   ├── history/           # SQLite, retention, CSV
-│   ├── secrets/           # Keychain / Credential Manager
+│   ├── secretstore/       # opaque refs → Keychain / Credential Manager
 │   ├── backup/            # age export/import
 │   ├── devices/           # pairing, WSS, profiles
 │   ├── serialhub/         # 8 MiB ring, browser fan-out
 │   ├── web/               # management API + embedded SPA
 │   ├── diagnostics/       # redaction + rotation
+│   ├── installation/      # migration journal + login startup adapters
 │   └── config/
 └── web/
     ├── src/
@@ -520,17 +588,31 @@ companion/
 
 Companion 使用本地 SQLite 保存最近 90 天的小时级用量、余额和额度快照：
 
-- 不保存 Prompt、回复或串口原文。
-- 支持 CSV 导出和一键清空。
-- 用户可关闭历史记录。
-- 超过 90 天自动删除。
-- 数据库迁移带 schema version，并在升级前创建安全备份。
+- `Provider Hour` 是每个 Provider 在一个 UTC 小时内最后一次通过完整 DTO 校验的用量、
+  余额、额度窗口和状态；同小时较旧的观察不能覆盖较新的观察。
+- 只保存 Provider ID、UTC hour/observation、规范化状态/错误码、余额、Token 计数与额度窗口；
+  不保存 display name、Session、Prompt、回复、raw response、凭据或串口正文。
+- 默认保留 90×24 小时；恰好 90 天的边界小时保留。过期判断只使用当前 UTC，在启动、采集事务、
+  设置切换和每小时维护中执行，因此禁用或空闲时也不会无限保留旧记录。
+- 一个私有 worker 独占 SQLite 写连接和有界 capture queue；WAL 只读连接执行带时间与行数上限的
+  查询。慢 CSV 客户端只能消费已经复制并关闭读事务的有界结果，不能持有 WAL snapshot、阻断采集
+  或 Device Hub。
+- 关闭记录与清空是写线程代际屏障；操作成功返回后，此前已开始但尚未入队的 capture 也不能越过
+  屏障重新写入。查询拥有内部 deadline，不依赖调用方主动设置超时。
+- 管理 Web 的鉴权接口支持查询、CSV 导出、持久关闭/开启记录和一键清空；写接口继续要求精确
+  Origin 与 CSRF。
+- 所有数据库时间为 UTC。DST 和用户时区只属于展示层，不改变 bucket 或 retention。
+- 数据库使用 `user_version`；升级前先用 SQLite 一致性快照创建受保护备份，验证后才在一个事务内
+  迁移。迁移失败回滚原库并保留备份；损坏或不可用只降级历史模块。
+- Runtime 只公开固定的 `history_available`/`history_enabled` 布尔健康状态；写入失败、队列背压或
+  关闭后，查询/导出返回 503，不把可能陈旧的数据伪装为正常，同时不影响采集与 Device Hub。
 
 ### 8.5 凭据
 
 - macOS 使用 Keychain。
 - Windows 使用 Credential Manager。
 - 配置文件只保存 secret reference ID。
+- Provider 配置替换/删除与待清理 reference 日志使用同一次受保护文件提交；Vault 清理失败在后续启动幂等重试。
 - Access token 失效时返回 `AUTH_STALE`，提示用户回到原应用重新登录。
 - Companion 不刷新、不轮换、不写回 Codex/Cursor 拥有的认证文件。
 
@@ -559,6 +641,25 @@ Companion 使用本地 SQLite 保存最近 90 天的小时级用量、余额和�
 - 导入前脱敏预览。
 - 错误密码、损坏文件或不支持的 schema 必须安全失败，不产生半导入状态。
 
+实现约束：
+
+- Backup Archive 是显式版本化 DTO，不复制任何 live store；`age` scrypt 二进制密文上限
+  8 MiB，认证后的 JSON 明文上限 4 MiB，未知字段和未知 major 均拒绝。
+- Preview 不返回 URL、header、request body、Secret Reference 或 secret value；它签发绑定
+  archive digest、mode 和当前配置 digest 的 10 分钟单次 receipt。没有 Preview、receipt
+  过期/重放或 Preview 后配置变化都不能 Import。
+- Import 在 staging 内完成 schema、Provider、顺序、设置、设备资料、容量和逐项冲突决定验证；
+  所有新 Secret Reference 先进入持久 cleanup journal，再写 Vault。只有一次受保护配置文件
+  replacement 会激活完整结果并记录 retired references。
+- commit 前失败会补偿全部 staged secrets；commit 后 Vault cleanup 失败保留 journal 并在启动时
+  幂等重试。导入后的 listener/collector/settings graph 在 Companion 重启后一次生效。
+- `POST /api/v1/backups/export` 返回 `application/vnd.age`；
+  `POST /api/v1/backups/preview` 返回脱敏 Preview；`POST /api/v1/backups/import` 只接受该
+  Preview receipt。三者都要求 management session、精确 Origin、CSRF 和敏感操作限流。
+- 导出路径使用 owner-only `0600`（macOS）或 current-user-only DACL（Windows）的原子替换；
+  导出 CLI 只从 owner-only passphrase file 读取密码，不把密码放入 argv/env，也不修改目标父目录
+  的 mode/DACL。导入读取拒绝 symlink/reparse point、非普通文件、路径与 handle 身份变化及超限文件。
+
 ## 9. 多 Companion 与配对
 
 ### 9.1 配对流程
@@ -579,8 +680,18 @@ Companion 使用本地 SQLite 保存最近 90 天的小时级用量、余额和�
 - 同一时间只连接一个 Active Companion。
 - Active Companion 离线超过 30 秒后，按优先级连接下一个。
 - 切换成功后保持粘性；原高优先级设备恢复也不抢占。
-- 用户可在恢复页手动选择 Active Companion。
+- 用户可在恢复页手动选择 Active Companion，并事务修改每个 Profile 的整数优先级；数值越高越先尝试。
 - Companion 之间不自动同步配置；使用加密备份手工迁移。
+
+故障切换只在连续离线满 30 秒后开始一轮：按优先级降序、last-success 降序和稳定
+Profile 顺序依次尝试其余候选；全部失败则回到原 Active，并重新等待完整窗口。候选首个
+有效心跳与 Active/last-success 的事务提交同时成功后才完成切换。所有候选读取与提交都绑定
+Profile generation，配对、地址更新、优先级修改、撤销或恢复页手动选择会使旧决定失效。
+每条替代 WSS 在候选阶段只允许严格心跳；事务成为 Active 后才开放 Snapshot/Serial 数据面。
+切换期间 Snapshot 保持 STALE，且只有新来源提交首个有效快照后才恢复；新的 WSS 连接必须等
+独立的 Serial Web-transport epoch 撤销旧代排队请求并确认 Web TX 已回到 USB；它不得覆盖
+BOOT exit/stop 使用的物理 lifecycle epoch。完整决定见
+[ADR 0022](adr/0022-keep-companion-failover-sticky-and-generation-fenced.md)。
 
 ## 10. 设备协议
 
@@ -596,7 +707,8 @@ ESP32 主动连接 Companion，便于处理设备 DHCP 地址变化和电脑防�
   "firmware_version": "0.1.0",
   "board": "esp32-s3-rlcd-4.2",
   "capabilities": ["display", "serial", "ota"],
-  "serial_state": "disarmed"
+  "serial_state": "disarmed",
+  "serial_session_id": 0
 }
 ```
 
@@ -620,25 +732,47 @@ Companion 验证 Token、证书连接、device ID 和协议版本后返回配置
 
 串口原始流使用 WebSocket binary frame，至少带通道、序号、设备单调时钟和 payload length。原始字节不经过 UTF-8 转换。
 
+V1 的精确 32-byte big-endian header 与 256-byte payload 上限由
+`protocol/catalog/serial-frame-v1.json` 唯一定义。ESP 与 Companion 对同一 Session 的 sequence
+和单调时间执行失败闭合校验；重连先以 `serial.history.request` 从 Companion 最新游标补发 Deck
+history，再进入 live sink，避免重复或缺口被伪装为连续数据。
+
+Companion Serial Hub 只在 RAM 保存当前 Session，payload 上限 8 MiB、frame metadata 上限
+65,536、观察者上限 64。每个观察者拥有独立 ordinal cursor；覆盖只推进落后的观察者并累计其
+丢失字节，不能阻塞 Device Link ingest。Session 结束、切换或 Companion 退出必须清零 payload、
+关闭观察者并拒绝旧 Session 下载。下载单次最多 1 MiB，且不得写日志、SQLite、Backup Archive
+或其他持久证据。
+
+Web TX Lease 同时只能属于一个观察者，默认 10 分钟。Acquire、release、disconnect 与 timeout
+均先进入 `transitioning`，只有 Deck owner 的 exact request result 才能发布最终状态；在 Deck
+确认 USB 前 UI 不得提前显示 USB。Lease/browser/request capability 不得出现在普通管理状态 API。
+Device Link 写失败属于送达结果不明，必须保留原 request 重试；Companion 重启后由 Deck 将外部
+request ID 映射到 Link 生命周期内单调 ID。Runtime 停止时先有界关闭全部 observer，再撤权并等待
+exact result，最后才能关闭 Device Link 和清空 Hub。
+完整决定见 [ADR 0020](adr/0020-keep-serial-hub-history-volatile-and-lease-web-transmit.md)。
+
 ### 10.3 AI 快照
 
 ```json
 {
   "type": "snapshot.ai",
   "protocol_version": 1,
+  "schema_version": {"major": 1, "minor": 0},
   "generated_at": "2026-08-09T10:36:18Z",
   "timezone": "Asia/Shanghai",
   "provider_order": ["codex", "cursor", "deepseek"],
   "providers": [],
-  "codex_sessions": [],
+  "sessions": [],
   "next_refresh_seconds": 5
 }
 ```
 
 - Provider 间错误隔离。
-- 未变化的快照可以只发送版本/摘要，避免无意义重绘。
-- ESP32 拒绝过大的快照和无效时间戳。
-- 所有时间在线路上使用 UTC。
+- 完整快照不超过 16 KiB；Provider 最多 8 个，每个额度窗口最多 4 个，会话最多 16 个。
+- `provider_order` 与 `providers` 的 ID 和顺序必须完全一致，会话必须引用本快照内的 Provider。
+- ESP32 拒绝未知 major、缺失/重复字段、越界数值、无效关联与无效时间戳，并保留最后有效快照。
+- 所有时间在线路上使用 canonical UTC RFC 3339（`Z`）；本地时区只用于显示。
+- canonical schema、错误目录与两端共享 fixtures 位于 `protocol/`。
 
 ## 11. Web 控制台
 
@@ -654,6 +788,12 @@ Companion 验证 Token、证书连接、device ID 和协议版本后返回配置
 | System | 时间、温度、固件、OTA、诊断、备份、重启 |
 
 SPA 静态资源构建后嵌入 Go 二进制，不引用公网字体、脚本或 CDN。
+
+AI Providers 页面通过受认证的 `/api/v1/providers`、`/api/v1/providers/order` 与
+`/api/v1/providers/{id}/test` 管理模板和自定义 Structured HTTP Provider。写操作必须满足
+精确 Origin、CSRF 与敏感请求限流；浏览器只得到 `secret_configured`，不能得到 Secret
+Reference。配置先完成 Vault/受保护文件事务，再由单一动态 supervisor 协调 collector；
+每次状态变化由 Runtime 生成完整 `snapshot.ai`，Device Hub 对每台 Deck 只合并最新快照。
 
 ### 11.2 串口终端开源组件
 
@@ -675,6 +815,9 @@ SPA 静态资源构建后嵌入 Go 二进制，不引用公网字体、脚本或
 - 用户保存的预设命令。
 
 浏览器层负责显示转换，Companion 和 ESP32 始终保留原始字节。
+用户主动创建的 Serial Preset 是受保护的应用配置，不是串口历史：最多 32 项、单次发送仍不超过
+256 bytes、不会从 RX/TX 自动生成，也不能绕过 Web TX Lease。预设可进入 `age` 加密备份，但不进入
+日志、诊断、历史、AI Snapshot、浏览器持久存储或 ESP32。
 
 ### 11.3 多浏览器
 
@@ -735,12 +878,18 @@ V1 使用 ESP32-S3 USB Serial/JTAG 的单 CDC 通道作为目标串口桥：
 - 发布固件诊断走 Web/内存诊断环。开发/HIL 构建可临时启用结构化 USB `boot_ok` 与无凭据的 `deck_build_identity`，仅用于启动和构建身份验收，并在发布配置中关闭。
 - 目标 UART 不使用 U0TXD；USB console/ROM 输出不会通过 GPIO17 注入目标设备。
 - USB sink 独立任务处理，不能从 UART RX 同步写 USB。
-- 电脑未打开端口时只允许 USB sink 自身丢弃。
+- USB source 同样使用独立任务读取原始字节；只有 owner task 可把固定队列中的字节写入 UART1。
+- 读取 USB 前即记录当时的 Owner generation；提交 UART 前必须再次完全匹配，跨越 `USB → WEB → USB` 的读取同样拒绝。
+- `WEB TX` 期间读到的字节只累计 rejected，不会在 Lease 回退后补发。
+- UART1 TX 使用无软件 TX ring 的非阻塞 FIFO 部分写；Owner 切换清除所有尚未交给硬件的 source block。
+- USB Serial/JTAG 驱动使用固定 4 KiB RX/TX ring；电脑未打开或占用端口时只允许 USB sink 自身背压、覆盖最旧块。
+- USB 断开不结束 Serial Session；已复制的单个部分写 block 可在重连后继续，退出会清零并释放。
 - 不烧不可逆 USB eFuse。
 - 设备复位产生的 ROM USB 启动文字不作为 V1 问题处理；正常工作时先启动设备，再进入串口页。
 - 关闭可能让 USB 断开的睡眠模式。
 
 发布版若未来需要双 CDC 或从枚举开始完全隔离启动文字，再单独评估 TinyUSB；不在 V1 同时维护两套 USB 方案。
+开发/HIL 配置占用同一个 CDC 发送结构化诊断，因此显式禁用目标桥；USB bridge 的实机验收必须使用关闭 diagnostic console 的 release artifact。
 
 ## 13. 固件架构
 
@@ -794,11 +943,23 @@ Web 修改 ESP32 配置时使用 write-through：只有收到设备确认才显�
 
 ### 13.4 快照持久化
 
-- ESP32 保存最后一个规范化 AI 快照。
-- 使用两个交替 NVS blob、版本号、长度和 CRC，写完校验后切换 active marker。
-- 最多每 30 分钟写一次，减少 Flash 磨损。
-- 解析失败或 schema 不兼容不能覆盖最后有效快照。
-- 离线不足 24 小时显示旧数据和 `STALE`；超过 24 小时隐藏额度。
+- Snapshot Store 在内存中立即保存最后一个校验通过的规范化 AI Snapshot。
+- `snapshot_nvs` 是独立 128 KiB 分区；candidate 和两个交替 blob 都带存储版本、
+  长度与 CRC，读回校验成功后才原子切换 active marker。
+- 首次快照立即 checkpoint；后续成功或失败的 Flash 尝试最多每 30 分钟一次。
+  独立 worker 执行 NVS 打开、恢复读取、写入和关闭，Store 创建先返回有界内存态；带版本
+  与 CRC 的 attempt watermark 让失败节流在重启后仍然成立。已有事务但 watermark 缺失或
+  损坏时，从首次可信 UTC 起保守等待 30 分钟；窗口到期后从最后有效事务记录重建并允许
+  瞬态故障恢复。Flash 节流、慢打开/读取/写入或 NVS 故障都不阻塞新的有效内存快照和 UI
+  读取；异步恢复与已发布 live 快照按时间戳合并，较新者保留，同时间戳但字节冲突时
+  fail-closed 到已提交记录。关闭时在 2 秒预算内排空已排队
+  checkpoint；驱动仍阻塞时保留完整 owner 并允许幂等重试关闭。
+- Companion Link 只通过统一 message dispatch 把完整校验通过的 `snapshot.ai`
+  发布给 Snapshot Store；解析失败、过大、隐私边界、未来时间、时间回退或未知 major
+  都不能覆盖最后有效快照。
+- Companion 离线不足 24 小时时 Snapshot Store 允许读取旧文档并标 `STALE`；达到
+  24 小时、时钟无效或任一可信时间源低于其 high-water mark 时不向 UI 暴露文档/额度，
+  只返回 Unavailable State；时间恢复到原 high-water 后才重新可见。
 
 ### 13.5 时间与温度
 
@@ -849,6 +1010,21 @@ Companion 保存脱敏轮转日志，默认保留 7 天或最多 50 MiB：
 - 支持导出脱敏诊断包。
 
 ESP32 发布固件只维护小型内存诊断环，通过已登录的 System 页面读取。开发/HIL 构建允许启用不含凭据或用户数据的结构化 USB 启动事件。
+
+生产实现把诊断定义为封闭数据模型，而不是自由文本：Companion 的 `internal/diagnostics`
+只接受固定 level/module/code、有限数字、schema 版本、脱敏 error code 和短 SHA-256 标识；
+没有能表达异常正文、URL、Header、路径、Provider raw、Prompt、工具参数或 Serial 正文的字段。
+单一后台 worker 非阻塞接收事件；owner-only JSONL 活动段以原子替换持久化，并按 1 小时或
+256 KiB 封存为 immutable 分段；队列或存储压力只增加 bounded dropped 计数。System 的
+`GET /api/v1/diagnostics` 读取状态，受登录、
+Origin、CSRF 和敏感操作限流保护的 `POST /api/v1/diagnostics/export` 在内存中生成固定路径 ZIP，
+包含最近 24 小时事件、最多 32 个 Deck 环、配置 schema key，以及逐文件 size/SHA-256 manifest；
+不创建导出临时文件，也不自动上传。
+
+Deck 的 `health` 组件维护 64 项 enum+numeric 内存环。只有已激活且声明 `diagnostics` capability
+的 Device Link 才响应精确 request ID；Companion 严格校验共享 `diagnostics.request` /
+`diagnostics.snapshot` 契约后缓存。参见
+[`ADR 0024`](adr/0024-bound-diagnostics-to-fixed-redacted-events.md)。
 
 ## 15. 开发环境
 
@@ -1003,8 +1179,20 @@ s3-rlcd-deck/
 
 - 最多 5 个 Companion、优先级和粘性故障切换。
 - 签名 OTA、A/B 回滚。
-- 诊断包、安装、自启动和升级迁移。
+- 诊断包、可恢复 Installation Transaction、登录自启动和升级迁移。
 - macOS/Windows 72 小时验收。
+
+### 17.6 签名 A/B OTA
+
+- Firmware Bundle 采用 ECDSA P-256 / SHA-256，版本化公钥目录是跨端唯一权威；私钥不进入仓库、Companion、日志或产物。
+- Manifest 固定绑定 key ID、最低 Device Link 协议、镜像长度、`esp32-s3-rlcd-4.2`、版本和镜像 SHA-256。
+- Companion Preview 只做完整校验并生成内存单次 receipt；Apply 必须经 Web 明确确认，且全局只允许一个 OTA Transaction。
+- Device Link 每次只发送一个 3072-byte chunk，并等待同 transaction ID 的精确 `ota.result`；10 分钟总时限、30 秒 Deck 空闲时限、错误或断连均立即终止。
+- Deck 只流式写下一个 OTA app slot；只有签名、顺序、摘要、ESP image 和内嵌版本全部一致才选择该 slot。
+- V1 downgrade policy 只接受 semantic core 严格大于当前固件的版本；同版本、预发布变体和降级均拒绝。
+- 首启保持 pending verify；UI/display、peripheral service、Wi-Fi 与 Active Companion Link 在 60 秒内健康才标有效，否则自动回滚。
+- 不写 bootloader、partition table、NVS 或 eFuse，不启用不可逆 Secure Boot；BOOT 与 release USB Serial/JTAG 始终独立可恢复。
+- Host 覆盖 wrong board/signature/length/hash/offset、interruption/timeout、Flash failure、Boot Health 决策、公钥目录一致性和签名工具；实板仍需逐断点故障注入。
 
 ## 18. 测试与验收
 

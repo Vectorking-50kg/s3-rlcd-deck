@@ -22,6 +22,25 @@ typedef enum {
     DECK_DEVICE_HEARTBEAT_UNSUPPORTED_MAJOR,
 } deck_device_heartbeat_result_t;
 
+typedef enum {
+    DECK_DEVICE_SERIAL_OWNER_REQUEST = 0,
+    DECK_DEVICE_SERIAL_OWNER_ACTIVITY,
+    DECK_DEVICE_SERIAL_HISTORY_REQUEST,
+} deck_device_serial_control_kind_t;
+
+typedef struct {
+    deck_device_serial_control_kind_t kind;
+    uint64_t session_id;
+    uint64_t request_id;
+    uint64_t lease_id;
+    uint64_t after_sequence;
+    bool enable;
+} deck_device_serial_control_t;
+
+typedef struct {
+    uint64_t request_id;
+} deck_device_diagnostics_request_t;
+
 /* Constant-time comparison after validating the canonical lowercase wire form. */
 bool deck_device_protocol_fingerprint_matches_sha256(
     const uint8_t digest[32],
@@ -40,6 +59,18 @@ deck_device_heartbeat_result_t deck_device_protocol_parse_heartbeat(
     uint64_t previous_monotonic_ms,
     bool has_previous,
     deck_device_heartbeat_t *heartbeat
+);
+
+bool deck_device_protocol_parse_serial_control(
+    const char *message,
+    size_t message_size,
+    deck_device_serial_control_t *control
+);
+
+bool deck_device_protocol_parse_diagnostics_request(
+    const char *message,
+    size_t message_size,
+    deck_device_diagnostics_request_t *request
 );
 
 #ifdef __cplusplus

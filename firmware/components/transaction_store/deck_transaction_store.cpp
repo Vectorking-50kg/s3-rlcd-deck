@@ -785,6 +785,11 @@ bool deck_transaction_store_clear(deck_transaction_store_t *store)
                  DECK_TRANSACTION_STORAGE_SLOT_1
              ) &&
              erased;
+    erased = store->options.storage.erase(
+                 store->options.storage.context,
+                 DECK_TRANSACTION_STORAGE_METADATA
+             ) &&
+             erased;
     if (!erased) {
         set_storage_failure(store);
         return false;

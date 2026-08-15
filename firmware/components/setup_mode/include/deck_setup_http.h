@@ -30,6 +30,7 @@ typedef enum {
     DECK_SETUP_HTTP_COMPANION_PAIR,
     DECK_SETUP_HTTP_COMPANION_PAIR_ACK,
     DECK_SETUP_HTTP_COMPANION_SELECT,
+    DECK_SETUP_HTTP_COMPANION_PRIORITY,
     DECK_SETUP_HTTP_COMPANION_REVOKE,
 } deck_setup_http_route_t;
 
@@ -129,6 +130,13 @@ bool deck_setup_http_parse_companion_profile_request(
     size_t body_size,
     char *profile_id,
     size_t profile_id_capacity
+);
+bool deck_setup_http_parse_companion_priority_request(
+    const char *body,
+    size_t body_size,
+    char *profile_id,
+    size_t profile_id_capacity,
+    int32_t *priority
 );
 bool deck_setup_http_render_status(
     const deck_setup_snapshot_t *snapshot,
