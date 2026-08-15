@@ -60,6 +60,7 @@ type Service struct {
 	done                chan struct{}
 	dropped             atomic.Uint32
 	storageFaulted      atomic.Bool
+	diskMu              sync.Mutex
 	stateMu             sync.RWMutex
 	closed              bool
 	terminalErr         error
@@ -240,26 +241,38 @@ func (service *Service) run(flushInterval time.Duration) {
 	activeCreated := time.Time{}
 	activePath := ""
 	activePersistedBytes := 0
+	dirty := false
 	lastSegmentNS := int64(-1)
+	lastRetentionCheck := service.now().UTC()
 	var sequence uint64
-	persist := func(seal bool) error {
+	persist := func(seal bool) (bool, error) {
 		if len(batch) == 0 {
-			return nil
+			return false, nil
+		}
+		if !dirty {
+			if seal {
+				batch = batch[:0]
+				batchBytes = 0
+				activeCreated = time.Time{}
+				activePath = ""
+				activePersistedBytes = 0
+			}
+			return false, nil
 		}
 		var buffer bytes.Buffer
 		encoder := json.NewEncoder(&buffer)
 		encoder.SetEscapeHTML(false)
 		for _, event := range batch {
 			if err := encoder.Encode(event); err != nil {
-				return err
+				return true, err
 			}
 		}
 		if buffer.Len() > service.maximumSegmentBytes {
-			return errors.New("diagnostic segment exceeds bound")
+			return true, errors.New("diagnostic segment exceeds bound")
 		}
 		now := service.now().UTC()
 		if now.Year() < 0 || now.Year() > 9999 || now.UnixNano() < 0 {
-			return errors.New("diagnostic clock is outside the supported range")
+			return true, errors.New("diagnostic clock is outside the supported range")
 		}
 		if activeCreated.IsZero() {
 			activeCreated = now
@@ -268,8 +281,10 @@ func (service *Service) run(flushInterval time.Duration) {
 		if reserve < 0 {
 			reserve = 0
 		}
-		if err := service.enforceRetention(now, reserve, activePath); err != nil {
-			return err
+		service.diskMu.Lock()
+		defer service.diskMu.Unlock()
+		if err := service.enforceRetentionLocked(now, reserve, activePath); err != nil {
+			return true, err
 		}
 		if activePath == "" {
 			if createdNS := activeCreated.UnixNano(); createdNS != lastSegmentNS {
@@ -278,14 +293,15 @@ func (service *Service) run(flushInterval time.Duration) {
 			}
 			path, nextErr := service.nextSegmentPath(activeCreated, &sequence)
 			if nextErr != nil {
-				return nextErr
+				return true, nextErr
 			}
 			activePath = path
 		}
 		if _, err := protectedfile.Replace(activePath, buffer.Bytes()); err != nil {
-			return err
+			return true, err
 		}
 		activePersistedBytes = buffer.Len()
+		dirty = false
 		if seal {
 			batch = batch[:0]
 			batchBytes = 0
@@ -293,9 +309,9 @@ func (service *Service) run(flushInterval time.Duration) {
 			activePath = ""
 			activePersistedBytes = 0
 		}
-		return nil
+		return true, nil
 	}
-	commit := func(seal bool) error {
+	commit := func(seal bool) (bool, error) {
 		if count := service.dropped.Swap(0); count != 0 {
 			now := service.now().UTC()
 			droppedEvent := storedEvent{
@@ -306,12 +322,12 @@ func (service *Service) run(flushInterval time.Duration) {
 			encoded, _ := json.Marshal(droppedEvent)
 			if len(encoded)+1 > service.maximumSegmentBytes {
 				service.dropped.Add(count)
-				return errors.New("diagnostic overflow event exceeds segment bound")
+				return true, errors.New("diagnostic overflow event exceeds segment bound")
 			}
 			if batchBytes+len(encoded)+1 > service.maximumSegmentBytes && len(batch) != 0 {
-				if err := persist(true); err != nil {
+				if _, err := persist(true); err != nil {
 					service.dropped.Add(count)
-					return err
+					return true, err
 				}
 			}
 			if len(batch) == 0 {
@@ -319,12 +335,17 @@ func (service *Service) run(flushInterval time.Duration) {
 			}
 			batch = append(batch, droppedEvent)
 			batchBytes += len(encoded) + 1
+			dirty = true
 		}
 		return persist(seal)
 	}
 	commitWithStatus := func(seal bool) error {
-		err := commit(seal)
-		service.storageFaulted.Store(err != nil)
+		attempted, err := commit(seal)
+		if err != nil {
+			service.storageFaulted.Store(true)
+		} else if attempted {
+			service.storageFaulted.Store(false)
+		}
 		return err
 	}
 	for {
@@ -361,6 +382,7 @@ func (service *Service) run(flushInterval time.Duration) {
 				}
 				batch = append(batch, stored)
 				batchBytes += len(encoded) + 1
+				dirty = true
 			}
 			if command.flush != nil {
 				command.flush <- commitWithStatus(false)
@@ -377,7 +399,17 @@ func (service *Service) run(flushInterval time.Duration) {
 			now := service.now().UTC()
 			seal := len(batch) != 0 && !activeCreated.IsZero() &&
 				now.Sub(activeCreated) >= maximumSegmentAge
-			_ = commitWithStatus(seal)
+			commitErr := commitWithStatus(seal)
+			retentionInterval := min(service.retention, maximumSegmentAge)
+			if commitErr == nil &&
+				(now.Before(lastRetentionCheck) || now.Sub(lastRetentionCheck) >= retentionInterval) {
+				if err := service.enforceRetention(now, 0, activePath); err != nil {
+					service.storageFaulted.Store(true)
+				} else {
+					service.storageFaulted.Store(false)
+					lastRetentionCheck = now
+				}
+			}
 		}
 	}
 }
@@ -405,6 +437,12 @@ type segmentMeta struct {
 }
 
 func (service *Service) segments() ([]segmentMeta, error) {
+	service.diskMu.Lock()
+	defer service.diskMu.Unlock()
+	return service.segmentsLocked()
+}
+
+func (service *Service) segmentsLocked() ([]segmentMeta, error) {
 	entries, err := os.ReadDir(service.directory)
 	if err != nil {
 		return nil, err
@@ -445,7 +483,17 @@ func (service *Service) enforceRetention(
 	reserve int64,
 	preservePath string,
 ) error {
-	segments, err := service.segments()
+	service.diskMu.Lock()
+	defer service.diskMu.Unlock()
+	return service.enforceRetentionLocked(now, reserve, preservePath)
+}
+
+func (service *Service) enforceRetentionLocked(
+	now time.Time,
+	reserve int64,
+	preservePath string,
+) error {
+	segments, err := service.segmentsLocked()
 	if err != nil {
 		return err
 	}
@@ -483,7 +531,9 @@ func (service *Service) snapshot(
 	if maximumBytes <= 0 {
 		return nil, false, errors.New("diagnostic snapshot size must be positive")
 	}
-	segments, err := service.segments()
+	service.diskMu.Lock()
+	defer service.diskMu.Unlock()
+	segments, err := service.segmentsLocked()
 	if err != nil {
 		return nil, false, err
 	}

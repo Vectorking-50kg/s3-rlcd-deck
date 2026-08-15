@@ -200,6 +200,99 @@ func TestSnapshotTruncationKeepsTheNewestEvents(t *testing.T) {
 	}
 }
 
+func TestIdleTickerDoesNotRewriteAndStillExpiresSealedSegments(t *testing.T) {
+	base := time.Date(2026, 8, 15, 8, 0, 0, 0, time.UTC)
+	var clockMu sync.Mutex
+	now := base
+	service := openTestService(t, Config{
+		Now: func() time.Time {
+			clockMu.Lock()
+			defer clockMu.Unlock()
+			return now
+		},
+		Retention: 2 * time.Hour, FlushInterval: 2 * time.Millisecond,
+	})
+	if !service.Record(Event{
+		Level: LevelInfo, Module: ModuleRuntime, Code: CodeRuntimeReady,
+	}) {
+		t.Fatal("record failed")
+	}
+	flushTestService(t, service)
+	entries, err := os.ReadDir(service.directory)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("segments = %d, %v", len(entries), err)
+	}
+	before, err := entries[0].Info()
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	entries, err = os.ReadDir(service.directory)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("idle segments = %d, %v", len(entries), err)
+	}
+	after, err := entries[0].Info()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("idle ticker rewrote an unchanged active segment")
+	}
+
+	clockMu.Lock()
+	now = base.Add(4 * time.Hour)
+	clockMu.Unlock()
+	deadline := time.Now().Add(time.Second)
+	for {
+		entries, err = os.ReadDir(service.directory)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("idle sealed segment exceeded its retention window")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestConcurrentRotationStatusAndSnapshotUseAConsistentDiskView(t *testing.T) {
+	service := openTestService(t, Config{
+		MaximumBytes: 1 << 20, MaximumSegmentBytes: 320,
+		QueueCapacity: 4096, FlushInterval: time.Millisecond,
+	})
+	producerDone := make(chan struct{})
+	go func() {
+		defer close(producerDone)
+		for latency := 1; latency <= 100; latency++ {
+			service.RecordProvider(ProviderDiagnostic{
+				ProviderID: "provider-a", HTTPStatus: 200,
+				LatencyMS: int64(latency), SchemaVersion: "v1",
+			})
+			time.Sleep(50 * time.Microsecond)
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for iteration := 0; iteration < 50; iteration++ {
+		if !service.Status().Available {
+			t.Fatal("status observed a transient replacement file")
+		}
+		if _, _, err := service.snapshot(ctx, time.Time{}, 1<<20); err != nil {
+			t.Fatalf("snapshot observed a transient disk state: %v", err)
+		}
+		select {
+		case <-producerDone:
+			iteration = 50
+		default:
+		}
+	}
+	<-producerDone
+	flushTestService(t, service)
+}
+
 func TestRestartAtTheSameClockValueDoesNotOverwriteAnImmutableSegment(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "diagnostics")
 	fixed := time.Date(2026, 8, 15, 8, 0, 0, 123, time.UTC)
