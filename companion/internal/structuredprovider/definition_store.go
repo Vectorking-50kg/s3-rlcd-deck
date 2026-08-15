@@ -25,6 +25,11 @@ const (
 	definitionStoreLockName      = ".structured-providers.lock"
 )
 
+var (
+	errSerialPresetLimit    = errors.New("Serial preset limit reached")
+	errSerialPresetNotFound = errors.New("Serial preset not found")
+)
+
 type definitionStoreState struct {
 	SchemaVersion                   int                             `json:"schema_version"`
 	Definitions                     []Definition                    `json:"definitions"`
@@ -455,6 +460,71 @@ func (store *DefinitionStore) UpdateSerialPresets(
 		next.ApplyApplicationSettingsOnStart = false
 		return nil
 	})
+}
+
+// UpdateSerialPreset atomically replaces or appends one preset inside the
+// protected configuration transaction. Callers never perform an unlocked
+// read-modify-write of the preset collection.
+func (store *DefinitionStore) UpdateSerialPreset(
+	ctx context.Context,
+	preset configmodel.SerialPreset,
+) (bool, error) {
+	if !configmodel.ValidateSerialPresets([]configmodel.SerialPreset{preset}) {
+		return false, ErrInvalidConfig
+	}
+	err := store.update(ctx, func(next *definitionStoreState) error {
+		for index := range next.ApplicationSettings.SerialPresets {
+			if next.ApplicationSettings.SerialPresets[index].ID != preset.ID {
+				continue
+			}
+			clear(next.ApplicationSettings.SerialPresets[index].Payload)
+			next.ApplicationSettings.SerialPresets[index] = configmodel.CloneSerialPresets(
+				[]configmodel.SerialPreset{preset},
+			)[0]
+			next.ApplyApplicationSettingsOnStart = false
+			return nil
+		}
+		if len(next.ApplicationSettings.SerialPresets) >= configmodel.MaximumSerialPresets {
+			return errSerialPresetLimit
+		}
+		next.ApplicationSettings.SerialPresets = append(
+			next.ApplicationSettings.SerialPresets,
+			configmodel.CloneSerialPresets([]configmodel.SerialPreset{preset})[0],
+		)
+		next.ApplyApplicationSettingsOnStart = false
+		return nil
+	})
+	if errors.Is(err, errSerialPresetLimit) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// DeleteSerialPreset atomically removes one preset. A missing identifier is a
+// non-mutating result so the HTTP boundary can return a precise 404.
+func (store *DefinitionStore) DeleteSerialPreset(ctx context.Context, identifier string) (bool, error) {
+	err := store.update(ctx, func(next *definitionStoreState) error {
+		for index := range next.ApplicationSettings.SerialPresets {
+			if next.ApplicationSettings.SerialPresets[index].ID != identifier {
+				continue
+			}
+			clear(next.ApplicationSettings.SerialPresets[index].Payload)
+			copy(
+				next.ApplicationSettings.SerialPresets[index:],
+				next.ApplicationSettings.SerialPresets[index+1:],
+			)
+			last := len(next.ApplicationSettings.SerialPresets) - 1
+			next.ApplicationSettings.SerialPresets[last] = configmodel.SerialPreset{}
+			next.ApplicationSettings.SerialPresets = next.ApplicationSettings.SerialPresets[:last]
+			next.ApplyApplicationSettingsOnStart = false
+			return nil
+		}
+		return errSerialPresetNotFound
+	})
+	if errors.Is(err, errSerialPresetNotFound) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 func (store *DefinitionStore) UpdateHistoryEnabled(ctx context.Context, enabled bool) error {

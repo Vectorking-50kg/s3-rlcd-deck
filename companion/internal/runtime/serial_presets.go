@@ -105,6 +105,10 @@ func (application *Runtime) handleSerialPresetsUpdate(response http.ResponseWrit
 }
 
 func (application *Runtime) handleSerialPresetUpdate(response http.ResponseWriter, request *http.Request) {
+	if application.configuration == nil {
+		http.Error(response, "Serial presets unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	var document serialPresetDocument
 	if err := decodeManagementJSON(response, request, &document); err != nil {
 		http.Error(response, "malformed Serial preset", http.StatusBadRequest)
@@ -119,58 +123,31 @@ func (application *Runtime) handleSerialPresetUpdate(response http.ResponseWrite
 		return
 	}
 	defer configmodel.DestroySerialPresets([]configmodel.SerialPreset{preset})
-	presets, available := application.loadSerialPresets(response, request)
-	if !available {
-		return
-	}
-	defer configmodel.DestroySerialPresets(presets)
-	replaced := false
-	for index := range presets {
-		if presets[index].ID == identifier {
-			clear(presets[index].Payload)
-			presets[index] = configmodel.CloneSerialPresets([]configmodel.SerialPreset{preset})[0]
-			replaced = true
-			break
-		}
-	}
-	if !replaced {
-		presets = append(presets, configmodel.CloneSerialPresets([]configmodel.SerialPreset{preset})[0])
-	}
-	if !configmodel.ValidateSerialPresets(presets) {
-		http.Error(response, "invalid Serial preset", http.StatusBadRequest)
-		return
-	}
-	if err := application.configuration.UpdateSerialPresets(request.Context(), presets); err != nil {
+	updated, err := application.configuration.UpdateSerialPreset(request.Context(), preset)
+	if err != nil {
 		http.Error(response, "Serial presets unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if !updated {
+		http.Error(response, "invalid Serial preset", http.StatusBadRequest)
 		return
 	}
 	response.WriteHeader(http.StatusNoContent)
 }
 
 func (application *Runtime) handleSerialPresetDelete(response http.ResponseWriter, request *http.Request) {
-	presets, available := application.loadSerialPresets(response, request)
-	if !available {
-		return
-	}
-	defer configmodel.DestroySerialPresets(presets)
-	identifier := request.PathValue("presetID")
-	index := -1
-	for candidate := range presets {
-		if presets[candidate].ID == identifier {
-			index = candidate
-			break
-		}
-	}
-	if index < 0 {
-		http.Error(response, "Serial preset not found", http.StatusNotFound)
-		return
-	}
-	clear(presets[index].Payload)
-	copy(presets[index:], presets[index+1:])
-	presets[len(presets)-1] = configmodel.SerialPreset{}
-	presets = presets[:len(presets)-1]
-	if err := application.configuration.UpdateSerialPresets(request.Context(), presets); err != nil {
+	if application.configuration == nil {
 		http.Error(response, "Serial presets unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	identifier := request.PathValue("presetID")
+	deleted, err := application.configuration.DeleteSerialPreset(request.Context(), identifier)
+	if err != nil {
+		http.Error(response, "Serial presets unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if !deleted {
+		http.Error(response, "Serial preset not found", http.StatusNotFound)
 		return
 	}
 	response.WriteHeader(http.StatusNoContent)

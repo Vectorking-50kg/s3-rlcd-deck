@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/configmodel"
@@ -222,6 +223,86 @@ func TestSerialPresetsPersistWithoutBeingOverwrittenByHistorySettings(t *testing
 	loaded, err = owner.SerialPresets(context.Background())
 	if err != nil || string(loaded[0].Payload) != "status --token PRIVATE_PRESET" {
 		t.Fatalf("reopened presets=%#v err=%v", loaded, err)
+	}
+	configmodel.DestroySerialPresets(loaded)
+}
+
+func TestSerialPresetSingleItemMutationsAreAtomicAcrossConcurrentBrowsers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "structured-providers.json")
+	owner, err := OpenDefinitionStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+	preset := func(identifier, payload string) configmodel.SerialPreset {
+		return configmodel.SerialPreset{
+			ID: identifier, Name: identifier, Mode: configmodel.SerialPresetText,
+			Payload: []byte(payload), LineEnding: configmodel.SerialLineEndingNone,
+		}
+	}
+
+	start := make(chan struct{})
+	errors := make(chan error, 2)
+	var wait sync.WaitGroup
+	for _, candidate := range []configmodel.SerialPreset{preset("browser_a", "alpha"), preset("browser_b", "bravo")} {
+		candidate := candidate
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			updated, updateErr := owner.UpdateSerialPreset(context.Background(), candidate)
+			if updateErr != nil {
+				errors <- updateErr
+			} else if !updated {
+				errors <- ErrDefinitionCommit
+			}
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(errors)
+	for mutationErr := range errors {
+		t.Fatal(mutationErr)
+	}
+	loaded, err := owner.SerialPresets(context.Background())
+	if err != nil || len(loaded) != 2 {
+		t.Fatalf("concurrent additions loaded=%#v error=%v", loaded, err)
+	}
+	configmodel.DestroySerialPresets(loaded)
+
+	start = make(chan struct{})
+	errors = make(chan error, 2)
+	wait = sync.WaitGroup{}
+	wait.Add(2)
+	go func() {
+		defer wait.Done()
+		<-start
+		deleted, deleteErr := owner.DeleteSerialPreset(context.Background(), "browser_a")
+		if deleteErr != nil {
+			errors <- deleteErr
+		} else if !deleted {
+			errors <- ErrDefinitionCommit
+		}
+	}()
+	go func() {
+		defer wait.Done()
+		<-start
+		updated, updateErr := owner.UpdateSerialPreset(context.Background(), preset("browser_b", "revised"))
+		if updateErr != nil {
+			errors <- updateErr
+		} else if !updated {
+			errors <- ErrDefinitionCommit
+		}
+	}()
+	close(start)
+	wait.Wait()
+	close(errors)
+	for mutationErr := range errors {
+		t.Fatal(mutationErr)
+	}
+	loaded, err = owner.SerialPresets(context.Background())
+	if err != nil || len(loaded) != 1 || loaded[0].ID != "browser_b" || string(loaded[0].Payload) != "revised" {
+		t.Fatalf("concurrent delete/update loaded=%#v error=%v", loaded, err)
 	}
 	configmodel.DestroySerialPresets(loaded)
 }

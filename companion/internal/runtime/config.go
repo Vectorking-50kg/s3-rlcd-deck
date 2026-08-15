@@ -63,6 +63,8 @@ type ConfigurationOwner interface {
 	UpdateHistoryEnabled(context.Context, bool) error
 	SerialPresets(context.Context) ([]configmodel.SerialPreset, error)
 	UpdateSerialPresets(context.Context, []configmodel.SerialPreset) error
+	UpdateSerialPreset(context.Context, configmodel.SerialPreset) (bool, error)
+	DeleteSerialPreset(context.Context, string) (bool, error)
 	UpdateDeviceProfile(context.Context, configmodel.DeviceProfile) error
 }
 

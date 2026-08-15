@@ -29,6 +29,7 @@ func TestEmbeddedConsoleContainsCompleteChineseSchemeCWorkflows(t *testing.T) {
 			"/api/v1/serial/presets", "connectSerialObserver", "submitSerial",
 			`$("#serial-compose").addEventListener`, `$("#serial-lease").addEventListener`,
 			`$("#serial-preset-form").addEventListener`, "downloadSerialCapture",
+			"serialPresetOperationController", "serialPresetOperationIsCurrent", "scrubSerialPresetEditor",
 		},
 		"/serial-terminal.js": {
 			"S3DeckSerialTerminal", "createClient", "decodeFrame", "MAX_TRANSMIT_BYTES",

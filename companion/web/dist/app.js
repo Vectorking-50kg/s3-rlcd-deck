@@ -4,6 +4,7 @@ const state = {
   csrf: "", bootstrap: null, console: null, providers: [], templates: [], providerStates: [], history: [],
   editing: "", backup: null, page: "overview", providerFilter: "all", deckIndex: 0,
   serialPresets: [], serialPresetEditing: "",
+  serialPresetOperationEpoch: 0, serialPresetOperationController: new AbortController(),
   serial: {
     client: null, terminal: null, fit: null, search: null, resizeObserver: null,
     reconnectTimer: null, heartbeatTimer: null, mode: "text", paused: false,
@@ -253,6 +254,7 @@ function navigate(page, updateHash = true) {
   }
   const config = pageConfig[page] || pageConfig.overview;
   page = pageConfig[page] ? page : "overview";
+  if (state.page === "serial-presets" && page !== "serial-presets") clearSerialPresetEditor();
   state.page = page;
   $$('[data-page-view]').forEach((view) => { view.hidden = view.dataset.pageView !== page; });
   $$('[data-page]').forEach((button) => button.classList.toggle("active", button.dataset.page === page));
@@ -288,7 +290,8 @@ function scrubSensitiveState() {
   state.backup = null;
   stopSerial();
   state.serialPresets = [];
-  state.serialPresetEditing = "";
+  rotateSerialPresetOperations();
+  scrubSerialPresetEditor();
   state.deckIndex = 0;
   Object.values(state.sync).forEach((sync) => { sync.lastSuccess = ""; sync.error = ""; });
   $("#management-token").value = "";
@@ -302,8 +305,6 @@ function scrubSensitiveState() {
   $("#backup-conflicts").replaceChildren();
   $("#backup-preview").textContent = "等待预览";
   $("#apply-backup").disabled = true;
-  $("#serial-preset-form").reset();
-  $("#serial-preset-id").value = "";
   $("#serial-preset-list").replaceChildren();
   const dialog = $("#app-dialog");
   if (dialog.open) dialog.close();
@@ -1419,7 +1420,7 @@ async function loadSerialPresets() {
   } catch (error) {
     state.sync.serialPresets.error = error.message;
     resourceFeedback("serial-presets", "串口预设当前不可用；已禁用保存和发送。", true);
-    renderSerialPresets();
+    clearSerialPresetEditor();
   }
 }
 
@@ -1461,18 +1462,45 @@ function renderSerialPresets() {
 }
 
 function clearSerialPresetEditor() {
+  rotateSerialPresetOperations();
+  scrubSerialPresetEditor();
+  renderSerialPresets();
+}
+
+function rotateSerialPresetOperations() {
+  state.serialPresetOperationController.abort();
+  state.serialPresetOperationController = new AbortController();
+  state.serialPresetOperationEpoch += 1;
+}
+
+function beginSerialPresetOperation() {
+  rotateSerialPresetOperations();
+  return {
+    epoch: state.serialPresetOperationEpoch,
+    signal: state.serialPresetOperationController.signal,
+  };
+}
+
+function serialPresetOperationIsCurrent(operation) {
+  return state.authenticated && state.page === "serial-presets" && !operation.signal.aborted &&
+    operation.epoch === state.serialPresetOperationEpoch;
+}
+
+function scrubSerialPresetEditor() {
   state.serialPresetEditing = "";
   $("#serial-preset-form").reset();
   $("#serial-preset-id").value = "";
+  $("#serial-preset-payload").value = "";
   $("#serial-preset-mode").value = "text";
   $("#serial-preset-ending").value = "current";
   setText("#serial-preset-editor-note", "新建一个有界命令");
   updateSerialPresetMode();
-  renderSerialPresets();
 }
 
-async function fetchSerialPreset(id) {
-  const document = await (await request(`/api/v1/serial/presets/${encodeURIComponent(id)}`)).json();
+async function fetchSerialPreset(id, signal) {
+  const document = await (await request(
+    `/api/v1/serial/presets/${encodeURIComponent(id)}`, { signal },
+  )).json();
   if (!document || document.id !== id || typeof document.payload !== "string") {
     throw new Error("串口预设详情响应格式无效。");
   }
@@ -1482,9 +1510,15 @@ async function fetchSerialPreset(id) {
 async function editSerialPreset(id) {
   if (!serialPresetsWritable()) return;
   if (!state.serialPresets.some((candidate) => candidate.id === id)) return;
+  const operation = beginSerialPresetOperation();
+  scrubSerialPresetEditor();
   try {
-    const preset = await fetchSerialPreset(id);
-    if (!serialPresetsWritable() || !state.serialPresets.some((candidate) => candidate.id === id)) return;
+    const preset = await fetchSerialPreset(id, operation.signal);
+    if (!serialPresetOperationIsCurrent(operation) || !serialPresetsWritable() ||
+        !state.serialPresets.some((candidate) => candidate.id === id)) {
+      preset.payload = "";
+      return;
+    }
     state.serialPresetEditing = id;
     $("#serial-preset-id").value = id;
     $("#serial-preset-name").value = preset.name;
@@ -1496,7 +1530,9 @@ async function editSerialPreset(id) {
     updateSerialPresetMode();
     renderSerialPresets();
   } catch (error) {
-    toast("无法打开串口预设", error.message, true);
+    if (error?.name !== "AbortError" && serialPresetOperationIsCurrent(operation)) {
+      toast("无法打开串口预设", error.message, true);
+    }
   }
 }
 
@@ -1561,21 +1597,30 @@ async function deleteSerialPreset() {
 
 async function sendSerialPreset(id) {
   if (!state.serialPresets.some((candidate) => candidate.id === id) || !serialPresetsWritable()) return;
+  const operation = beginSerialPresetOperation();
   try {
-    const preset = await fetchSerialPreset(id);
+    const preset = await fetchSerialPreset(id, operation.signal);
     try {
-      if (!serialPresetsWritable() || !state.serial.status?.canTransmit) {
+      if (!serialPresetOperationIsCurrent(operation) || !serialPresetsWritable() ||
+          !state.serial.status?.canTransmit) {
         throw new Error("Web TX Lease 已失效。");
       }
       const ending = preset.line_ending === "current" ? $("#serial-line-ending").value : preset.line_ending;
       const payload = preset.mode === "hex" ? window.S3DeckSerialTerminal.parseHex(preset.payload) :
         window.S3DeckSerialTerminal.encodeText(preset.payload, ending);
-      sendSerialPayload(payload);
-      payload.fill(0);
+      try {
+        sendSerialPayload(payload);
+      } finally {
+        payload.fill(0);
+      }
     } finally {
       preset.payload = "";
     }
-  } catch (error) { toast("无法发送串口预设", error.message, true); }
+  } catch (error) {
+    if (error?.name !== "AbortError" && serialPresetOperationIsCurrent(operation)) {
+      toast("无法发送串口预设", error.message, true);
+    }
+  }
 }
 
 function showDialog({ eyebrow, title, paragraphs = [], body = null, confirmText = "确认", danger = false, informational = false }) {

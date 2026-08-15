@@ -37,6 +37,38 @@ func (owner *serialPresetSettingsOwner) UpdateSerialPresets(
 	return nil
 }
 
+func (owner *serialPresetSettingsOwner) UpdateSerialPreset(
+	_ context.Context,
+	preset configmodel.SerialPreset,
+) (bool, error) {
+	for index := range owner.presets {
+		if owner.presets[index].ID == preset.ID {
+			configmodel.DestroySerialPresets(owner.presets[index : index+1])
+			owner.presets[index] = configmodel.CloneSerialPresets([]configmodel.SerialPreset{preset})[0]
+			return true, nil
+		}
+	}
+	if len(owner.presets) >= configmodel.MaximumSerialPresets {
+		return false, nil
+	}
+	owner.presets = append(owner.presets, configmodel.CloneSerialPresets([]configmodel.SerialPreset{preset})[0])
+	return true, nil
+}
+
+func (owner *serialPresetSettingsOwner) DeleteSerialPreset(_ context.Context, identifier string) (bool, error) {
+	for index := range owner.presets {
+		if owner.presets[index].ID != identifier {
+			continue
+		}
+		configmodel.DestroySerialPresets(owner.presets[index : index+1])
+		copy(owner.presets[index:], owner.presets[index+1:])
+		owner.presets[len(owner.presets)-1] = configmodel.SerialPreset{}
+		owner.presets = owner.presets[:len(owner.presets)-1]
+		return true, nil
+	}
+	return false, nil
+}
+
 func (*serialPresetSettingsOwner) UpdateDeviceProfile(context.Context, configmodel.DeviceProfile) error {
 	return nil
 }
