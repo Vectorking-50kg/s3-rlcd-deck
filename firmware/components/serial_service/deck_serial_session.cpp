@@ -350,14 +350,47 @@ bool deck_serial_session_accept_usb_input(
     if (session == nullptr) {
         return false;
     }
-    if (session->state == DECK_SERIAL_USB_TX) {
+    return deck_serial_session_accept_usb_input_generation(
+        session,
+        session->owner_generation,
+        byte_count
+    );
+}
+
+bool deck_serial_session_accept_usb_input_generation(
+    deck_serial_session_t *session,
+    uint64_t owner_generation,
+    size_t byte_count
+)
+{
+    if (session == nullptr) {
+        return false;
+    }
+    if (session->state == DECK_SERIAL_USB_TX && owner_generation != 0 &&
+        owner_generation == session->owner_generation) {
         return true;
     }
-    if (session->state == DECK_SERIAL_WEB_TX) {
+    if (session->state != DECK_SERIAL_DISARMED && byte_count != 0) {
         const uint64_t count = static_cast<uint64_t>(byte_count);
         session->usb_tx_rejected = saturating_add(session->usb_tx_rejected, count);
     }
     return false;
+}
+
+bool deck_serial_session_record_usb_rejection(
+    deck_serial_session_t *session,
+    uint64_t byte_count
+)
+{
+    if (session == nullptr || byte_count == 0 ||
+        session->state == DECK_SERIAL_DISARMED) {
+        return false;
+    }
+    session->usb_tx_rejected = saturating_add(
+        session->usb_tx_rejected,
+        byte_count
+    );
+    return true;
 }
 
 void deck_serial_session_tick(deck_serial_session_t *session, uint64_t now_ms)

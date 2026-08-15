@@ -86,6 +86,14 @@ deck_add_host_test(
     INCLUDE_DIRS ../../firmware/components/serial_service/include
 )
 deck_add_host_test(
+    test_serial_usb_bridge
+    SOURCES
+        test_serial_usb_bridge.cpp
+        ../../firmware/components/serial_service/deck_serial_router.cpp
+        ../../firmware/components/serial_service/deck_serial_usb_bridge.cpp
+    INCLUDE_DIRS ../../firmware/components/serial_service/include
+)
+deck_add_host_test(
     test_pcf85063
     SOURCES
         test_pcf85063.cpp
@@ -265,4 +273,8 @@ add_test(
 add_test(
     NAME companion_native_smoke_contract
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_smoke_companion_artifact.py
+)
+add_test(
+    NAME serial_release_config_contract
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_serial_release_config.py
 )

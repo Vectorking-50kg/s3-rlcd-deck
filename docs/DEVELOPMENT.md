@@ -823,12 +823,18 @@ V1 使用 ESP32-S3 USB Serial/JTAG 的单 CDC 通道作为目标串口桥：
 - 发布固件诊断走 Web/内存诊断环。开发/HIL 构建可临时启用结构化 USB `boot_ok`，仅用于启动验收，并在发布配置中关闭。
 - 目标 UART 不使用 U0TXD；USB console/ROM 输出不会通过 GPIO17 注入目标设备。
 - USB sink 独立任务处理，不能从 UART RX 同步写 USB。
-- 电脑未打开端口时只允许 USB sink 自身丢弃。
+- USB source 同样使用独立任务读取原始字节；只有 owner task 可把固定队列中的字节写入 UART1。
+- 读取 USB 前即记录当时的 Owner generation；提交 UART 前必须再次完全匹配，跨越 `USB → WEB → USB` 的读取同样拒绝。
+- `WEB TX` 期间读到的字节只累计 rejected，不会在 Lease 回退后补发。
+- UART1 TX 使用无软件 TX ring 的非阻塞 FIFO 部分写；Owner 切换清除所有尚未交给硬件的 source block。
+- USB Serial/JTAG 驱动使用固定 4 KiB RX/TX ring；电脑未打开或占用端口时只允许 USB sink 自身背压、覆盖最旧块。
+- USB 断开不结束 Serial Session；已复制的单个部分写 block 可在重连后继续，退出会清零并释放。
 - 不烧不可逆 USB eFuse。
 - 设备复位产生的 ROM USB 启动文字不作为 V1 问题处理；正常工作时先启动设备，再进入串口页。
 - 关闭可能让 USB 断开的睡眠模式。
 
 发布版若未来需要双 CDC 或从枚举开始完全隔离启动文字，再单独评估 TinyUSB；不在 V1 同时维护两套 USB 方案。
+开发/HIL 配置占用同一个 CDC 发送结构化诊断，因此显式禁用目标桥；USB bridge 的实机验收必须使用关闭 diagnostic console 的 release artifact。
 
 ## 13. 固件架构
 
