@@ -77,7 +77,7 @@ func TestOTAHTTPRequiresPreviewAndExplicitConfirmation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer service.Close()
-	application := &Runtime{ota: service}
+	application := &Runtime{ota: service, sessions: newManagementSessions()}
 
 	previewRequest := httptest.NewRequest(http.MethodPost, "/api/v1/ota/preview", bytes.NewReader(signedHTTPArchive(t, key)))
 	previewRequest.Header.Set("Content-Type", "application/vnd.s3deck.ota+json")
@@ -124,5 +124,27 @@ func TestOTAHTTPRequiresPreviewAndExplicitConfirmation(t *testing.T) {
 			t.Fatal("confirmed apply did not send exactly one OTA offer")
 		}
 		time.Sleep(time.Millisecond)
+	}
+
+	secondPreviewRequest := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/ota/preview",
+		bytes.NewReader(signedHTTPArchive(t, key)),
+	)
+	secondPreviewRequest.Header.Set("Content-Type", "application/vnd.s3deck.ota+json")
+	secondPreviewResponse := httptest.NewRecorder()
+	application.handleOTAPreview(secondPreviewResponse, secondPreviewRequest)
+	if err = json.Unmarshal(secondPreviewResponse.Body.Bytes(), &preview); err != nil || preview.Receipt == "" {
+		t.Fatalf("decode second preview: %v", err)
+	}
+	logoutResponse := httptest.NewRecorder()
+	logoutRequest := httptest.NewRequest(http.MethodPost, "/api/v1/logout", nil)
+	logoutRequest.AddCookie(&http.Cookie{Name: managementSessionCookie, Value: "test-session"})
+	application.handleLogout(logoutResponse, logoutRequest)
+	if logoutResponse.Code != http.StatusNoContent {
+		t.Fatalf("logout = %d", logoutResponse.Code)
+	}
+	if response := apply(true); response.Code != http.StatusBadRequest {
+		t.Fatalf("apply after logout = %d, want %d", response.Code, http.StatusBadRequest)
 	}
 }

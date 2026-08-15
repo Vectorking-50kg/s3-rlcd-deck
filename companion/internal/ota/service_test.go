@@ -273,6 +273,67 @@ func TestTransactionHasAnIndependentTotalDeadline(t *testing.T) {
 	}
 }
 
+func TestExpiredAndExplicitlyRevokedPreviewsClearVolatileImageBytes(t *testing.T) {
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	service, err := New(Config{
+		Sender: &silentSender{}, Keys: map[uint32]*ecdsa.PublicKey{7: &key.PublicKey},
+		ReceiptTTL: 10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	preview, err := service.Preview(signedArchive(
+		t, key, "0.3.0", devicelink.BoardESP32S3RLCD42, []byte("expiring-image"),
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.mu.Lock()
+	expiredBytes := service.receipts[preview.Receipt].archive.Image
+	service.mu.Unlock()
+	deadline := time.Now().Add(time.Second)
+	for {
+		service.mu.Lock()
+		remaining := len(service.receipts)
+		service.mu.Unlock()
+		if remaining == 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	service.mu.Lock()
+	remaining := len(service.receipts)
+	service.mu.Unlock()
+	if remaining != 0 {
+		t.Fatal("expired preview remained resident without another request")
+	}
+	for _, value := range expiredBytes {
+		if value != 0 {
+			t.Fatal("expired image bytes were not cleared")
+		}
+	}
+
+	preview, err = service.Preview(signedArchive(
+		t, key, "0.3.1", devicelink.BoardESP32S3RLCD42, []byte("revoked-image"),
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.mu.Lock()
+	revokedBytes := service.receipts[preview.Receipt].archive.Image
+	service.mu.Unlock()
+	service.RevokePreviews()
+	if err = service.Apply(preview.Receipt, "deck-a1b2c3d4"); !errors.Is(err, ErrInvalidReceipt) {
+		t.Fatalf("revoked receipt error = %v", err)
+	}
+	for _, value := range revokedBytes {
+		if value != 0 {
+			t.Fatal("revoked image bytes were not cleared")
+		}
+	}
+}
+
 func TestProductionKeyMatchesAuthoritativeCatalog(t *testing.T) {
 	_, source, _, ok := runtime.Caller(0)
 	if !ok {

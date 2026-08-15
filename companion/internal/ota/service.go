@@ -124,6 +124,7 @@ type Service struct {
 	transactionTimeout time.Duration
 	ctx                context.Context
 	cancel             context.CancelFunc
+	receiptWake        chan struct{}
 	closeOnce          sync.Once
 	wg                 sync.WaitGroup
 
@@ -166,13 +167,17 @@ func New(config Config) (*Service, error) {
 		keys[id] = &ecdsa.PublicKey{Curve: elliptic.P256(), X: new(big.Int).Set(key.X), Y: new(big.Int).Set(key.Y)}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Service{
+	service := &Service{
 		sender: config.Sender, keys: keys, now: config.Now,
 		receiptTTL: config.ReceiptTTL, resultTimeout: config.ResultTimeout,
 		transactionTimeout: config.TransactionTimeout,
-		ctx:                ctx, cancel: cancel, receipts: make(map[string]receiptEntry),
-		active: make(map[string]*transaction), statuses: make(map[string]Status),
-	}, nil
+		ctx:                ctx, cancel: cancel, receiptWake: make(chan struct{}, 1),
+		receipts: make(map[string]receiptEntry),
+		active:   make(map[string]*transaction), statuses: make(map[string]Status),
+	}
+	service.wg.Add(1)
+	go service.expireReceipts()
+	return service, nil
 }
 
 func productionKeys() map[uint32]*ecdsa.PublicKey {
@@ -275,6 +280,7 @@ func (service *Service) Preview(document []byte) (Preview, error) {
 		return Preview{}, errors.New("OTA preview capacity reached")
 	}
 	service.receipts[receipt] = receiptEntry{archive: archive, expiresAt: now.Add(service.receiptTTL)}
+	service.wakeReceiptExpiry()
 	return Preview{
 		Receipt: receipt, Version: archive.Manifest.Version, Board: archive.Manifest.Board,
 		ImageLength: archive.Manifest.ImageLength, ImageSHA256: archive.Manifest.ImageSHA256,
@@ -485,6 +491,77 @@ func (service *Service) pruneReceiptsLocked(now time.Time) {
 			delete(service.receipts, receipt)
 		}
 	}
+}
+
+func (service *Service) wakeReceiptExpiry() {
+	select {
+	case service.receiptWake <- struct{}{}:
+	default:
+	}
+}
+
+func (service *Service) expireReceipts() {
+	defer service.wg.Done()
+	for {
+		service.mu.Lock()
+		if service.closed {
+			service.mu.Unlock()
+			return
+		}
+		now := service.now().UTC()
+		service.pruneReceiptsLocked(now)
+		var next time.Time
+		for _, entry := range service.receipts {
+			if next.IsZero() || entry.expiresAt.Before(next) {
+				next = entry.expiresAt
+			}
+		}
+		service.mu.Unlock()
+
+		if next.IsZero() {
+			select {
+			case <-service.ctx.Done():
+				return
+			case <-service.receiptWake:
+				continue
+			}
+		}
+		wait := next.Sub(now)
+		if wait < 0 {
+			wait = 0
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-service.ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return
+		case <-service.receiptWake:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+		case <-timer.C:
+		}
+	}
+}
+
+// RevokePreviews clears every unconsumed preview capability and its volatile
+// archive bytes. An already-confirmed transaction remains owned by its worker.
+func (service *Service) RevokePreviews() {
+	service.mu.Lock()
+	for receipt, entry := range service.receipts {
+		destroyArchive(&entry.archive)
+		delete(service.receipts, receipt)
+	}
+	service.mu.Unlock()
+	service.wakeReceiptExpiry()
 }
 
 func (service *Service) Close() {

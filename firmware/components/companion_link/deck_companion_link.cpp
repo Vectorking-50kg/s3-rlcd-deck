@@ -300,6 +300,9 @@ void disconnect_transport(deck_companion_link_t *link)
     }
     // Retire the data source before any bounded queue wait or transport
     // teardown. UI readers must observe STALE for the whole switch window.
+    if (link->ota != nullptr && !deck_ota_service_abort_transport(link->ota)) {
+        increment_error(link);
+    }
     (void)begin_serial_transport_revoke(link);
     if (client != nullptr) {
         (void)esp_websocket_client_stop(client);

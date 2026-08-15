@@ -24,10 +24,11 @@ constexpr uint64_t kInactivityTimeoutMs = 30'000;
 constexpr uint64_t kTransactionTimeoutMs = 10 * 60'000;
 constexpr TickType_t kQueueTicks = pdMS_TO_TICKS(2'000);
 constexpr EventBits_t kStoppedBit = BIT0;
+constexpr EventBits_t kTransportAbortCompleteBit = BIT1;
 constexpr EventBits_t kBootGuardStoppedBit = BIT0;
 constexpr uint8_t kManifestMagic[] = {'S', '3', 'R', 'L', 'C', 'D', 'O', 'T', 'A', '1'};
 
-enum class CommandKind : uint8_t { offer, chunk, stop };
+enum class CommandKind : uint8_t { offer, chunk, abort_transport, stop };
 
 struct Command {
     CommandKind kind = CommandKind::stop;
@@ -86,6 +87,8 @@ struct deck_ota_service {
     bool hash_active = false;
     char running_version[DECK_OTA_VERSION_CAPACITY]{};
     char active_transaction_id[DECK_OTA_TRANSACTION_ID_CAPACITY]{};
+    char aborted_transaction_id[DECK_OTA_TRANSACTION_ID_CAPACITY]{};
+    std::atomic<bool> transport_abort_requested{false};
 };
 
 struct deck_ota_boot_guard {
@@ -286,12 +289,40 @@ deck_ota_transaction_t *create_transaction(deck_ota_service_t *service)
     return deck_ota_transaction_create(&service->transaction_options);
 }
 
+void abort_transport_transaction(deck_ota_service_t *service)
+{
+    if (service->active_transaction_id[0] != '\0') {
+        std::memcpy(
+            service->aborted_transaction_id,
+            service->active_transaction_id,
+            sizeof(service->aborted_transaction_id)
+        );
+    }
+    if (service->transaction != nullptr) {
+        deck_ota_transaction_destroy(service->transaction);
+        service->transaction = nullptr;
+    }
+    secure_clear(
+        service->active_transaction_id,
+        sizeof(service->active_transaction_id)
+    );
+    secure_clear(&service->adapter_manifest, sizeof(service->adapter_manifest));
+    deck_ota_service_result_t stale{};
+    while (xQueueReceive(service->results, &stale, 0) == pdTRUE) {
+        secure_clear(&stale, sizeof(stale));
+    }
+    xEventGroupSetBits(service->lifecycle, kTransportAbortCompleteBit);
+}
+
 void publish_result(
     deck_ota_service_t *service,
     const char *transaction_id,
     deck_ota_result_t result
 )
 {
+    if (service->transport_abort_requested.load(std::memory_order_acquire)) {
+        return;
+    }
     deck_ota_service_result_t event{};
     std::memcpy(
         event.transaction_id,
@@ -313,6 +344,9 @@ void publish_rejection(
     deck_ota_result_t result
 )
 {
+    if (service->transport_abort_requested.load(std::memory_order_acquire)) {
+        return;
+    }
     deck_ota_service_result_t event{};
     std::memcpy(
         event.transaction_id,
@@ -328,6 +362,12 @@ void ota_task(void *context)
 {
     auto *service = static_cast<deck_ota_service_t *>(context);
     while (true) {
+        if (service->transport_abort_requested.exchange(
+                false,
+                std::memory_order_acq_rel
+            )) {
+            abort_transport_transaction(service);
+        }
         Command command{};
         if (xQueueReceive(service->commands, &command, pdMS_TO_TICKS(250)) !=
             pdTRUE) {
@@ -354,11 +394,30 @@ void ota_task(void *context)
             }
             continue;
         }
+        if (service->transport_abort_requested.exchange(
+                false,
+                std::memory_order_acq_rel
+            )) {
+            abort_transport_transaction(service);
+            if (command.kind != CommandKind::stop) {
+                secure_clear(&command, sizeof(command));
+                continue;
+            }
+        }
         if (command.kind == CommandKind::stop) {
             secure_clear(&command, sizeof(command));
             break;
         }
+        if (command.kind == CommandKind::abort_transport) {
+            abort_transport_transaction(service);
+            secure_clear(&command, sizeof(command));
+            continue;
+        }
         if (command.kind == CommandKind::offer) {
+            secure_clear(
+                service->aborted_transaction_id,
+                sizeof(service->aborted_transaction_id)
+            );
             if (service->transaction != nullptr) {
                 deck_ota_transaction_snapshot_t active{};
                 if (deck_ota_transaction_snapshot(service->transaction, &active) &&
@@ -397,6 +456,13 @@ void ota_task(void *context)
                 );
             }
         } else {
+            if (std::strcmp(
+                    service->aborted_transaction_id,
+                    command.transaction_id
+                ) == 0) {
+                secure_clear(&command, sizeof(command));
+                continue;
+            }
             if (service->transaction == nullptr ||
                 std::strcmp(
                     service->active_transaction_id,
@@ -548,6 +614,7 @@ bool deck_ota_service_stop(deck_ota_service_t *service)
     secure_clear(service->adapter_manifest.signature, sizeof(service->adapter_manifest.signature));
     secure_clear(service->running_version, sizeof(service->running_version));
     secure_clear(service->active_transaction_id, sizeof(service->active_transaction_id));
+    secure_clear(service->aborted_transaction_id, sizeof(service->aborted_transaction_id));
     delete service;
     return true;
 }
@@ -603,6 +670,30 @@ bool deck_ota_service_poll_result(
 {
     return service != nullptr && result != nullptr &&
            xQueueReceive(service->results, result, 0) == pdTRUE;
+}
+
+bool deck_ota_service_abort_transport(deck_ota_service_t *service)
+{
+    if (service == nullptr) {
+        return true;
+    }
+    xEventGroupClearBits(service->lifecycle, kTransportAbortCompleteBit);
+    service->transport_abort_requested.store(true, std::memory_order_release);
+    Command command{};
+    command.kind = CommandKind::abort_transport;
+    // The atomic request is authoritative; the front-queued command only wakes
+    // a worker blocked in xQueueReceive sooner. A full queue is safe because the
+    // worker checks the request before and after every receive.
+    (void)xQueueSendToFront(service->commands, &command, 0);
+    const EventBits_t completed = xEventGroupWaitBits(
+        service->lifecycle,
+        kTransportAbortCompleteBit,
+        pdFALSE,
+        pdTRUE,
+        kQueueTicks
+    );
+    secure_clear(&command, sizeof(command));
+    return (completed & kTransportAbortCompleteBit) != 0;
 }
 
 deck_ota_boot_guard_t *deck_ota_boot_guard_start(uint64_t deadline_ms)

@@ -39,6 +39,11 @@ bool deck_ota_service_poll_result(
     deck_ota_service_t *service,
     deck_ota_service_result_t *result
 );
+/*
+ * Cancels the active write and clears queued results before a replacement
+ * authenticated transport may become authoritative.
+ */
+bool deck_ota_service_abort_transport(deck_ota_service_t *service);
 
 /*
  * Starts a first-boot rollback guard only for ESP_OTA_IMG_PENDING_VERIFY.

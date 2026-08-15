@@ -184,7 +184,8 @@ The management Web exposes a side-effect-free `POST /api/v1/ota/preview`, explic
 complete signed archive and retains at most eight short-lived receipts in memory; it sends no bytes
 to a Deck. Apply consumes one receipt, permits one global OTA transaction, and streams 3072-byte
 chunks only after the exact prior `ota.result`. Archive, image, signature, and receipt ownership is
-cleared on terminal failure, success, expiry, logout, or Runtime shutdown. The Web uses a second
+cleared on terminal failure, success, or Runtime shutdown. Unconsumed preview archives and receipts
+are cleared at expiry or logout. The Web uses a second
 danger confirmation and never offers background or silent updates. Each transaction has an
 independent ten-minute total deadline in addition to the per-result timeout.
 

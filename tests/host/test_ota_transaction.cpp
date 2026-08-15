@@ -302,6 +302,18 @@ void continuous_activity_cannot_extend_the_total_deadline()
     deck_ota_transaction_destroy(transaction);
 }
 
+void transport_disconnect_aborts_open_flash_without_selecting_boot()
+{
+    FakeAdapters fake;
+    deck_ota_transaction_t *transaction = create_transaction(&fake);
+    const std::vector<uint8_t> image = {1, 2, 3, 4};
+    const auto manifest = manifest_for(image);
+    assert(deck_ota_transaction_offer(transaction, &manifest, 1) == DECK_OTA_OK);
+    deck_ota_transaction_destroy(transaction);
+    assert(fake.abort_count == 1);
+    assert(fake.select_count == 0);
+}
+
 }  // namespace
 
 int main()
@@ -311,5 +323,6 @@ int main()
     interruption_mismatch_and_flash_failure_keep_old_boot_slot();
     offsets_and_final_length_are_fail_closed();
     continuous_activity_cannot_extend_the_total_deadline();
+    transport_disconnect_aborts_open_flash_without_selecting_boot();
     return 0;
 }

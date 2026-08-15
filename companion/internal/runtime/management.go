@@ -315,6 +315,9 @@ func (application *Runtime) handleSessionRefresh(response http.ResponseWriter, r
 func (application *Runtime) handleLogout(response http.ResponseWriter, request *http.Request) {
 	cookie, _ := request.Cookie(managementSessionCookie)
 	application.sessions.revoke(cookie.Value)
+	if application.ota != nil {
+		application.ota.RevokePreviews()
+	}
 	http.SetCookie(response, &http.Cookie{
 		Name:     managementSessionCookie,
 		Path:     "/",
