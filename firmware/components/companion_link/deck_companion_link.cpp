@@ -1,9 +1,11 @@
 #include "deck_companion_link.h"
 
 #include "deck_ai_snapshot_store_nvs.h"
+#include "deck_companion_failover.h"
 #include "deck_companion_link_frame.h"
 #include "deck_companion_link_message.h"
 #include "deck_companion_link_timing.h"
+#include "deck_companion_transport_authority.h"
 #include "deck_companion_pairing_esp.h"
 #include "deck_device_protocol.h"
 #include "deck_serial_frame.h"
@@ -52,12 +54,18 @@ enum class TransportEventType : uint8_t {
 
 struct TransportEvent {
     TransportEventType type = TransportEventType::wake;
+    uint32_t transport_generation = 0;
     int payload_length = 0;
     int payload_offset = 0;
     uint8_t opcode = 0;
     bool final = false;
     size_t data_size = 0;
     char data[kFrameChunkBytes]{};
+};
+
+struct TransportCallbackContext {
+    deck_companion_link_t *link = nullptr;
+    std::atomic<uint32_t> generation{0};
 };
 
 void secure_clear(void *value, size_t size)
@@ -139,7 +147,10 @@ struct deck_companion_link {
     std::unique_ptr<char[]> frame;
     deck_companion_link_frame_t frame_assembler{};
     deck_ai_snapshot_store_t *snapshots = nullptr;
-    uint32_t observed_profile_generation = 0;
+    deck_companion_failover_t failover{};
+    deck_companion_profiles_snapshot_t profiles_snapshot{};
+    bool has_profiles_snapshot = false;
+    uint32_t target_profile_generation = 0;
     uint64_t next_profile_poll_ms = 0;
     uint64_t next_connect_ms = 0;
     deck_companion_link_timing_t timing{};
@@ -148,7 +159,10 @@ struct deck_companion_link {
     bool has_server_monotonic = false;
     deck_companion_trusted_clock_t trusted_clock{};
     std::atomic<bool> stop_requested{false};
-    std::atomic<bool> queue_overflow{false};
+    std::atomic<uint32_t> queue_overflow_generation{0};
+    uint32_t transport_generation = 0;
+    TransportCallbackContext transport_callback{};
+    deck_companion_transport_authority_t transport_authority{};
     mutable std::mutex mutex;
     deck_companion_link_snapshot_t snapshot{};
     std::mutex serial_mutex;
@@ -164,10 +178,17 @@ struct deck_companion_link {
     uint64_t sent_serial_session_id = 0;
     uint64_t sent_serial_sequence = 0;
     deck_serial_frame_order_t accepted_web_order{};
-    uint64_t next_serial_revoke_ms = 0;
+    uint64_t pending_serial_revoke_epoch = 0;
+    bool serial_transport_fenced = false;
 };
 
 namespace {
+
+bool advance_failover(
+    deck_companion_link_t *link,
+    uint64_t now,
+    deck_companion_failover_event_t event
+);
 
 void update_state(deck_companion_link_t *link, deck_companion_link_state_t state)
 {
@@ -195,33 +216,55 @@ bool sequence_after(uint64_t candidate, uint64_t previous)
     return difference != 0 && difference < (UINT64_C(1) << 63U);
 }
 
-bool ensure_web_owner_revoked(deck_companion_link_t *link, uint64_t now_ms)
+bool begin_serial_transport_revoke(deck_companion_link_t *link)
 {
     const std::lock_guard<std::mutex> lock(link->serial_mutex);
     if (link->serial == nullptr) {
+        link->pending_serial_revoke_epoch = 0;
+        link->serial_transport_fenced = true;
         return true;
     }
-    deck_serial_session_snapshot_t serial{};
-    if (!deck_serial_service_snapshot(link->serial, &serial)) {
-        return false;
-    }
-    if (serial.state != DECK_SERIAL_WEB_TX) {
-        link->next_serial_revoke_ms = 0;
+    if (link->pending_serial_revoke_epoch != 0) {
         return true;
     }
-    if (serial.session_id == 0 || serial.lease_id == 0) {
+    return deck_serial_service_revoke_web_transport(
+        link->serial,
+        &link->pending_serial_revoke_epoch
+    );
+}
+
+bool serial_transport_revoked(deck_companion_link_t *link)
+{
+    const std::lock_guard<std::mutex> lock(link->serial_mutex);
+    if (link->serial == nullptr) {
+        link->pending_serial_revoke_epoch = 0;
+        link->serial_transport_fenced = true;
+        return true;
+    }
+    if (link->pending_serial_revoke_epoch == 0) {
         return false;
     }
-    if (now_ms >= link->next_serial_revoke_ms) {
-        if (deck_serial_service_web_disconnect(
+    if (deck_serial_service_web_transport_revoked(
             link->serial,
-            serial.session_id,
-            serial.lease_id
+            link->pending_serial_revoke_epoch
         )) {
-            link->next_serial_revoke_ms = now_ms + 100U;
-        }
+        link->pending_serial_revoke_epoch = 0;
+        link->serial_transport_fenced = true;
+        return true;
     }
     return false;
+}
+
+bool ensure_serial_transport_revoked(deck_companion_link_t *link)
+{
+    {
+        const std::lock_guard<std::mutex> lock(link->serial_mutex);
+        if (link->serial_transport_fenced) {
+            return true;
+        }
+    }
+    return begin_serial_transport_revoke(link) &&
+           serial_transport_revoked(link);
 }
 
 void clear_secret(deck_companion_link_t *link)
@@ -234,10 +277,26 @@ void clear_secret(deck_companion_link_t *link)
 
 void disconnect_transport(deck_companion_link_t *link)
 {
-    link->next_serial_revoke_ms = 0;
-    (void)ensure_web_owner_revoked(link, monotonic_ms());
+    {
+        const std::lock_guard<std::mutex> lock(link->serial_mutex);
+        link->serial_transport_fenced = false;
+    }
     esp_websocket_client_handle_t client = link->client;
     link->client = nullptr;
+    {
+        const std::lock_guard<std::mutex> lock(link->mutex);
+        ++link->transport_generation;
+        if (link->transport_generation == 0) {
+            ++link->transport_generation;
+        }
+        deck_companion_transport_invalidate(&link->transport_authority);
+        link->snapshot.state = link->snapshot.has_active_profile
+                                   ? DECK_COMPANION_LINK_OFFLINE
+                                   : DECK_COMPANION_LINK_UNPAIRED;
+    }
+    // Retire the data source before any bounded queue wait or transport
+    // teardown. UI readers must observe STALE for the whole switch window.
+    (void)begin_serial_transport_revoke(link);
     if (client != nullptr) {
         (void)esp_websocket_client_stop(client);
         (void)esp_websocket_client_destroy(client);
@@ -273,6 +332,11 @@ void schedule_retry(deck_companion_link_t *link, uint64_t now, bool failure)
         link->snapshot.state = DECK_COMPANION_LINK_OFFLINE;
     }
     link->next_connect_ms = now + deck_companion_link_retry_delay_ms(attempts);
+    (void)advance_failover(
+        link,
+        now,
+        DECK_COMPANION_FAILOVER_TRANSPORT_FAILED
+    );
 }
 
 void websocket_event(
@@ -282,11 +346,18 @@ void websocket_event(
     void *event_data
 )
 {
-    auto *link = static_cast<deck_companion_link_t *>(argument);
-    if (link == nullptr || link->stop_requested.load(std::memory_order_acquire)) {
+    const auto *callback = static_cast<const TransportCallbackContext *>(argument);
+    deck_companion_link_t *link = callback != nullptr ? callback->link : nullptr;
+    const uint32_t callback_generation =
+        callback != nullptr
+            ? callback->generation.load(std::memory_order_acquire)
+            : 0;
+    if (link == nullptr || callback_generation == 0 ||
+        link->stop_requested.load(std::memory_order_acquire)) {
         return;
     }
     TransportEvent event{};
+    event.transport_generation = callback_generation;
     if (event_id == WEBSOCKET_EVENT_CONNECTED) {
         event.type = TransportEventType::connected;
     } else if (event_id == WEBSOCKET_EVENT_DISCONNECTED ||
@@ -299,7 +370,10 @@ void websocket_event(
             return;
         }
         if (data->data_len < 0 || static_cast<size_t>(data->data_len) > sizeof(event.data)) {
-            link->queue_overflow.store(true, std::memory_order_release);
+            link->queue_overflow_generation.store(
+                callback_generation,
+                std::memory_order_release
+            );
             return;
         }
         event.type = TransportEventType::data;
@@ -318,7 +392,10 @@ void websocket_event(
                                       ? kReceiveBackpressureTicks
                                       : 0;
     if (xQueueSend(link->events, &event, queue_wait) != pdPASS) {
-        link->queue_overflow.store(true, std::memory_order_release);
+        link->queue_overflow_generation.store(
+            callback_generation,
+            std::memory_order_release
+        );
     }
 }
 
@@ -399,22 +476,56 @@ bool start_transport(deck_companion_link_t *link)
     config.ping_interval_sec = 10;
     config.pingpong_timeout_sec = 30;
     esp_websocket_client_handle_t client = esp_websocket_client_init(&config);
-    bool started = client != nullptr &&
-                   esp_websocket_register_events(
-                       client,
-                       WEBSOCKET_EVENT_ANY,
-                       websocket_event,
-                       link
-                   ) == ESP_OK &&
-                   esp_websocket_client_start(client) == ESP_OK;
+    bool started = false;
+    if (client != nullptr) {
+        uint32_t generation = 0;
+        {
+            const std::lock_guard<std::mutex> lock(link->mutex);
+            ++link->transport_generation;
+            if (link->transport_generation == 0) {
+                ++link->transport_generation;
+            }
+            generation = link->transport_generation;
+            if (!deck_companion_transport_begin(
+                    &link->transport_authority,
+                    generation
+                )) {
+                secure_clear(headers, sizeof(headers));
+                (void)esp_websocket_client_destroy(client);
+                return false;
+            }
+        }
+        link->transport_callback.generation.store(
+            generation,
+            std::memory_order_release
+        );
+        link->client = client;
+        started = esp_websocket_register_events(
+                      client,
+                      WEBSOCKET_EVENT_ANY,
+                      websocket_event,
+                      &link->transport_callback
+                  ) == ESP_OK &&
+                  esp_websocket_client_start(client) == ESP_OK;
+    }
     secure_clear(headers, sizeof(headers));
     if (!started) {
         if (client != nullptr) {
+            if (link->client == client) {
+                link->client = nullptr;
+            }
             (void)esp_websocket_client_destroy(client);
+        }
+        {
+            const std::lock_guard<std::mutex> lock(link->mutex);
+            ++link->transport_generation;
+            if (link->transport_generation == 0) {
+                ++link->transport_generation;
+            }
+            deck_companion_transport_invalidate(&link->transport_authority);
         }
         return false;
     }
-    link->client = client;
     update_state(link, DECK_COMPANION_LINK_CONNECTING);
     return true;
 }
@@ -877,6 +988,111 @@ bool send_heartbeat(deck_companion_link_t *link, uint64_t now)
            send_text(link, message, static_cast<size_t>(size));
 }
 
+void publish_profiles(
+    deck_companion_link_t *link,
+    const deck_companion_profiles_snapshot_t &profiles
+)
+{
+    const std::lock_guard<std::mutex> lock(link->mutex);
+    link->snapshot.has_active_profile = profiles.has_active;
+    link->snapshot.profile_generation = profiles.generation;
+    std::memset(
+        link->snapshot.active_profile_id,
+        0,
+        sizeof(link->snapshot.active_profile_id)
+    );
+    if (profiles.has_active) {
+        std::memcpy(
+            link->snapshot.active_profile_id,
+            profiles.active_profile_id,
+            sizeof(link->snapshot.active_profile_id)
+        );
+    } else {
+        link->snapshot.state = DECK_COMPANION_LINK_UNPAIRED;
+        link->snapshot.failover_active = false;
+        std::memset(
+            link->snapshot.connection_profile_id,
+            0,
+            sizeof(link->snapshot.connection_profile_id)
+        );
+    }
+}
+
+bool connect_failover_target(
+    deck_companion_link_t *link,
+    const deck_companion_failover_action_t &action,
+    uint64_t now
+)
+{
+    std::unique_ptr<deck_companion_profile_secret_t> secret(
+        new (std::nothrow) deck_companion_profile_secret_t{}
+    );
+    if (secret == nullptr ||
+        !deck_companion_profiles_secret_for(
+            link->profiles,
+            action.profile_id,
+            action.profile_generation,
+            secret.get()
+        )) {
+        if (secret != nullptr) {
+            deck_companion_profile_secret_clear(secret.get());
+        }
+        increment_error(link);
+        return false;
+    }
+    disconnect_transport(link);
+    clear_secret(link);
+    link->secret = std::move(secret);
+    link->target_profile_generation = action.profile_generation;
+    link->next_connect_ms = now;
+    {
+        const std::lock_guard<std::mutex> lock(link->mutex);
+        link->snapshot.state = DECK_COMPANION_LINK_OFFLINE;
+        link->snapshot.reconnect_attempts = 0;
+        link->snapshot.failover_active =
+            std::strcmp(action.profile_id, link->snapshot.active_profile_id) != 0;
+        std::memcpy(
+            link->snapshot.connection_profile_id,
+            action.profile_id,
+            sizeof(link->snapshot.connection_profile_id)
+        );
+    }
+    return true;
+}
+
+bool advance_failover(
+    deck_companion_link_t *link,
+    uint64_t now,
+    deck_companion_failover_event_t event
+)
+{
+    if (!link->has_profiles_snapshot) {
+        return true;
+    }
+    deck_companion_failover_action_t action{};
+    if (!deck_companion_failover_advance(
+            &link->failover,
+            &link->profiles_snapshot,
+            now,
+            event,
+            &action
+        )) {
+        increment_error(link);
+        link->failover.initialized = false;
+        return false;
+    }
+    if (action.kind == DECK_COMPANION_FAILOVER_CONNECT) {
+        const bool connected = connect_failover_target(link, action, now);
+        if (!connected) {
+            link->failover.initialized = false;
+        }
+        return connected;
+    }
+    const std::lock_guard<std::mutex> lock(link->mutex);
+    link->snapshot.failover_active = link->failover.round_active;
+    return true;
+}
+
 bool refresh_profile(deck_companion_link_t *link, uint64_t now)
 {
     deck_companion_profiles_snapshot_t profiles{};
@@ -884,52 +1100,115 @@ bool refresh_profile(deck_companion_link_t *link, uint64_t now)
         increment_error(link);
         return false;
     }
-    const bool changed = profiles.generation != link->observed_profile_generation ||
-                         profiles.has_active !=
-                             (link->secret != nullptr);
-    if (!changed) {
-        return true;
-    }
-    disconnect_transport(link);
-    clear_secret(link);
-    link->observed_profile_generation = profiles.generation;
-    {
-        const std::lock_guard<std::mutex> lock(link->mutex);
-        link->snapshot.has_active_profile = profiles.has_active;
-        link->snapshot.profile_generation = profiles.generation;
-        link->snapshot.reconnect_attempts = 0;
-        std::memset(
-            link->snapshot.active_profile_id,
-            0,
-            sizeof(link->snapshot.active_profile_id)
-        );
-        if (profiles.has_active) {
-            std::memcpy(
-                link->snapshot.active_profile_id,
-                profiles.active_profile_id,
-                sizeof(link->snapshot.active_profile_id)
-            );
-            link->snapshot.state = DECK_COMPANION_LINK_OFFLINE;
-        } else {
-            link->snapshot.state = DECK_COMPANION_LINK_UNPAIRED;
-        }
-    }
+    link->profiles_snapshot = profiles;
+    link->has_profiles_snapshot = true;
+    publish_profiles(link, profiles);
     if (!profiles.has_active) {
+        if (link->client != nullptr || link->secret != nullptr ||
+            link->target_profile_generation != 0) {
+            disconnect_transport(link);
+        }
+        clear_secret(link);
+        link->target_profile_generation = 0;
+        (void)advance_failover(
+            link,
+            now,
+            DECK_COMPANION_FAILOVER_PROFILES_OBSERVED
+        );
         return true;
     }
-    std::unique_ptr<deck_companion_profile_secret_t> secret(
-        new (std::nothrow) deck_companion_profile_secret_t{}
+    return advance_failover(
+        link,
+        now,
+        DECK_COMPANION_FAILOVER_PROFILES_OBSERVED
     );
-    if (secret == nullptr ||
-        !deck_companion_profiles_active_secret(link->profiles, secret.get())) {
-        if (secret != nullptr) {
-            deck_companion_profile_secret_clear(secret.get());
-        }
-        increment_error(link);
+}
+
+bool transport_allows(
+    const deck_companion_link_t *link,
+    deck_companion_transport_message_t message
+)
+{
+    const std::lock_guard<std::mutex> lock(link->mutex);
+    return deck_companion_transport_allows(
+        &link->transport_authority,
+        link->transport_generation,
+        message
+    );
+}
+
+bool accept_heartbeat(
+    deck_companion_link_t *link,
+    const deck_device_heartbeat_t &heartbeat,
+    uint64_t now
+)
+{
+    const bool first_valid_heartbeat = !transport_allows(
+        link,
+        DECK_COMPANION_TRANSPORT_AI_SNAPSHOT
+    );
+    if (first_valid_heartbeat && link->secret == nullptr) {
         return false;
     }
-    link->secret = std::move(secret);
-    link->next_connect_ms = now;
+    if (first_valid_heartbeat) {
+        const deck_companion_profile_update_result_t activated =
+            deck_companion_profiles_activate_on_success(
+                link->profiles,
+                link->secret->profile_id,
+                link->target_profile_generation,
+                heartbeat.utc_unix_ms
+            );
+        if (activated == DECK_COMPANION_PROFILE_STALE_GENERATION) {
+            return refresh_profile(link, now);
+        }
+        if (activated != DECK_COMPANION_PROFILE_UPDATED) {
+            increment_error(link);
+            return false;
+        }
+        deck_companion_profiles_snapshot_t profiles{};
+        if (!deck_companion_profiles_snapshot(link->profiles, &profiles)) {
+            increment_error(link);
+            return false;
+        }
+        link->profiles_snapshot = profiles;
+        link->has_profiles_snapshot = true;
+        link->target_profile_generation = profiles.generation;
+        publish_profiles(link, profiles);
+        if (!advance_failover(link, now, DECK_COMPANION_FAILOVER_ONLINE)) {
+            return false;
+        }
+        if (link->client == nullptr) {
+            return true;
+        }
+        {
+            const std::lock_guard<std::mutex> lock(link->mutex);
+            if (!deck_companion_transport_activate(
+                    &link->transport_authority,
+                    link->transport_generation
+                )) {
+                return false;
+            }
+        }
+    }
+    deck_companion_link_timing_server_heartbeat(
+        &link->timing,
+        now,
+        kHeartbeatIntervalMs
+    );
+    {
+        const std::lock_guard<std::mutex> lock(link->mutex);
+        link->server_utc_ms = heartbeat.utc_unix_ms;
+        link->server_monotonic_ms = heartbeat.monotonic_ms;
+        link->has_server_monotonic = true;
+        (void)deck_companion_trusted_clock_accept(
+            &link->trusted_clock,
+            heartbeat.utc_unix_ms,
+            now
+        );
+        link->snapshot.state = DECK_COMPANION_LINK_ONLINE;
+        link->snapshot.reconnect_attempts = 0;
+        link->snapshot.last_heartbeat_monotonic_ms = now;
+    }
     return true;
 }
 
@@ -958,11 +1237,16 @@ bool accept_data(deck_companion_link_t *link, const TransportEvent &event)
     const size_t message_size = link->frame_assembler.message_size;
     const uint8_t message_opcode = link->frame_assembler.message_opcode;
     if (message_opcode == 2U) {
-        const bool accepted = handle_serial_binary(
-            link,
-            reinterpret_cast<const uint8_t *>(link->frame.get()),
-            message_size
-        );
+        const bool accepted =
+            transport_allows(
+                link,
+                DECK_COMPANION_TRANSPORT_SERIAL_BINARY
+            ) &&
+            handle_serial_binary(
+                link,
+                reinterpret_cast<const uint8_t *>(link->frame.get()),
+                message_size
+            );
         secure_clear(link->frame.get(), message_size);
         deck_companion_link_frame_reset(&link->frame_assembler);
         return accepted;
@@ -973,6 +1257,27 @@ bool accept_data(deck_companion_link_t *link, const TransportEvent &event)
         return false;
     }
     link->frame[message_size] = '\0';
+    const uint64_t now = monotonic_ms();
+    deck_device_heartbeat_t heartbeat{};
+    if (deck_device_protocol_parse_heartbeat(
+            link->frame.get(),
+            message_size,
+            link->server_monotonic_ms,
+            link->has_server_monotonic,
+            &heartbeat
+        )) {
+        secure_clear(link->frame.get(), message_size + 1);
+        deck_companion_link_frame_reset(&link->frame_assembler);
+        return accept_heartbeat(link, heartbeat, now);
+    }
+    if (!transport_allows(
+            link,
+            DECK_COMPANION_TRANSPORT_AI_SNAPSHOT
+        )) {
+        secure_clear(link->frame.get(), message_size + 1);
+        deck_companion_link_frame_reset(&link->frame_assembler);
+        return false;
+    }
     bool serial_control_handled = false;
     const bool serial_control_accepted = handle_serial_control(
         link,
@@ -985,8 +1290,6 @@ bool accept_data(deck_companion_link_t *link, const TransportEvent &event)
         deck_companion_link_frame_reset(&link->frame_assembler);
         return serial_control_accepted;
     }
-    deck_device_heartbeat_t heartbeat{};
-    const uint64_t now = monotonic_ms();
     uint64_t trusted_utc_ms = 0;
     if (link->has_server_monotonic &&
         now >= link->timing.last_server_heartbeat_ms &&
@@ -1005,51 +1308,27 @@ bool accept_data(deck_companion_link_t *link, const TransportEvent &event)
             link->has_server_monotonic,
             &heartbeat
         );
-    if (message_result != DECK_COMPANION_SERVER_HEARTBEAT) {
-        secure_clear(link->frame.get(), message_size + 1);
-        deck_companion_link_frame_reset(&link->frame_assembler);
-        if (message_result ==
-            DECK_COMPANION_SERVER_AI_SNAPSHOT_STORAGE_DEGRADED) {
-            increment_error(link);
-            return true;
-        }
-        return message_result == DECK_COMPANION_SERVER_AI_SNAPSHOT;
-    }
     secure_clear(link->frame.get(), message_size + 1);
     deck_companion_link_frame_reset(&link->frame_assembler);
-    const bool first_valid_heartbeat =
-        link->timing.last_server_heartbeat_ms == 0 || !state_is_online(link);
-    deck_companion_link_timing_server_heartbeat(
-        &link->timing,
-        now,
-        kHeartbeatIntervalMs
-    );
+    const bool accepted_snapshot =
+        message_result == DECK_COMPANION_SERVER_AI_SNAPSHOT ||
+        message_result ==
+            DECK_COMPANION_SERVER_AI_SNAPSHOT_STORAGE_DEGRADED;
+    if (!accepted_snapshot || message_result == DECK_COMPANION_SERVER_HEARTBEAT) {
+        return false;
+    }
     {
         const std::lock_guard<std::mutex> lock(link->mutex);
-        link->server_utc_ms = heartbeat.utc_unix_ms;
-        link->server_monotonic_ms = heartbeat.monotonic_ms;
-        link->has_server_monotonic = true;
-        (void)deck_companion_trusted_clock_accept(
-            &link->trusted_clock,
-            heartbeat.utc_unix_ms,
-            now
-        );
-        link->snapshot.state = DECK_COMPANION_LINK_ONLINE;
-        link->snapshot.reconnect_attempts = 0;
-        link->snapshot.last_heartbeat_monotonic_ms = now;
-    }
-    if (first_valid_heartbeat && link->secret != nullptr) {
-        (void)deck_companion_profiles_record_success(
-            link->profiles,
-            link->secret->profile_id,
-            heartbeat.utc_unix_ms
-        );
-        deck_companion_profiles_snapshot_t profiles{};
-        if (deck_companion_profiles_snapshot(link->profiles, &profiles)) {
-            link->observed_profile_generation = profiles.generation;
-            const std::lock_guard<std::mutex> lock(link->mutex);
-            link->snapshot.profile_generation = profiles.generation;
+        if (!deck_companion_transport_accept_snapshot(
+                &link->transport_authority,
+                link->transport_generation
+            )) {
+            return false;
         }
+    }
+    if (message_result ==
+        DECK_COMPANION_SERVER_AI_SNAPSHOT_STORAGE_DEGRADED) {
+        increment_error(link);
     }
     return true;
 }
@@ -1076,8 +1355,9 @@ void link_task(void *argument)
             (void)refresh_profile(link, now);
             link->next_profile_poll_ms = now + kProfilePollMs;
         }
+        (void)advance_failover(link, now, DECK_COMPANION_FAILOVER_TICK);
         const bool serial_owner_safe =
-            link->client != nullptr || ensure_web_owner_revoked(link, now);
+            link->client != nullptr || ensure_serial_transport_revoked(link);
         if (link->secret != nullptr && link->client == nullptr &&
             serial_owner_safe &&
             now >= link->next_connect_ms && !start_transport(link)) {
@@ -1134,7 +1414,10 @@ void link_task(void *argument)
                 }
             }
         }
-        if (link->queue_overflow.exchange(false, std::memory_order_acq_rel)) {
+        const uint32_t overflow_generation =
+            link->queue_overflow_generation.exchange(0, std::memory_order_acq_rel);
+        if (overflow_generation != 0 &&
+            overflow_generation == link->transport_generation) {
             schedule_retry(link, now, true);
         }
         if (deck_ai_snapshot_store_take_storage_failure(link->snapshots)) {
@@ -1143,6 +1426,11 @@ void link_task(void *argument)
 
         TransportEvent event{};
         if (xQueueReceive(link->events, &event, kPollTicks) != pdTRUE) {
+            continue;
+        }
+        if (event.type != TransportEventType::wake &&
+            event.transport_generation != link->transport_generation) {
+            secure_clear(&event, sizeof(event));
             continue;
         }
         if (event.type == TransportEventType::connected) {
@@ -1190,6 +1478,7 @@ deck_companion_link_t *deck_companion_link_start(
         return nullptr;
     }
     link->profiles = profiles;
+    link->transport_callback.link = link;
     std::memcpy(link->firmware_version, firmware_version, version_size + 1);
     link->frame.reset(new (std::nothrow) char[kMaximumMessageBytes + 1]);
     deck_companion_link_frame_init(
@@ -1270,6 +1559,8 @@ bool deck_companion_link_attach_serial(
             return false;
         }
         link->serial = serial;
+        link->pending_serial_revoke_epoch = 0;
+        link->serial_transport_fenced = true;
     }
     TransportEvent wake{};
     wake.type = TransportEventType::wake;
@@ -1294,6 +1585,8 @@ bool deck_companion_link_detach_serial(
         return false;
     }
     link->serial = nullptr;
+    link->pending_serial_revoke_epoch = 0;
+    link->serial_transport_fenced = true;
     link->serial_publication_dirty.store(true, std::memory_order_release);
     return true;
 }
@@ -1335,14 +1628,51 @@ bool deck_companion_link_copy_ai_snapshot(
         return false;
     }
     bool online = false;
+    uint32_t transport_generation = 0;
     {
         const std::lock_guard<std::mutex> lock(link->mutex);
-        online = link->snapshot.state == DECK_COMPANION_LINK_ONLINE;
+        transport_generation = link->transport_generation;
+        online = link->snapshot.state == DECK_COMPANION_LINK_ONLINE &&
+                 deck_companion_transport_snapshot_current(
+                     &link->transport_authority,
+                     link->transport_generation
+                 );
     }
-    return deck_ai_snapshot_store_copy(
+    if (!deck_ai_snapshot_store_copy(
         link->snapshots,
         now_utc_ms,
         online,
+        document,
+        document_capacity,
+        document_size,
+        snapshot
+    )) {
+        return false;
+    }
+    if (!online) {
+        return true;
+    }
+    bool source_still_current = false;
+    {
+        const std::lock_guard<std::mutex> lock(link->mutex);
+        source_still_current =
+            transport_generation == link->transport_generation &&
+            link->snapshot.state == DECK_COMPANION_LINK_ONLINE &&
+            deck_companion_transport_snapshot_current(
+                &link->transport_authority,
+                transport_generation
+            );
+    }
+    if (source_still_current) {
+        return true;
+    }
+    // The transport changed while Store copy was in progress. Re-render the
+    // same retained document through the offline path so this call cannot
+    // publish a Fresh result from the retired source.
+    return deck_ai_snapshot_store_copy(
+        link->snapshots,
+        now_utc_ms,
+        false,
         document,
         document_capacity,
         document_size,

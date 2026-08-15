@@ -41,7 +41,9 @@ screen. The ordinary HTTP page at `http://192.168.4.1/` exposes status, an expli
 scan, Wi-Fi and calibration forms, and Companion Profile management. Pairing accepts only
 an explicit `host:port` and a six-digit one-time code. The Setup HTTP peer must be the
 computer running that Device Hub on the current `192.168.4.0/24` Setup network; a remote
-address supplied by form data cannot redirect the one-time trust bootstrap.
+address supplied by form data cannot redirect the one-time trust bootstrap. The same page can
+transactionally select Active, revoke a Profile, or edit its integer failover priority (higher
+values are attempted first); every successful edit advances the Profile generation.
 
 Submitted credentials are first stored as a candidate and tested as a station. A successful
 connection writes the new record into the inactive slot and switches a CRC-protected active
@@ -315,7 +317,18 @@ uses discovery trust: the `companion_link` module initiates WSS with the exact s
 certificate, device identity, and per-Deck Token. It sends `device.hello` first, accepts
 only strict version-1 heartbeat frames up to 16 KiB, marks the Companion offline after 30
 seconds without a valid heartbeat, and reconnects with exponential delay capped at 30
-seconds. The ESP-IDF `tcp_transport` component is compiled without log calls because its
+seconds. After 30 continuous offline seconds, a bounded Failover Round tries the other
+Profiles by priority, last-success, and stable Profile order. A candidate becomes the sticky
+Active only when its first authenticated heartbeat and generation-fenced Profile transaction
+both succeed; all-offline rounds return to the previous Active and wait another full window.
+Manual recovery selection, Pairing/address changes, and revocation cancel stale rounds, and
+transport generations reject queued events from older WSS clients. A replacement transport is
+heartbeat-only until its generation-fenced Active commit succeeds; only then may it publish
+Snapshot or Serial traffic. Snapshot data remains stale until that exact transport publishes a
+valid snapshot. An independent Serial Web-transport epoch rejects old queued Web-owner requests
+without superseding physical exit/stop, and the owner task must acknowledge USB ownership before
+the replacement transport starts. The ESP-IDF
+`tcp_transport` component is compiled without log calls because its
 stock handshake error path prints custom headers; Deck-owned diagnostics remain redacted.
 All credentials remain private to the Profile and Device Link modules.
 

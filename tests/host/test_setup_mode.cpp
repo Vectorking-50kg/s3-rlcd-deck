@@ -174,7 +174,7 @@ void http_contract_exposes_profile_pairing_without_secrets()
     size_t route_count = 0;
     const deck_setup_http_route_spec_t *routes = deck_setup_http_routes(&route_count);
     assert(routes != nullptr);
-    assert(route_count == 10);
+    assert(route_count == 11);
     assert(routes[0].route == DECK_SETUP_HTTP_PAGE);
     assert(routes[0].method == DECK_SETUP_HTTP_GET);
     assert(std::string(routes[0].path) == "/");
@@ -197,8 +197,10 @@ void http_contract_exposes_profile_pairing_without_secrets()
     assert(std::string(routes[7].path) == "/api/companions/pair");
     assert(routes[8].route == DECK_SETUP_HTTP_COMPANION_SELECT);
     assert(std::string(routes[8].path) == "/api/companions/select");
-    assert(routes[9].route == DECK_SETUP_HTTP_COMPANION_REVOKE);
-    assert(std::string(routes[9].path) == "/api/companions/revoke");
+    assert(routes[9].route == DECK_SETUP_HTTP_COMPANION_PRIORITY);
+    assert(std::string(routes[9].path) == "/api/companions/priority");
+    assert(routes[10].route == DECK_SETUP_HTTP_COMPANION_REVOKE);
+    assert(std::string(routes[10].path) == "/api/companions/revoke");
 
     assert(deck_setup_http_route("GET", "/") == DECK_SETUP_HTTP_PAGE);
     assert(deck_setup_http_route("GET", "/api/status") == DECK_SETUP_HTTP_STATUS);
@@ -215,6 +217,8 @@ void http_contract_exposes_profile_pairing_without_secrets()
            DECK_SETUP_HTTP_COMPANION_PAIR);
     assert(deck_setup_http_route("POST", "/api/companions/select") ==
            DECK_SETUP_HTTP_COMPANION_SELECT);
+    assert(deck_setup_http_route("POST", "/api/companions/priority") ==
+           DECK_SETUP_HTTP_COMPANION_PRIORITY);
     assert(deck_setup_http_route("POST", "/api/companions/revoke") ==
            DECK_SETUP_HTTP_COMPANION_REVOKE);
     assert(deck_setup_http_route("GET", "/api/scan") == DECK_SETUP_HTTP_METHOD_NOT_ALLOWED);
@@ -236,6 +240,7 @@ void http_contract_exposes_profile_pairing_without_secrets()
     assert(html.find("name=code") != std::string::npos);
     assert(html.find("/api/companions/pair") != std::string::npos);
     assert(html.find("/api/companions/select") != std::string::npos);
+    assert(html.find("/api/companions/priority") != std::string::npos);
     assert(html.find("/api/companions/revoke") != std::string::npos);
     assert(html.find("innerHTML") == std::string::npos);
     assert(html.find("name=password") != std::string::npos);
@@ -349,6 +354,31 @@ void companion_requests_are_strict_and_do_not_accept_secret_shaped_extras()
     assert(std::string(profile_id).rfind("sha256:", 0) == 0);
     assert(!deck_setup_http_parse_companion_profile_request(
         "profile_id=x", 12, profile_id, sizeof(profile_id)
+    ));
+
+    int32_t priority = 0;
+    char priority_profile[DECK_COMPANION_PROFILE_ID_CAPACITY]{};
+    const std::string valid_profile =
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const std::string priority_body =
+        std::string("profile_id=") + valid_profile + "&priority=-17";
+    assert(deck_setup_http_parse_companion_priority_request(
+        priority_body.data(),
+        priority_body.size(),
+        priority_profile,
+        sizeof(priority_profile),
+        &priority
+    ));
+    assert(priority == -17);
+    assert(std::string(priority_profile) == valid_profile);
+    const std::string overflow_priority =
+        std::string("profile_id=") + valid_profile + "&priority=2147483648";
+    assert(!deck_setup_http_parse_companion_priority_request(
+        overflow_priority.data(),
+        overflow_priority.size(),
+        priority_profile,
+        sizeof(priority_profile),
+        &priority
     ));
 }
 

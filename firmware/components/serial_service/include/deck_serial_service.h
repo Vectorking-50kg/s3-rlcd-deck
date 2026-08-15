@@ -63,6 +63,19 @@ bool deck_serial_service_web_disconnect(
     uint64_t lease_id
 );
 /*
+ * Fences every owner request from the disconnected Device Link generation,
+ * queues an unconditional Web -> USB revoke, and returns its acknowledgement
+ * epoch. The caller must not open a replacement transport until completion.
+ */
+bool deck_serial_service_revoke_web_transport(
+    deck_serial_service_t *service,
+    uint64_t *revoke_epoch
+);
+bool deck_serial_service_web_transport_revoked(
+    deck_serial_service_t *service,
+    uint64_t revoke_epoch
+);
+/*
  * Copies one bounded Web -> target block into the owner queue. The Session
  * owner revalidates the exact session and lease immediately before UART TX.
  */

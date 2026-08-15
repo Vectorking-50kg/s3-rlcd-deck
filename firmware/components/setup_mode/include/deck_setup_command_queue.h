@@ -23,6 +23,7 @@ typedef enum {
     DECK_SETUP_COMMAND_CLEAR_WIFI,
     DECK_SETUP_COMMAND_PAIR_COMPANION,
     DECK_SETUP_COMMAND_SELECT_COMPANION,
+    DECK_SETUP_COMMAND_SET_COMPANION_PRIORITY,
     DECK_SETUP_COMMAND_REVOKE_COMPANION,
 } deck_setup_command_type_t;
 
@@ -32,6 +33,7 @@ typedef struct {
     int16_t temperature_offset_tenths_c;
     deck_companion_pair_request_t companion_pair;
     char companion_profile_id[DECK_COMPANION_PROFILE_ID_CAPACITY];
+    int32_t companion_priority;
 } deck_setup_command_t;
 
 typedef struct deck_setup_command_queue deck_setup_command_queue_t;

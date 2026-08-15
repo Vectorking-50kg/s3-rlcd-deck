@@ -25,6 +25,8 @@ typedef struct {
     deck_companion_link_state_t state;
     bool has_active_profile;
     char active_profile_id[DECK_COMPANION_PROFILE_ID_CAPACITY];
+    bool failover_active;
+    char connection_profile_id[DECK_COMPANION_PROFILE_ID_CAPACITY];
     uint32_t profile_generation;
     uint32_t reconnect_attempts;
     uint32_t error_count;

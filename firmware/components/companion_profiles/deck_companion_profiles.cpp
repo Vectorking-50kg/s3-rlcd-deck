@@ -496,6 +496,35 @@ bool copy_string(char *output, size_t capacity, const char *input)
     return true;
 }
 
+bool copy_secret(
+    const StoredProfile &profile,
+    deck_companion_profile_secret_t *secret
+)
+{
+    *secret = {};
+    const bool copied =
+        copy_string(secret->profile_id, sizeof(secret->profile_id), profile.profile_id) &&
+        copy_string(secret->hub_address, sizeof(secret->hub_address), profile.hub_address) &&
+        copy_string(secret->token, sizeof(secret->token), profile.token) &&
+        copy_string(
+            secret->certificate_fingerprint,
+            sizeof(secret->certificate_fingerprint),
+            profile.certificate_fingerprint
+        );
+    if (copied) {
+        secret->certificate_der_size = profile.certificate_der_size;
+        std::memcpy(
+            secret->certificate_der,
+            profile.certificate_der,
+            profile.certificate_der_size
+        );
+        secret->protocol_version = kProtocolVersion;
+    } else {
+        secure_clear(secret, sizeof(*secret));
+    }
+    return copied;
+}
+
 }  // namespace
 
 struct deck_companion_profiles {
@@ -576,7 +605,7 @@ deck_companion_profile_update_result_t update_field(
     StoredProfile &profile = set->profiles[static_cast<size_t>(found)];
     if (update_priority) {
         profile.priority = priority;
-    } else {
+    } else if (unix_ms > profile.last_success_unix_ms) {
         profile.last_success_unix_ms = unix_ms;
     }
     const bool committed = commit_set(profiles, *set);
@@ -823,6 +852,46 @@ deck_companion_profile_update_result_t deck_companion_profiles_record_success(
     return update_field(profiles, profile_id, 0, unix_ms, false);
 }
 
+deck_companion_profile_update_result_t deck_companion_profiles_activate_on_success(
+    deck_companion_profiles_t *profiles,
+    const char *profile_id,
+    uint32_t expected_generation,
+    uint64_t unix_ms
+)
+{
+    if (profiles == nullptr || !valid_profile_id_argument(profile_id) || unix_ms == 0) {
+        return DECK_COMPANION_PROFILE_INVALID_ARGUMENT;
+    }
+    const std::lock_guard<std::mutex> lock(profiles->mutex);
+    deck_transaction_store_snapshot_t stored{};
+    std::unique_ptr<StoredSet> set(new (std::nothrow) StoredSet{});
+    if (set == nullptr || !load_set(profiles, &stored, set.get())) {
+        secure_clear(&stored, sizeof(stored));
+        return DECK_COMPANION_PROFILE_STORAGE_FAILURE;
+    }
+    if (!stored.has_active || stored.active.generation != expected_generation) {
+        secure_clear(&stored, sizeof(stored));
+        secure_clear(set.get(), sizeof(*set));
+        return DECK_COMPANION_PROFILE_STALE_GENERATION;
+    }
+    const int found = find_profile(*set, profile_id);
+    if (found < 0) {
+        secure_clear(&stored, sizeof(stored));
+        secure_clear(set.get(), sizeof(*set));
+        return DECK_COMPANION_PROFILE_NOT_FOUND;
+    }
+    set->active_index = static_cast<uint8_t>(found);
+    StoredProfile &profile = set->profiles[static_cast<size_t>(found)];
+    if (unix_ms > profile.last_success_unix_ms) {
+        profile.last_success_unix_ms = unix_ms;
+    }
+    const bool committed = commit_set(profiles, *set);
+    secure_clear(&stored, sizeof(stored));
+    secure_clear(set.get(), sizeof(*set));
+    return committed ? DECK_COMPANION_PROFILE_UPDATED
+                     : DECK_COMPANION_PROFILE_STORAGE_FAILURE;
+}
+
 bool deck_companion_profiles_snapshot(
     const deck_companion_profiles_t *profiles,
     deck_companion_profiles_snapshot_t *snapshot
@@ -895,24 +964,41 @@ bool deck_companion_profiles_active_secret(
         }
         return false;
     }
-    const StoredProfile &profile = set->profiles[set->active_index];
-    const bool copied =
-        copy_string(secret->profile_id, sizeof(secret->profile_id), profile.profile_id) &&
-        copy_string(secret->hub_address, sizeof(secret->hub_address), profile.hub_address) &&
-        copy_string(secret->token, sizeof(secret->token), profile.token) &&
-        copy_string(secret->certificate_fingerprint, sizeof(secret->certificate_fingerprint), profile.certificate_fingerprint);
-    if (copied) {
-        secret->certificate_der_size = profile.certificate_der_size;
-        std::memcpy(
-            secret->certificate_der,
-            profile.certificate_der,
-            profile.certificate_der_size
-        );
+    const bool copied = copy_secret(set->profiles[set->active_index], secret);
+    secure_clear(&stored, sizeof(stored));
+    secure_clear(set.get(), sizeof(*set));
+    return copied;
+}
+
+bool deck_companion_profiles_secret_for(
+    const deck_companion_profiles_t *profiles,
+    const char *profile_id,
+    uint32_t expected_generation,
+    deck_companion_profile_secret_t *secret
+)
+{
+    if (profiles == nullptr || secret == nullptr ||
+        !valid_profile_id_argument(profile_id)) {
+        return false;
     }
-    secret->protocol_version = kProtocolVersion;
-    if (!copied) {
-        secure_clear(secret, sizeof(*secret));
+    const std::lock_guard<std::mutex> lock(profiles->mutex);
+    *secret = {};
+    deck_transaction_store_snapshot_t stored{};
+    std::unique_ptr<StoredSet> set(new (std::nothrow) StoredSet{});
+    if (set == nullptr || !load_set(profiles, &stored, set.get()) ||
+        !stored.has_active || stored.active.generation != expected_generation) {
+        secure_clear(&stored, sizeof(stored));
+        if (set != nullptr) {
+            secure_clear(set.get(), sizeof(*set));
+        }
+        return false;
     }
+    const int found = find_profile(*set, profile_id);
+    const bool copied = found >= 0 &&
+                        copy_secret(
+                            set->profiles[static_cast<size_t>(found)],
+                            secret
+                        );
     secure_clear(&stored, sizeof(stored));
     secure_clear(set.get(), sizeof(*set));
     return copied;

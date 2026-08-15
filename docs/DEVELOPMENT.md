@@ -658,8 +658,18 @@ Companion 使用本地 SQLite 保存最近 90 天的小时级用量、余额和�
 - 同一时间只连接一个 Active Companion。
 - Active Companion 离线超过 30 秒后，按优先级连接下一个。
 - 切换成功后保持粘性；原高优先级设备恢复也不抢占。
-- 用户可在恢复页手动选择 Active Companion。
+- 用户可在恢复页手动选择 Active Companion，并事务修改每个 Profile 的整数优先级；数值越高越先尝试。
 - Companion 之间不自动同步配置；使用加密备份手工迁移。
+
+故障切换只在连续离线满 30 秒后开始一轮：按优先级降序、last-success 降序和稳定
+Profile 顺序依次尝试其余候选；全部失败则回到原 Active，并重新等待完整窗口。候选首个
+有效心跳与 Active/last-success 的事务提交同时成功后才完成切换。所有候选读取与提交都绑定
+Profile generation，配对、地址更新、优先级修改、撤销或恢复页手动选择会使旧决定失效。
+每条替代 WSS 在候选阶段只允许严格心跳；事务成为 Active 后才开放 Snapshot/Serial 数据面。
+切换期间 Snapshot 保持 STALE，且只有新来源提交首个有效快照后才恢复；新的 WSS 连接必须等
+独立的 Serial Web-transport epoch 撤销旧代排队请求并确认 Web TX 已回到 USB；它不得覆盖
+BOOT exit/stop 使用的物理 lifecycle epoch。完整决定见
+[ADR 0022](adr/0022-keep-companion-failover-sticky-and-generation-fenced.md)。
 
 ## 10. 设备协议
 

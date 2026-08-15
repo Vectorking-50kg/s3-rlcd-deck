@@ -85,6 +85,7 @@ enum class CommandKind : uint8_t {
     request_web,
     web_activity,
     web_disconnect,
+    revoke_web_transport,
     stop,
 };
 
@@ -182,6 +183,8 @@ struct deck_serial_service {
     std::atomic<uint64_t> pending_usb_rejected_bytes;
     std::atomic<bool> stop_requested;
     std::atomic<uint64_t> control_epoch;
+    std::atomic<uint64_t> web_transport_epoch;
+    std::atomic<uint64_t> completed_web_revoke_epoch;
     SemaphoreHandle_t router_mutex;
     SerialDataPath data_path;
 };
@@ -1211,6 +1214,7 @@ void process_command(deck_serial_service_t *service, const Command &command)
         command.kind == CommandKind::exit ||
         command.kind == CommandKind::request_web ||
         command.kind == CommandKind::web_disconnect ||
+        command.kind == CommandKind::revoke_web_transport ||
         command.kind == CommandKind::stop) {
         service->usb_input_authority_generation.store(
             0,
@@ -1234,14 +1238,19 @@ void process_command(deck_serial_service_t *service, const Command &command)
             );
             break;
         case CommandKind::request_web:
-            has_result = deck_serial_session_request_web(
-                service->session,
-                command.session_id,
-                command.request_id,
-                command.enable,
-                now_ms,
-                &result
-            );
+            if (command.control_epoch == service->web_transport_epoch.load(
+                                             std::memory_order_acquire
+                                         )) {
+                has_result = deck_serial_session_request_web_at_epoch(
+                    service->session,
+                    command.control_epoch,
+                    command.session_id,
+                    command.request_id,
+                    command.enable,
+                    now_ms,
+                    &result
+                );
+            }
             break;
         case CommandKind::web_activity:
             (void)deck_serial_session_web_activity(
@@ -1257,6 +1266,19 @@ void process_command(deck_serial_service_t *service, const Command &command)
                 command.session_id,
                 command.lease_id
             );
+            break;
+        case CommandKind::revoke_web_transport:
+            has_result = deck_serial_session_revoke_web_transport(
+                service->session,
+                command.control_epoch,
+                &result
+            );
+            if (has_result) {
+                service->completed_web_revoke_epoch.store(
+                    command.control_epoch,
+                    std::memory_order_release
+                );
+            }
             break;
         case CommandKind::stop:
             has_result = deck_serial_session_exit(
@@ -1360,7 +1382,10 @@ bool enqueue(deck_serial_service_t *service, const Command &command)
         return false;
     }
     Command stamped = command;
-    stamped.control_epoch = service->control_epoch.load(std::memory_order_acquire);
+    stamped.control_epoch =
+        command.kind == CommandKind::request_web
+            ? service->web_transport_epoch.load(std::memory_order_acquire)
+            : service->control_epoch.load(std::memory_order_acquire);
     if (xQueueSend(service->commands, &stamped, 0) != pdTRUE) {
         return false;
     }
@@ -1379,6 +1404,25 @@ uint64_t advance_control_epoch(deck_serial_service_t *service)
             next = 1;
         }
         if (service->control_epoch.compare_exchange_weak(
+                current,
+                next,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire
+            )) {
+            return next;
+        }
+    }
+}
+
+uint64_t advance_web_transport_epoch(deck_serial_service_t *service)
+{
+    uint64_t current = service->web_transport_epoch.load(std::memory_order_acquire);
+    while (true) {
+        uint64_t next = current + 1U;
+        if (next == 0) {
+            next = 1;
+        }
+        if (service->web_transport_epoch.compare_exchange_weak(
                 current,
                 next,
                 std::memory_order_acq_rel,
@@ -1440,6 +1484,8 @@ deck_serial_service_t *deck_serial_service_start(
     service->lifecycle = xEventGroupCreate();
     service->stop_requested.store(false, std::memory_order_release);
     service->control_epoch.store(0, std::memory_order_release);
+    service->web_transport_epoch.store(0, std::memory_order_release);
+    service->completed_web_revoke_epoch.store(0, std::memory_order_release);
     if (service->commands == nullptr || service->snapshot_mutex == nullptr ||
         service->router_mutex == nullptr || service->lifecycle == nullptr ||
         xTaskCreatePinnedToCore(
@@ -1589,6 +1635,44 @@ bool deck_serial_service_web_disconnect(
         service,
         {CommandKind::web_disconnect, false, session_id, 0, lease_id, 0}
     );
+}
+
+bool deck_serial_service_revoke_web_transport(
+    deck_serial_service_t *service,
+    uint64_t *revoke_epoch
+)
+{
+    if (service == nullptr || revoke_epoch == nullptr ||
+        service->stop_requested.load(std::memory_order_acquire)) {
+        return false;
+    }
+    const uint64_t epoch = advance_web_transport_epoch(service);
+    const Command command{
+        CommandKind::revoke_web_transport, false, 0, 0, 0, epoch
+    };
+    if (xQueueSendToFront(
+            service->commands,
+            &command,
+            kOwnerPollTicks
+        ) != pdTRUE) {
+        return false;
+    }
+    *revoke_epoch = epoch;
+    if (service->owner_task != nullptr) {
+        xTaskNotifyGive(service->owner_task);
+    }
+    return true;
+}
+
+bool deck_serial_service_web_transport_revoked(
+    deck_serial_service_t *service,
+    uint64_t revoke_epoch
+)
+{
+    return service != nullptr && revoke_epoch != 0 &&
+           service->completed_web_revoke_epoch.load(
+               std::memory_order_acquire
+           ) == revoke_epoch;
 }
 
 bool deck_serial_service_submit_web(

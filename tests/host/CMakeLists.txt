@@ -217,6 +217,17 @@ deck_add_host_test(
     INCLUDE_DIRS ../../firmware/components/companion_link/include
 )
 deck_add_host_test(
+    test_companion_failover
+    SOURCES
+        test_companion_failover.cpp
+        ../../firmware/components/companion_link/deck_companion_failover.cpp
+        ../../firmware/components/companion_link/deck_companion_transport_authority.cpp
+    INCLUDE_DIRS
+        ../../firmware/components/companion_link/include
+        ../../firmware/components/companion_profiles/include
+        ../../firmware/components/transaction_store/include
+)
+deck_add_host_test(
     test_companion_link_messages
     SOURCES
         test_companion_link_messages.cpp

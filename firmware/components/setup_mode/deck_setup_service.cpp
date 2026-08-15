@@ -68,6 +68,7 @@ constexpr auto submit_temperature_offset =
 constexpr auto clear_wifi = DECK_SETUP_COMMAND_CLEAR_WIFI;
 constexpr auto pair_companion = DECK_SETUP_COMMAND_PAIR_COMPANION;
 constexpr auto select_companion = DECK_SETUP_COMMAND_SELECT_COMPANION;
+constexpr auto set_companion_priority = DECK_SETUP_COMMAND_SET_COMPANION_PRIORITY;
 constexpr auto revoke_companion = DECK_SETUP_COMMAND_REVOKE_COMPANION;
 }  // namespace CommandType
 
@@ -796,6 +797,45 @@ esp_err_t companion_revoke_handler(httpd_req_t *request)
     return companion_profile_handler(request, true);
 }
 
+esp_err_t companion_priority_handler(httpd_req_t *request)
+{
+    auto *service = static_cast<deck_setup_service_t *>(request->user_ctx);
+    if (!mark_activity(service)) {
+        httpd_resp_set_status(request, "503 Service Unavailable");
+        return send_json(request, "{\"accepted\":false,\"error\":\"setup_inactive\"}");
+    }
+    char body[192]{};
+    char profile_id[DECK_COMPANION_PROFILE_ID_CAPACITY]{};
+    int32_t priority = 0;
+    size_t received = 0;
+    const bool parsed = receive_body(request, body, sizeof(body), &received) &&
+                        deck_setup_http_parse_companion_priority_request(
+                            body,
+                            received,
+                            profile_id,
+                            sizeof(profile_id),
+                            &priority
+                        );
+    secure_clear(body, sizeof(body));
+    if (!parsed) {
+        secure_clear(profile_id, sizeof(profile_id));
+        httpd_resp_set_status(request, "400 Bad Request");
+        return send_json(request, "{\"accepted\":false,\"error\":\"malformed\"}");
+    }
+    const bool queued = deck_setup_service_set_companion_priority(
+        service,
+        profile_id,
+        priority
+    );
+    secure_clear(profile_id, sizeof(profile_id));
+    if (!queued) {
+        httpd_resp_set_status(request, "503 Service Unavailable");
+        return send_json(request, "{\"accepted\":false,\"error\":\"busy\"}");
+    }
+    httpd_resp_set_status(request, "202 Accepted");
+    return send_json(request, "{\"accepted\":true,\"state\":\"queued\"}");
+}
+
 esp_err_t accept_ap_session(httpd_handle_t, int socket_fd)
 {
     sockaddr_storage local_address{};
@@ -834,6 +874,8 @@ HttpHandler handler_for_route(deck_setup_http_route_t route)
             return companion_pair_handler;
         case DECK_SETUP_HTTP_COMPANION_SELECT:
             return companion_select_handler;
+        case DECK_SETUP_HTTP_COMPANION_PRIORITY:
+            return companion_priority_handler;
         case DECK_SETUP_HTTP_COMPANION_REVOKE:
             return companion_revoke_handler;
         case DECK_SETUP_HTTP_NOT_FOUND:
@@ -1532,6 +1574,7 @@ void service_task(void *task_context)
                     break;
                 }
                 case CommandType::select_companion:
+                case CommandType::set_companion_priority:
                 case CommandType::revoke_companion: {
                     deck_companion_profile_update_result_t result =
                         DECK_COMPANION_PROFILE_STORAGE_FAILURE;
@@ -1540,15 +1583,24 @@ void service_task(void *task_context)
                         deck_setup_snapshot_t setup{};
                         setup_active = snapshot_locked(service, &setup) && setup.active;
                         if (setup_active) {
-                            result = command.type == CommandType::select_companion
-                                         ? deck_companion_profiles_select_active(
-                                               service->companion_profiles,
-                                               command.companion_profile_id
-                                           )
-                                         : deck_companion_profiles_revoke(
-                                               service->companion_profiles,
-                                               command.companion_profile_id
-                                           );
+                            if (command.type == CommandType::select_companion) {
+                                result = deck_companion_profiles_select_active(
+                                    service->companion_profiles,
+                                    command.companion_profile_id
+                                );
+                            } else if (command.type ==
+                                       CommandType::set_companion_priority) {
+                                result = deck_companion_profiles_set_priority(
+                                    service->companion_profiles,
+                                    command.companion_profile_id,
+                                    command.companion_priority
+                                );
+                            } else {
+                                result = deck_companion_profiles_revoke(
+                                    service->companion_profiles,
+                                    command.companion_profile_id
+                                );
+                            }
                         }
                         xSemaphoreGive(service->state_mutex);
                     }
@@ -1871,6 +1923,38 @@ bool deck_setup_service_revoke_companion(
         profile_id,
         CommandType::revoke_companion
     );
+}
+
+bool deck_setup_service_set_companion_priority(
+    deck_setup_service_t *service,
+    const char *profile_id,
+    int32_t priority
+)
+{
+    if (service == nullptr || profile_id == nullptr ||
+        strnlen(profile_id, DECK_COMPANION_PROFILE_ID_CAPACITY) != 71 ||
+        !service->accepting_commands.load(std::memory_order_acquire)) {
+        return false;
+    }
+    deck_setup_snapshot_t setup{};
+    if (xSemaphoreTake(service->state_mutex, portMAX_DELAY) != pdTRUE) {
+        return false;
+    }
+    const bool setup_active = snapshot_locked(service, &setup) && setup.active;
+    xSemaphoreGive(service->state_mutex);
+    if (!setup_active) {
+        return false;
+    }
+    Command command{};
+    command.type = CommandType::set_companion_priority;
+    command.companion_priority = priority;
+    std::memcpy(command.companion_profile_id, profile_id, 72);
+    const bool queued = enqueue_command(service, command);
+    secure_clear(
+        command.companion_profile_id,
+        sizeof(command.companion_profile_id)
+    );
+    return queued;
 }
 
 deck_companion_profiles_t *deck_setup_service_wait_companion_profiles(
