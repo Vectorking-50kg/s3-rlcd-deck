@@ -23,7 +23,7 @@ import (
 const (
 	ArchiveType                   = "s3-rlcd-deck.backup"
 	SchemaMajor            uint16 = 1
-	SchemaMinor            uint16 = 0
+	SchemaMinor            uint16 = 1
 	MaxPlaintextBytes             = 4 << 20
 	MaxEncryptedBytes             = 8 << 20
 	minimumPassphraseBytes        = 12
@@ -194,16 +194,22 @@ func (document *Document) Destroy() {
 		}
 		document.Providers[providerIndex].Secrets = nil
 	}
+	configmodel.DestroySerialPresets(document.ApplicationSettings.SerialPresets)
+	document.ApplicationSettings.SerialPresets = nil
 }
 
 func validateDocument(document Document) error {
 	if document.Type != ArchiveType || document.SchemaVersion.Major != SchemaMajor ||
-		document.SchemaVersion.Minor != SchemaMinor || document.Providers == nil ||
+		document.SchemaVersion.Minor > SchemaMinor || document.Providers == nil ||
 		document.ProviderOrder == nil || document.DeviceProfiles == nil ||
 		len(document.Providers) > 6 ||
 		len(document.DeviceProfiles) > configmodel.MaximumDeviceProfiles ||
 		!configmodel.CanonicalUTC(document.ExportedAt) ||
-		!configmodel.ValidateWebSettings(document.WebSettings) {
+		!configmodel.ValidateWebSettings(document.WebSettings) ||
+		!configmodel.ValidateSerialPresets(document.ApplicationSettings.SerialPresets) {
+		return ErrArchiveSchema
+	}
+	if document.SchemaVersion.Minor == 0 && len(document.ApplicationSettings.SerialPresets) != 0 {
 		return ErrArchiveSchema
 	}
 	providerIDs := make(map[string]struct{}, len(document.Providers))

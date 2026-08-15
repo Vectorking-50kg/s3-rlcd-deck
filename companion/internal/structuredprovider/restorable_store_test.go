@@ -62,8 +62,51 @@ func TestDefinitionStoreMigratesV1AndPreservesExplicitProviderOrder(t *testing.T
 	var header struct {
 		SchemaVersion int `json:"schema_version"`
 	}
-	if err = json.Unmarshal(stored, &header); err != nil || header.SchemaVersion != 2 {
+	if err = json.Unmarshal(stored, &header); err != nil || header.SchemaVersion != 3 {
 		t.Fatalf("persisted schema = %d, %v", header.SchemaVersion, err)
+	}
+}
+
+func TestDefinitionStoreMigratesV2WithoutInventingSerialPresets(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "structured-providers.json")
+	legacy := definitionStoreStateV2{
+		SchemaVersion:        2,
+		Definitions:          []Definition{},
+		WebSettings:          configmodel.WebSettings{ManagementAddress: configmodel.DefaultManagementAddress},
+		ApplicationSettings:  definitionStoreApplicationSettingsV2{HistoryEnabled: false},
+		DeviceProfiles:       []configmodel.DeviceProfile{},
+		PendingSecretDeletes: []secretstore.Reference{},
+	}
+	contents, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if committed, replaceErr := protectedfile.Replace(path, contents); !committed || replaceErr != nil {
+		t.Fatalf("seed v2 store committed=%v err=%v", committed, replaceErr)
+	}
+	owner, err := OpenDefinitionStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, pending, err := owner.PendingApplicationSettings(context.Background())
+	if err != nil || pending || settings.HistoryEnabled || settings.SerialPresets != nil {
+		t.Fatalf("migrated settings=%#v pending=%v err=%v", settings, pending, err)
+	}
+	if err = owner.UpdateHistoryEnabled(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	if err = owner.Close(); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var header struct {
+		SchemaVersion int `json:"schema_version"`
+	}
+	if err = json.Unmarshal(stored, &header); err != nil || header.SchemaVersion != 3 {
+		t.Fatalf("persisted schema=%d err=%v", header.SchemaVersion, err)
 	}
 }
 
@@ -143,4 +186,42 @@ func TestReplaceConfigurationPublishesAllNonSecretStateOnce(t *testing.T) {
 	if _, exists := secrets.values[currentDefinition.Request.Headers[0].SecretReference]; exists {
 		t.Fatal("retired secret survived cleanup")
 	}
+}
+
+func TestSerialPresetsPersistWithoutBeingOverwrittenByHistorySettings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "structured-providers.json")
+	owner, err := OpenDefinitionStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	presets := []configmodel.SerialPreset{{
+		ID: "status", Name: "Status", Mode: configmodel.SerialPresetText,
+		Payload:    []byte("status --token PRIVATE_PRESET"),
+		LineEnding: configmodel.SerialLineEndingCRLF,
+	}}
+	if err = owner.UpdateSerialPresets(context.Background(), presets); err != nil {
+		t.Fatal(err)
+	}
+	presets[0].Payload[0] = 'X'
+	if err = owner.UpdateHistoryEnabled(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := owner.SerialPresets(context.Background())
+	if err != nil || string(loaded[0].Payload) != "status --token PRIVATE_PRESET" {
+		t.Fatalf("loaded presets=%#v err=%v", loaded, err)
+	}
+	configmodel.DestroySerialPresets(loaded)
+	if err = owner.Close(); err != nil {
+		t.Fatal(err)
+	}
+	owner, err = OpenDefinitionStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+	loaded, err = owner.SerialPresets(context.Background())
+	if err != nil || string(loaded[0].Payload) != "status --token PRIVATE_PRESET" {
+		t.Fatalf("reopened presets=%#v err=%v", loaded, err)
+	}
+	configmodel.DestroySerialPresets(loaded)
 }

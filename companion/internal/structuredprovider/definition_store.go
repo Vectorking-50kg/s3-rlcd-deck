@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	definitionStoreSchemaVersion = 2
+	definitionStoreSchemaVersion = 3
 	maximumStoredDefinitions     = 6
 	maximumPendingCleanup        = 512
 	maximumDefinitionStoreBytes  = 512 << 10
@@ -39,6 +39,20 @@ type definitionStoreStateV1 struct {
 	SchemaVersion        int                     `json:"schema_version"`
 	Definitions          []Definition            `json:"definitions"`
 	PendingSecretDeletes []secretstore.Reference `json:"pending_secret_deletes"`
+}
+
+type definitionStoreApplicationSettingsV2 struct {
+	HistoryEnabled bool `json:"history_enabled"`
+}
+
+type definitionStoreStateV2 struct {
+	SchemaVersion                   int                                  `json:"schema_version"`
+	Definitions                     []Definition                         `json:"definitions"`
+	WebSettings                     configmodel.WebSettings              `json:"web_settings"`
+	ApplicationSettings             definitionStoreApplicationSettingsV2 `json:"application_settings"`
+	ApplyApplicationSettingsOnStart bool                                 `json:"apply_application_settings_on_start"`
+	DeviceProfiles                  []configmodel.DeviceProfile          `json:"device_profiles"`
+	PendingSecretDeletes            []secretstore.Reference              `json:"pending_secret_deletes"`
 }
 
 // RestorableConfiguration is the complete non-secret state published by one
@@ -123,12 +137,28 @@ func (store *DefinitionStore) Close() error {
 	}
 	err := store.lock.Close()
 	store.lock = nil
+	configmodel.DestroySerialPresets(store.state.ApplicationSettings.SerialPresets)
+	store.state.ApplicationSettings.SerialPresets = nil
 	return err
 }
 
 func (store *DefinitionStore) Definitions(ctx context.Context) ([]Definition, error) {
-	configuration, err := store.Configuration(ctx)
-	return configuration.Definitions, err
+	if store == nil || ctx == nil {
+		return nil, ErrInvalidConfig
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	store.mutex.RLock()
+	defer store.mutex.RUnlock()
+	if store.lock == nil {
+		return nil, ErrDefinitionCommit
+	}
+	definitions := make([]Definition, len(store.state.Definitions))
+	for index := range store.state.Definitions {
+		definitions[index] = cloneDefinition(store.state.Definitions[index])
+	}
+	return definitions, nil
 }
 
 func (store *DefinitionStore) Configuration(ctx context.Context) (RestorableConfiguration, error) {
@@ -160,7 +190,22 @@ func (store *DefinitionStore) PendingApplicationSettings(
 	if store.lock == nil {
 		return configmodel.ApplicationSettings{}, false, ErrDefinitionCommit
 	}
-	return store.state.ApplicationSettings, store.state.ApplyApplicationSettingsOnStart, nil
+	return configmodel.CloneApplicationSettings(store.state.ApplicationSettings), store.state.ApplyApplicationSettingsOnStart, nil
+}
+
+func (store *DefinitionStore) SerialPresets(ctx context.Context) ([]configmodel.SerialPreset, error) {
+	if store == nil || ctx == nil {
+		return nil, ErrInvalidConfig
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	store.mutex.RLock()
+	defer store.mutex.RUnlock()
+	if store.lock == nil {
+		return nil, ErrDefinitionCommit
+	}
+	return configmodel.CloneSerialPresets(store.state.ApplicationSettings.SerialPresets), nil
 }
 
 func (store *DefinitionStore) StageCleanup(
@@ -272,11 +317,23 @@ func (store *DefinitionStore) ReplaceConfiguration(
 ) (ReplaceConfigurationResult, error) {
 	result := ReplaceConfigurationResult{}
 	err := store.updateWithCommit(ctx, func(next *definitionStoreState) error {
-		if !reflect.DeepEqual(configurationFromState(*next), cloneRestorableConfiguration(expected)) {
+		current := configurationFromState(*next)
+		expectedCopy := cloneRestorableConfiguration(expected)
+		matches := reflect.DeepEqual(current, expectedCopy)
+		DestroyRestorableConfiguration(&current)
+		DestroyRestorableConfiguration(&expectedCopy)
+		if !matches {
 			return ErrDefinitionCommit
 		}
-		replacement = cloneRestorableConfiguration(replacement)
-		candidate := stateFromConfiguration(replacement, next.PendingSecretDeletes)
+		replacementCopy := cloneRestorableConfiguration(replacement)
+		candidate := stateFromConfiguration(replacementCopy, next.PendingSecretDeletes)
+		DestroyRestorableConfiguration(&replacementCopy)
+		candidateOwned := true
+		defer func() {
+			if candidateOwned {
+				configmodel.DestroySerialPresets(candidate.ApplicationSettings.SerialPresets)
+			}
+		}()
 		candidate.ApplyApplicationSettingsOnStart = true
 		currentReferences := definitionReferences(next.Definitions)
 		replacementReferences := definitionReferences(candidate.Definitions)
@@ -317,7 +374,9 @@ func (store *DefinitionStore) ReplaceConfiguration(
 		if err := validateDefinitionStoreState(candidate); err != nil {
 			return err
 		}
+		configmodel.DestroySerialPresets(next.ApplicationSettings.SerialPresets)
 		*next = candidate
+		candidateOwned = false
 		return nil
 	}, &result.Committed)
 	return result, err
@@ -372,8 +431,35 @@ func (store *DefinitionStore) UpdateApplicationSettings(
 	ctx context.Context,
 	settings configmodel.ApplicationSettings,
 ) error {
+	if !configmodel.ValidateSerialPresets(settings.SerialPresets) {
+		return ErrInvalidConfig
+	}
 	return store.update(ctx, func(next *definitionStoreState) error {
-		next.ApplicationSettings = settings
+		configmodel.DestroySerialPresets(next.ApplicationSettings.SerialPresets)
+		next.ApplicationSettings = configmodel.CloneApplicationSettings(settings)
+		next.ApplyApplicationSettingsOnStart = false
+		return nil
+	})
+}
+
+func (store *DefinitionStore) UpdateSerialPresets(
+	ctx context.Context,
+	presets []configmodel.SerialPreset,
+) error {
+	if !configmodel.ValidateSerialPresets(presets) {
+		return ErrInvalidConfig
+	}
+	return store.update(ctx, func(next *definitionStoreState) error {
+		configmodel.DestroySerialPresets(next.ApplicationSettings.SerialPresets)
+		next.ApplicationSettings.SerialPresets = configmodel.CloneSerialPresets(presets)
+		next.ApplyApplicationSettingsOnStart = false
+		return nil
+	})
+}
+
+func (store *DefinitionStore) UpdateHistoryEnabled(ctx context.Context, enabled bool) error {
+	return store.update(ctx, func(next *definitionStoreState) error {
+		next.ApplicationSettings.HistoryEnabled = enabled
 		next.ApplyApplicationSettingsOnStart = false
 		return nil
 	})
@@ -569,6 +655,12 @@ func (store *DefinitionStore) updateWithCommit(
 		return ErrDefinitionCommit
 	}
 	next := cloneDefinitionStoreState(store.state)
+	nextOwned := true
+	defer func() {
+		if nextOwned {
+			configmodel.DestroySerialPresets(next.ApplicationSettings.SerialPresets)
+		}
+	}()
 	if err := mutate(&next); err != nil {
 		return err
 	}
@@ -579,9 +671,12 @@ func (store *DefinitionStore) updateWithCommit(
 	if err != nil {
 		return ErrDefinitionCommit
 	}
+	defer clear(contents)
 	*committed, err = protectedfile.Replace(store.path, contents)
 	if *committed {
+		configmodel.DestroySerialPresets(store.state.ApplicationSettings.SerialPresets)
 		store.state = next
+		nextOwned = false
 	}
 	if err != nil {
 		return ErrDefinitionCommit
@@ -609,7 +704,7 @@ func cloneDefinitionStoreState(source definitionStoreState) definitionStoreState
 		clone.Definitions = append(clone.Definitions, cloneDefinition(definition))
 	}
 	clone.WebSettings = source.WebSettings
-	clone.ApplicationSettings = source.ApplicationSettings
+	clone.ApplicationSettings = configmodel.CloneApplicationSettings(source.ApplicationSettings)
 	clone.ApplyApplicationSettingsOnStart = source.ApplyApplicationSettingsOnStart
 	clone.DeviceProfiles = configmodel.CloneDeviceProfiles(source.DeviceProfiles)
 	clone.PendingSecretDeletes = append(clone.PendingSecretDeletes, source.PendingSecretDeletes...)
@@ -641,6 +736,18 @@ func readDefinitionStore(path string) (definitionStoreState, error) {
 		state = emptyDefinitionStoreState()
 		state.Definitions = previous.Definitions
 		state.PendingSecretDeletes = previous.PendingSecretDeletes
+	case 2:
+		var previous definitionStoreStateV2
+		if protocol.DecodeStrictDocumentLimit(contents, maximumDefinitionStoreBytes, &previous) != nil {
+			return definitionStoreState{}, errors.New("structured Provider store is malformed")
+		}
+		state = emptyDefinitionStoreState()
+		state.Definitions = previous.Definitions
+		state.WebSettings = previous.WebSettings
+		state.ApplicationSettings.HistoryEnabled = previous.ApplicationSettings.HistoryEnabled
+		state.ApplyApplicationSettingsOnStart = previous.ApplyApplicationSettingsOnStart
+		state.DeviceProfiles = previous.DeviceProfiles
+		state.PendingSecretDeletes = previous.PendingSecretDeletes
 	case definitionStoreSchemaVersion:
 		if protocol.DecodeStrictDocumentLimit(contents, maximumDefinitionStoreBytes, &state) != nil {
 			return definitionStoreState{}, errors.New("structured Provider store is malformed")
@@ -663,6 +770,9 @@ func validateDefinitionStoreState(state definitionStoreState) error {
 		return ErrInvalidConfig
 	}
 	if !configmodel.ValidateWebSettings(state.WebSettings) {
+		return ErrInvalidConfig
+	}
+	if !configmodel.ValidateSerialPresets(state.ApplicationSettings.SerialPresets) {
 		return ErrInvalidConfig
 	}
 	ids := make(map[string]struct{}, len(state.Definitions))
@@ -722,7 +832,7 @@ func configurationFromState(state definitionStoreState) RestorableConfiguration 
 	configuration := RestorableConfiguration{
 		Definitions:         make([]Definition, len(state.Definitions)),
 		WebSettings:         state.WebSettings,
-		ApplicationSettings: state.ApplicationSettings,
+		ApplicationSettings: configmodel.CloneApplicationSettings(state.ApplicationSettings),
 		DeviceProfiles:      configmodel.CloneDeviceProfiles(state.DeviceProfiles),
 	}
 	for index := range state.Definitions {
@@ -732,8 +842,26 @@ func configurationFromState(state definitionStoreState) RestorableConfiguration 
 }
 
 func cloneRestorableConfiguration(source RestorableConfiguration) RestorableConfiguration {
-	state := stateFromConfiguration(source, []secretstore.Reference{})
-	return configurationFromState(state)
+	configuration := RestorableConfiguration{
+		Definitions:         make([]Definition, len(source.Definitions)),
+		WebSettings:         source.WebSettings,
+		ApplicationSettings: configmodel.CloneApplicationSettings(source.ApplicationSettings),
+		DeviceProfiles:      configmodel.CloneDeviceProfiles(source.DeviceProfiles),
+	}
+	for index := range source.Definitions {
+		configuration.Definitions[index] = cloneDefinition(source.Definitions[index])
+	}
+	return configuration
+}
+
+// DestroyRestorableConfiguration clears user-authored Serial Preset payloads
+// owned by a configuration copy. It does not mutate the store.
+func DestroyRestorableConfiguration(configuration *RestorableConfiguration) {
+	if configuration == nil {
+		return
+	}
+	configmodel.DestroySerialPresets(configuration.ApplicationSettings.SerialPresets)
+	configuration.ApplicationSettings.SerialPresets = nil
 }
 
 func stateFromConfiguration(
@@ -746,7 +874,7 @@ func stateFromConfiguration(
 		state.Definitions[index] = cloneDefinition(configuration.Definitions[index])
 	}
 	state.WebSettings = configuration.WebSettings
-	state.ApplicationSettings = configuration.ApplicationSettings
+	state.ApplicationSettings = configmodel.CloneApplicationSettings(configuration.ApplicationSettings)
 	state.DeviceProfiles = configmodel.CloneDeviceProfiles(configuration.DeviceProfiles)
 	state.PendingSecretDeletes = append([]secretstore.Reference(nil), pending...)
 	return state

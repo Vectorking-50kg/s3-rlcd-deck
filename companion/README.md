@@ -95,12 +95,14 @@ paths, and serial bodies cannot be represented. A tray-created HttpOnly session 
 fresh CSRF token through same-origin `POST /api/v1/session/refresh`; rotation does not extend the
 eight-hour session lifetime and invalidates the previous CSRF token.
 
-Provider management, history, pairing, and backup controls call their existing authenticated
-APIs. Serial Web TX, signed OTA, and diagnostic-bundle interfaces are not present on the current
-mainline, so those formal views explicitly say that the module is not connected and never invent
-connections, versions, progress, or success states. All destructive operations use a scoped
-confirmation dialog, unknown metrics render as unavailable rather than zero, and the UI includes
-visible focus states, reduced-motion handling, and responsive table containment.
+Provider management, history, pairing, backup, and Serial controls call their authenticated APIs.
+The Serial view embeds local xterm.js assets for Text/ANSI/Unicode/scroll/search, offers safe HEX
+and Text+HEX projections, and remains read-only until the Deck confirms this observer's exact Web
+TX Lease. Signed OTA and diagnostic-bundle interfaces are not present on the current mainline, so
+those formal views explicitly say that the module is not connected and never invent connections,
+versions, progress, or success states. All destructive operations use a scoped confirmation dialog,
+unknown metrics render as unavailable rather than zero, and the UI includes visible focus states,
+reduced-motion handling, and responsive table containment.
 
 Provider credentials and raw private content must never be sent to a Deck.
 
@@ -129,8 +131,9 @@ crash after collision-free placeholder reservation but before the journal commit
 only non-secret restorable configuration and opaque references—never credential bytes.
 
 Encrypted configuration migration is owned by `internal/backup`. A Backup Archive uses the binary
-`age` v1 scrypt format and contains only user-entered Structured HTTP Provider definitions and
-credentials, their explicit display order and polling interval, management Web settings, Companion
+`age` v1 scrypt format and schema 1.1 (schema 1.0 remains importable) and contains only user-entered
+Structured HTTP Provider definitions and credentials, their explicit display order and polling
+interval, management Web settings, Companion
 application settings, and the non-secret Device Profile cache. It cannot represent Codex/Cursor
 OAuth/Cookie/tokens, Pairing trust or Tokens, Web sessions, SQLite Provider Hours, raw responses, or
 serial buffers. The encrypted/plaintext limits are 8 MiB/4 MiB.
@@ -241,14 +244,23 @@ for a Companion restart.
 An authenticated Deck with an active Serial Session may publish fixed, versioned binary frames to
 the Companion's volatile Serial Hub. The Hub owns at most 8 MiB of payload for the current Session,
 rejects wrong Session/channel/order/monotonic metadata, and clears all bytes when that Session ends
-or the Runtime stops. It never writes serial bytes to logs, Provider Hour SQLite, configuration,
-backup archives, or diagnostics.
+or the Runtime stops. It never writes captured or transmitted Session bytes to logs, Provider Hour
+SQLite, configuration, backup archives, or diagnostics.
+
+User-authored Serial Presets are a separate protected configuration object, not captured Session
+bytes. At most 32 bounded presets may be stored and included in an encrypted Backup Archive; they
+are never inferred from the Serial Hub and never transmit without the current observer's exact Web
+TX Lease.
 
 Authenticated management clients use `/api/v1/serial/observe` with subprotocol
 `s3deck.serial.v1`; every observer has an independent overwrite-aware cursor. Current-session raw
 download is bounded to 1 MiB through `/api/v1/serial/download`, and `/api/v1/serial/status` excludes
 browser IDs, Lease IDs, and pending request capabilities. A slow observer can lose its own oldest
 bytes but cannot block Deck ingest or another observer.
+
+Serial Presets use authenticated `GET/PUT /api/v1/serial/presets`; writes additionally require the
+exact Origin, CSRF token, and sensitive-operation rate limit. List rows expose only name, mode,
+bounded byte count, and line-ending metadata until the user explicitly opens an editor.
 
 Only one observer may hold the ten-minute Web TX Lease. Acquire/release results remain
 `transitioning` until the Deck's sole owner acknowledges the exact request. Observer disconnect and

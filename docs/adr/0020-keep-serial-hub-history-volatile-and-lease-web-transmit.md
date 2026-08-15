@@ -8,9 +8,10 @@ same accepted/rejected fixtures. Text controls remain strict Device Link JSON.
 
 The Hub retains at most 8 MiB of payload and 65,536 bounded frame records in RAM. A new Session,
 explicit Session end, application stop, or Hub close zeroes and releases all payloads and observer
-cursors. Serial bytes cannot enter logs, configuration, history SQLite, backups, crash evidence, or
-any other persistent owner. Downloads copy only a bounded range from the current Session and carry
-`no-store` response policy.
+cursors. Captured or transmitted Serial Session bytes cannot enter logs, configuration, history
+SQLite, backups, crash evidence, or any other persistent owner. Downloads copy only a bounded range
+from the current Session and carry `no-store` response policy. A user-authored Serial Preset is the
+separate protected-configuration concept defined by ADR 0021; it is never derived from this Hub.
 
 Every authenticated Web observer receives an independent ordinal cursor. Ring overwrite advances
 only observers that fell behind and records their lost byte count; a slow or disconnected browser

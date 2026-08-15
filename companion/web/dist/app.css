@@ -231,10 +231,38 @@ td code { font-size: 12px; }
 .capability-state p { max-width: 720px; margin: 0; color: var(--muted); }
 .serial-shell { margin-top: 16px; overflow: hidden; border: 1px solid var(--dock-line); border-radius: var(--radius); background: var(--dock); color: #edf3f0; }
 .disabled-surface { opacity: .78; }
-.serial-toolbar { display: flex; gap: 20px; padding: 13px 16px; border-bottom: 1px solid var(--dock-line); color: #b9c6c1; font: 700 12px var(--font-mono); }
+.serial-toolbar { display: flex; min-height: 58px; align-items: center; justify-content: space-between; gap: 20px; padding: 8px 12px; border-bottom: 1px solid var(--dock-line); color: #b9c6c1; font: 700 12px var(--font-mono); }
+.terminal-tabs, .serial-tools { display: flex; align-items: center; gap: 8px; }
+.terminal-tab { min-height: 42px; padding: 0 13px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: #b9c6c1; font: inherit; cursor: pointer; }
+.terminal-tab.active { border-color: #49675a; background: #263b32; color: #fff; }
+.serial-search { display: flex; gap: 6px; }
+.serial-search input { width: 180px; min-height: 42px; border-color: var(--dock-line); background: #101914; color: #edf3f0; }
+.serial-main { display: grid; grid-template-columns: minmax(0, 1fr) 260px; min-height: 430px; }
+.terminal-canvas { display: flex; min-width: 0; flex-direction: column; border-right: 1px solid var(--dock-line); }
+.serial-xterm, .serial-byte-view { flex: 1; min-height: 340px; max-height: 56vh; }
+.serial-xterm { padding: 10px 8px 0; }
+.serial-byte-view { overflow: auto; margin: 0; border: 0; border-radius: 0; background: #101914; color: #d9e7e0; font: 13px/1.55 var(--font-mono); white-space: pre-wrap; word-break: break-word; }
+.serial-inspector { padding: 18px; color: #d9e7e0; }
+.serial-inspector h2 { margin: 0 0 8px; color: #fff; font-size: 15px; }
+.serial-inspector .definition-list > div { grid-template-columns: 1fr 1fr; padding: 9px 0; border-color: var(--dock-line); }
+.serial-inspector .definition-list dt { color: #90a19a; }
+.serial-inspector .callout { margin-top: 18px; border-color: var(--dock-line); background: #101914; color: #d9e7e0; }
+.serial-inspector .callout span { color: #90a19a; }
 .terminal-placeholder { display: grid; min-height: 230px; place-items: center; padding: 24px; color: #90a19a; font-family: var(--font-mono); text-align: center; }
-.terminal-compose { display: grid; grid-template-columns: 1fr auto; gap: 10px; padding: 12px; border-top: 1px solid var(--dock-line); }
-.terminal-compose input { border-color: var(--dock-line); background: #101914; color: #edf3f0; }
+.terminal-compose { display: grid; grid-template-columns: minmax(0, 1fr) 126px auto; align-items: end; gap: 10px; padding: 12px; border-top: 1px solid var(--dock-line); }
+.terminal-compose textarea, .terminal-compose select { border-color: var(--dock-line); background: #101914; color: #edf3f0; }
+.terminal-compose textarea { min-height: 64px; resize: vertical; }
+.serial-input-field > span, .serial-line-ending > span { color: #b9c6c1; }
+.serial-presets-layout { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(320px, .8fr); gap: 20px; align-items: start; }
+.serial-preset-list { overflow: hidden; }
+.serial-preset-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; align-items: center; width: 100%; min-height: 72px; padding: 12px 16px; border-bottom: 1px solid var(--line); background: transparent; color: var(--ink); text-align: left; }
+.serial-preset-row:last-child { border-bottom: 0; }
+.serial-preset-row:hover, .serial-preset-row.active { background: var(--primary-soft); }
+.serial-preset-open { min-width: 0; min-height: 42px; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.serial-preset-row strong, .serial-preset-row span { display: block; }
+.serial-preset-row span { margin-top: 4px; overflow: hidden; color: var(--muted); font: 12px var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.serial-preset-row .status-pill { margin: 0; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; clip-path: inset(50%); }
 .large-stat { margin: 6px 0 12px; font-size: 58px; font-weight: 700; line-height: 1; }
 .definition-list { margin: 0; }
 .definition-list > div { display: grid; grid-template-columns: minmax(110px, .7fr) minmax(0, 1.3fr); gap: 16px; padding: 12px 0; border-bottom: 1px solid var(--line); }
@@ -323,6 +351,9 @@ td code { font-size: 12px; }
   .deck-stage > aside { max-width: none; }
   .editor-layout { grid-template-columns: 1fr; }
   .sticky-card { position: static; }
+  .serial-main { grid-template-columns: 1fr; }
+  .terminal-canvas { border-right: 0; border-bottom: 1px solid var(--dock-line); }
+  .serial-inspector .definition-list { display: grid; grid-template-columns: repeat(2, 1fr); column-gap: 24px; }
 }
 
 @media (max-width: 920px) {
@@ -354,7 +385,7 @@ td code { font-size: 12px; }
   .page-heading { flex-direction: column; gap: 16px; }
   .page-heading h1 { font-size: 34px; }
   .page-actions { width: 100%; justify-content: flex-start; }
-  .metric-grid, .grid-two, .provider-grid, .backup-grid, .tray-stage { grid-template-columns: 1fr; }
+  .metric-grid, .grid-two, .provider-grid, .backup-grid, .tray-stage, .serial-presets-layout { grid-template-columns: 1fr; }
   .metric-card { min-height: 126px; }
   .boundary-card { grid-template-columns: auto 1fr; }
   .boundary-card code { grid-column: 1 / -1; }
@@ -371,6 +402,13 @@ td code { font-size: 12px; }
   .definition-list > div { grid-template-columns: 1fr; gap: 3px; }
   .definition-list dd { text-align: left; }
   .tray-preview { min-height: 430px; }
+  .serial-toolbar { align-items: stretch; flex-direction: column; }
+  .terminal-tabs { overflow-x: auto; }
+  .serial-tools { flex-wrap: wrap; }
+  .serial-search { min-width: 100%; }
+  .serial-search input { width: 100%; }
+  .terminal-compose { grid-template-columns: 1fr; }
+  .serial-inspector .definition-list { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 410px) {

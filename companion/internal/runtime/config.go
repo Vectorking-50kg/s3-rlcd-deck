@@ -60,6 +60,9 @@ type BackupService interface {
 
 type ConfigurationOwner interface {
 	UpdateApplicationSettings(context.Context, configmodel.ApplicationSettings) error
+	UpdateHistoryEnabled(context.Context, bool) error
+	SerialPresets(context.Context) ([]configmodel.SerialPreset, error)
+	UpdateSerialPresets(context.Context, []configmodel.SerialPreset) error
 	UpdateDeviceProfile(context.Context, configmodel.DeviceProfile) error
 }
 

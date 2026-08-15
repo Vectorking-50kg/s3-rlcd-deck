@@ -10,12 +10,15 @@ import (
 	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
 const (
 	MaximumDeviceProfiles    = 32
+	MaximumSerialPresets     = 32
 	maximumCapabilities      = 8
 	DefaultManagementAddress = "127.0.0.1:7777"
 )
@@ -25,6 +28,7 @@ var (
 	firmwarePattern   = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z.+_-]{0,31}$`)
 	boardPattern      = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,47}$`)
 	capabilityPattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
+	serialPresetID    = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
 )
 
 type WebSettings struct {
@@ -34,7 +38,118 @@ type WebSettings struct {
 }
 
 type ApplicationSettings struct {
-	HistoryEnabled bool `json:"history_enabled"`
+	HistoryEnabled bool           `json:"history_enabled"`
+	SerialPresets  []SerialPreset `json:"serial_presets"`
+}
+
+type SerialPresetMode string
+
+const (
+	SerialPresetText SerialPresetMode = "text"
+	SerialPresetHex  SerialPresetMode = "hex"
+)
+
+type SerialLineEnding string
+
+const (
+	SerialLineEndingCurrent SerialLineEnding = "current"
+	SerialLineEndingCRLF    SerialLineEnding = "crlf"
+	SerialLineEndingLF      SerialLineEnding = "lf"
+	SerialLineEndingCR      SerialLineEnding = "cr"
+	SerialLineEndingNone    SerialLineEnding = "none"
+)
+
+type SerialPreset struct {
+	ID         string           `json:"id"`
+	Name       string           `json:"name"`
+	Mode       SerialPresetMode `json:"mode"`
+	Payload    []byte           `json:"payload"`
+	LineEnding SerialLineEnding `json:"line_ending"`
+}
+
+func ValidateSerialPresets(presets []SerialPreset) bool {
+	if len(presets) > MaximumSerialPresets {
+		return false
+	}
+	identifiers := make(map[string]struct{}, len(presets))
+	for _, preset := range presets {
+		if !serialPresetID.MatchString(preset.ID) || !validPresetName(preset.Name) {
+			return false
+		}
+		if _, exists := identifiers[preset.ID]; exists {
+			return false
+		}
+		identifiers[preset.ID] = struct{}{}
+		endingBytes := serialLineEndingBytes(preset.LineEnding)
+		if endingBytes < 0 {
+			return false
+		}
+		switch preset.Mode {
+		case SerialPresetText:
+			if !utf8.Valid(preset.Payload) || len(preset.Payload) == 0 ||
+				len(preset.Payload)+endingBytes > 256 {
+				return false
+			}
+		case SerialPresetHex:
+			if preset.LineEnding != SerialLineEndingNone || len(preset.Payload) == 0 ||
+				len(preset.Payload) > 256 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func validPresetName(name string) bool {
+	if !utf8.ValidString(name) || strings.TrimSpace(name) == "" ||
+		len(name) > 192 || utf8.RuneCountInString(name) > 48 {
+		return false
+	}
+	for _, character := range name {
+		if unicode.IsControl(character) {
+			return false
+		}
+	}
+	return true
+}
+
+func serialLineEndingBytes(ending SerialLineEnding) int {
+	switch ending {
+	case SerialLineEndingCurrent, SerialLineEndingCRLF:
+		return 2
+	case SerialLineEndingLF, SerialLineEndingCR:
+		return 1
+	case SerialLineEndingNone:
+		return 0
+	default:
+		return -1
+	}
+}
+
+func CloneSerialPresets(source []SerialPreset) []SerialPreset {
+	if source == nil {
+		return nil
+	}
+	result := make([]SerialPreset, len(source))
+	for index := range source {
+		result[index] = source[index]
+		result[index].Payload = append([]byte(nil), source[index].Payload...)
+	}
+	return result
+}
+
+func DestroySerialPresets(presets []SerialPreset) {
+	for index := range presets {
+		clear(presets[index].Payload)
+		presets[index].Payload = nil
+	}
+}
+
+func CloneApplicationSettings(source ApplicationSettings) ApplicationSettings {
+	source.SerialPresets = CloneSerialPresets(source.SerialPresets)
+	return source
 }
 
 // DeviceProfile is a non-secret cache projection. It intentionally excludes

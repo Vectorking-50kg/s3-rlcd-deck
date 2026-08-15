@@ -3,11 +3,18 @@
 const state = {
   csrf: "", bootstrap: null, console: null, providers: [], templates: [], providerStates: [], history: [],
   editing: "", backup: null, page: "overview", providerFilter: "all", deckIndex: 0,
+  serialPresets: [], serialPresetEditing: "",
+  serial: {
+    client: null, terminal: null, fit: null, search: null, resizeObserver: null,
+    reconnectTimer: null, heartbeatTimer: null, mode: "text", paused: false,
+    byteChunks: [], byteBytes: 0, status: null,
+  },
   authenticated: false, refreshTimer: null, authEpoch: 0, authController: new AbortController(),
   sync: {
     console: { lastSuccess: "", error: "" },
     providers: { lastSuccess: "", error: "" },
     history: { lastSuccess: "", error: "" },
+    serialPresets: { lastSuccess: "", error: "" },
   },
 };
 
@@ -263,6 +270,9 @@ function navigate(page, updateHash = true) {
   if (page === "provider-editor" && !state.editing && !$("#provider-id").value) openEditor(null, false);
   if (page === "history") loadHistory();
   if (page === "deck") renderDeckPreview();
+  if (config.domain === "serial") startSerial();
+  else stopSerial();
+  if (page === "serial-presets") loadSerialPresets();
   if (updateHash && location.hash !== `#${page}`) history.pushState(null, "", `#${page}`);
   $("#main-content").focus({ preventScroll: true });
   window.scrollTo({ top: 0, behavior: "auto" });
@@ -276,6 +286,9 @@ function scrubSensitiveState() {
   state.history = [];
   state.editing = "";
   state.backup = null;
+  stopSerial();
+  state.serialPresets = [];
+  state.serialPresetEditing = "";
   state.deckIndex = 0;
   Object.values(state.sync).forEach((sync) => { sync.lastSuccess = ""; sync.error = ""; });
   $("#management-token").value = "";
@@ -289,6 +302,9 @@ function scrubSensitiveState() {
   $("#backup-conflicts").replaceChildren();
   $("#backup-preview").textContent = "等待预览";
   $("#apply-backup").disabled = true;
+  $("#serial-preset-form").reset();
+  $("#serial-preset-id").value = "";
+  $("#serial-preset-list").replaceChildren();
   const dialog = $("#app-dialog");
   if (dialog.open) dialog.close();
   $("#dialog-body").replaceChildren();
@@ -1075,6 +1091,471 @@ async function applyBackup() {
   } catch (error) { if (operationIsCurrent(operation)) toast("无法导入备份", error.message, true); }
 }
 
+const SERIAL_BROWSER_LOG_BYTES = 1 << 20;
+
+function initializeSerialTerminal() {
+  if (state.serial.terminal) return true;
+  if (!window.Terminal || !window.FitAddon?.FitAddon || !window.SearchAddon?.SearchAddon ||
+      !window.Unicode11Addon?.Unicode11Addon || !window.S3DeckSerialTerminal) {
+    resourceFeedback("serial", "终端组件不可用，请重新加载 Companion。", true);
+    return false;
+  }
+  const terminal = new window.Terminal({
+    allowProposedApi: true,
+    convertEol: false,
+    cursorBlink: false,
+    disableStdin: true,
+    fontFamily: '"SFMono-Regular", Consolas, "Liberation Mono", monospace',
+    fontSize: 13,
+    linkHandler: null,
+    screenReaderMode: true,
+    scrollback: 5000,
+    theme: { background: "#101914", foreground: "#d9e7e0", cursor: "#d9e7e0", selectionBackground: "#49675a" },
+    windowOptions: {},
+  });
+  const fit = new window.FitAddon.FitAddon();
+  const search = new window.SearchAddon.SearchAddon();
+  const unicode = new window.Unicode11Addon.Unicode11Addon();
+  terminal.loadAddon(fit);
+  terminal.loadAddon(search);
+  terminal.loadAddon(unicode);
+  terminal.unicode.activeVersion = "11";
+  terminal.open($("#serial-xterm"));
+  state.serial.terminal = terminal;
+  state.serial.fit = fit;
+  state.serial.search = search;
+  state.serial.resizeObserver = new ResizeObserver(() => {
+    if (!$("#serial-xterm").hidden) fit.fit();
+  });
+  state.serial.resizeObserver.observe($("#serial-xterm"));
+  window.requestAnimationFrame(() => fit.fit());
+  return true;
+}
+
+function clearSerialOutput() {
+  state.serial.byteChunks.forEach((frame) => frame.payload.fill(0));
+  state.serial.byteChunks = [];
+  state.serial.byteBytes = 0;
+  $("#serial-byte-view").textContent = "";
+  state.serial.terminal?.reset();
+}
+
+function rememberSerialFrame(frame) {
+  const retained = { ...frame, payload: frame.payload.slice() };
+  state.serial.byteChunks.push(retained);
+  state.serial.byteBytes += retained.payload.length;
+  while (state.serial.byteBytes > SERIAL_BROWSER_LOG_BYTES && state.serial.byteChunks.length > 1) {
+    const removed = state.serial.byteChunks.shift();
+    state.serial.byteBytes -= removed.payload.length;
+    removed.payload.fill(0);
+  }
+}
+
+function writeTerminalPayload(payload) {
+  const owned = payload.slice();
+  state.serial.terminal.write(owned, () => owned.fill(0));
+}
+
+function renderSerialOutput() {
+  const textMode = state.serial.mode === "text";
+  $("#serial-xterm").hidden = !textMode;
+  $("#serial-byte-view").hidden = textMode;
+  if (state.serial.paused) return;
+  if (textMode) {
+    state.serial.terminal.reset();
+    state.serial.byteChunks.forEach((frame) => writeTerminalPayload(frame.payload));
+    window.requestAnimationFrame(() => state.serial.fit?.fit());
+    return;
+  }
+  const terminal = window.S3DeckSerialTerminal;
+  const lines = state.serial.byteChunks.map((frame) => {
+    const prefix = `#${frame.sequence.toString()} @${frame.monotonicMS.toString()}ms`;
+    if (state.serial.mode === "hex") return `${prefix}  ${terminal.formatHex(frame.payload)}`;
+    const mixed = terminal.formatMixed(frame.payload);
+    return `${prefix}  ${mixed.hex}\n${" ".repeat(Math.min(prefix.length + 2, 32))}${mixed.text}`;
+  });
+  $("#serial-byte-view").textContent = lines.join("\n");
+  $("#serial-byte-view").scrollTop = $("#serial-byte-view").scrollHeight;
+}
+
+function handleSerialFrame(frame) {
+  if (frame.channel !== "target_rx") return;
+  rememberSerialFrame(frame);
+  if (state.serial.paused) return;
+  if (state.serial.mode === "text") writeTerminalPayload(frame.payload);
+  else renderSerialOutput();
+}
+
+function serialOwnerLabel(owner) {
+  return { usb: "USB", web: "Web", transitioning: "切换中", unavailable: "不可用", none: "无" }[owner] || "未知";
+}
+
+function renderSerialState(next) {
+  const previous = state.serial.status;
+  if (previous?.sessionID && previous.sessionID !== "0" && next.sessionID !== previous.sessionID) clearSerialOutput();
+  state.serial.status = next;
+  const active = next.connected && next.sessionID !== "0" && next.serialState !== "disarmed";
+  setText("#serial-session", active ? next.sessionID : "—");
+  setText("#serial-state", active ? next.serialState : "不可用");
+  setText("#serial-buffered", active ? `${formatNumber(next.bufferedBytes)} B / ${formatNumber(next.bufferedFrames)} 帧` : "—");
+  setText("#serial-overwritten", active ? `${formatNumber(next.overwrittenBytes)} B` : "—");
+  setText("#serial-observers", active ? formatNumber(next.observers) : "—");
+  setText("#serial-owner", serialOwnerLabel(next.leaseOwner));
+  setText("#serial-remaining", next.canTransmit && next.leaseRemainingMS > 0 ?
+    `${Math.ceil(next.leaseRemainingMS / 1000)} 秒` : "—");
+  $("#serial-download").href = active ?
+    `/api/v1/serial/download?session_id=${encodeURIComponent(next.sessionID)}` : "#";
+  $("#serial-download").setAttribute("aria-disabled", String(!active));
+
+  const leaseButton = $("#serial-lease");
+  leaseButton.className = `button ${next.canTransmit ? "danger" : "primary"}`;
+  if (!active) {
+    setPill($("#serial-owner-pill"), "Serial 不可用", "danger");
+    setText("#serial-owner-title", "当前没有可观察的 Serial Session");
+    setText("#serial-owner-detail", "Deck 离线、串口未启用或浏览器正在重新连接。");
+    leaseButton.textContent = "申请 Web TX";
+    leaseButton.disabled = true;
+    resourceFeedback("serial", "Serial Session 当前不可用；将自动重连。", true);
+  } else if (next.canTransmit) {
+    setPill($("#serial-owner-pill"), "本浏览器 · WEB TX", "warning");
+    setText("#serial-owner-title", "本浏览器持有 Web TX Lease");
+    setText("#serial-owner-detail", "USB 输入在释放、页面关闭或十分钟 Lease 到期前会被拒绝。");
+    leaseButton.textContent = "释放 Web TX";
+    leaseButton.disabled = false;
+    resourceFeedback("serial", "Serial Session 已连接；发送仍受 256-byte 上限约束。");
+  } else if (next.leaseOwner === "usb") {
+    setPill($("#serial-owner-pill"), "USB TX Owner", "info");
+    setText("#serial-owner-title", "串口输入由 USB 持有");
+    setText("#serial-owner-detail", "多个浏览器可以观察；申请成功且 Deck 明确确认后才允许发送。");
+    leaseButton.textContent = "申请 Web TX";
+    leaseButton.disabled = false;
+    resourceFeedback("serial");
+  } else {
+    setPill($("#serial-owner-pill"), serialOwnerLabel(next.leaseOwner), "warning");
+    setText("#serial-owner-title", next.leaseOwner === "web" ? "另一个浏览器持有 Web TX" : "TX Owner 正在切换");
+    setText("#serial-owner-detail", "本浏览器保持只读，直到收到 Deck 的精确 Owner 状态。");
+    leaseButton.textContent = "申请 Web TX";
+    leaseButton.disabled = true;
+    resourceFeedback("serial");
+  }
+  updateSerialSendAvailability();
+  renderSerialPresets();
+  if (!next.connected) scheduleSerialReconnect();
+}
+
+function updateSerialSendAvailability() {
+  const canSend = Boolean(state.serial.status?.canTransmit) && !state.serial.paused;
+  $("#serial-input").disabled = !canSend;
+  $("#serial-send").disabled = !canSend;
+  $("#serial-input").placeholder = canSend ?
+    (state.serial.mode === "hex" ? "48 65 6C 6C 6F" : "发送到 Target…") :
+    (state.serial.paused ? "终端暂停时不能发送" : "申请 Web TX Lease 后可发送");
+  setPill($("#serial-live-pill"), state.serial.paused ? "已暂停" :
+    (state.serial.status?.connected ? "实时" : "离线"), state.serial.paused ? "warning" :
+    (state.serial.status?.connected ? "success" : "neutral"));
+}
+
+function handleSerialResult(document) {
+  if (document.type === "serial.tx.result" && document.accepted !== true) {
+    toast("串口发送未完成", "Deck 未确认当前发送条件，请检查 TX Owner。", true);
+  } else if (document.type === "serial.lease.result" && document.accepted !== true) {
+    toast("无法取得 Web TX", "Lease 已被占用、Session 已变化或 Deck 当前不可用。", true);
+  } else if (document.type === "serial.lease.heartbeat.result" && document.accepted !== true) {
+    toast("Web TX Lease 已失效", "发送已立即禁用，等待 Deck 发布当前 Owner。", true);
+  }
+}
+
+function scheduleSerialReconnect() {
+  if (state.serial.reconnectTimer || !state.authenticated || pageConfig[state.page]?.domain !== "serial") return;
+  state.serial.reconnectTimer = window.setTimeout(() => {
+    state.serial.reconnectTimer = null;
+    if (state.authenticated && pageConfig[state.page]?.domain === "serial") connectSerialObserver();
+  }, 1500);
+}
+
+function connectSerialObserver() {
+  if (state.serial.client || !state.authenticated) return;
+  let client;
+  client = window.S3DeckSerialTerminal.createClient({
+    origin: location.origin,
+    onFrame: handleSerialFrame,
+    onState: (next) => {
+      if (!next.connected && state.serial.client === client) state.serial.client = null;
+      renderSerialState(next);
+    },
+    onResult: handleSerialResult,
+    onError: () => resourceFeedback("serial", "Serial 数据未通过协议校验；正在重新连接。", true),
+  });
+  state.serial.client = client;
+  try { client.connect(); }
+  catch (_) {
+    state.serial.client = null;
+    renderSerialState({ connected: false, serialState: "unavailable", sessionID: "0", leaseID: "0",
+      leaseOwner: "unavailable", canTransmit: false, deviceID: "", bufferedBytes: 0,
+      bufferedFrames: 0, overwrittenBytes: 0, observers: 0, leaseRemainingMS: 0 });
+  }
+}
+
+function startSerial() {
+  if (!state.authenticated || !initializeSerialTerminal()) return;
+  connectSerialObserver();
+  if (!state.serial.heartbeatTimer) {
+    state.serial.heartbeatTimer = window.setInterval(() => {
+      if (!state.serial.status?.canTransmit) return;
+      try { state.serial.client?.heartbeat(); }
+      catch (_) { /* close/status callback removes transmit authority. */ }
+    }, 30000);
+  }
+  window.requestAnimationFrame(() => state.serial.fit?.fit());
+}
+
+function stopSerial() {
+  if (state.serial.reconnectTimer) window.clearTimeout(state.serial.reconnectTimer);
+  if (state.serial.heartbeatTimer) window.clearInterval(state.serial.heartbeatTimer);
+  state.serial.reconnectTimer = null;
+  state.serial.heartbeatTimer = null;
+  const client = state.serial.client;
+  state.serial.client = null;
+  client?.disconnect();
+  state.serial.resizeObserver?.disconnect();
+  state.serial.resizeObserver = null;
+  state.serial.terminal?.dispose();
+  state.serial.terminal = null;
+  state.serial.fit = null;
+  state.serial.search = null;
+  state.serial.status = null;
+  clearSerialOutput();
+}
+
+function setSerialMode(mode) {
+  if (!["text", "hex", "mixed"].includes(mode)) return;
+  state.serial.mode = mode;
+  $$('[data-serial-mode]').forEach((button) => {
+    const selected = button.dataset.serialMode === mode;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-selected", String(selected));
+  });
+  renderSerialOutput();
+  updateSerialSendAvailability();
+}
+
+function sendSerialPayload(payload) {
+  if (state.serial.paused || !state.serial.status?.canTransmit) throw new Error("当前浏览器没有可用的 Web TX Lease");
+  state.serial.client.send(payload);
+}
+
+function submitSerial(event) {
+  event.preventDefault();
+  try {
+    const terminal = window.S3DeckSerialTerminal;
+    const payload = state.serial.mode === "hex" ? terminal.parseHex($("#serial-input").value) :
+      terminal.encodeText($("#serial-input").value, $("#serial-line-ending").value);
+    sendSerialPayload(payload);
+    payload.fill(0);
+    $("#serial-input").value = "";
+  } catch (error) { toast("无法发送串口数据", error.message, true); }
+}
+
+function changeSerialLease() {
+  const client = state.serial.client;
+  const status = state.serial.status;
+  if (!client || !status?.connected || status.sessionID === "0") return;
+  const releasing = status.canTransmit;
+  $("#serial-lease").disabled = true;
+  resourceFeedback("serial", releasing ? "正在请求 Deck 释放 Web TX……" : "正在等待 Deck 精确确认 Web TX……");
+  try {
+    if (releasing) client.release();
+    else client.acquire();
+  } catch (error) {
+    renderSerialState(client.status());
+    toast(releasing ? "无法释放 Web TX" : "无法申请 Web TX", error.message, true);
+  }
+}
+
+function toggleSerialPause() {
+  state.serial.paused = !state.serial.paused;
+  const button = $("#serial-pause");
+  button.textContent = state.serial.paused ? "▶" : "Ⅱ";
+  button.setAttribute("aria-label", state.serial.paused ? "继续终端" : "暂停终端");
+  button.setAttribute("aria-pressed", String(state.serial.paused));
+  if (!state.serial.paused) renderSerialOutput();
+  updateSerialSendAvailability();
+  renderSerialPresets();
+}
+
+function searchSerialOutput() {
+  const query = $("#serial-search").value;
+  if (!query || state.serial.mode !== "text") return;
+  if (!state.serial.search?.findNext(query)) {
+    resourceFeedback("serial", "当前 Text / ANSI 缓冲中没有匹配内容。", true);
+  }
+}
+
+function downloadSerialCapture(event) {
+  const status = state.serial.status;
+  if (!status?.connected || status.sessionID === "0") {
+    event.preventDefault();
+    toast("无法下载串口会话", "当前没有可下载的 Serial Session。", true);
+  }
+}
+
+function serialPresetID() {
+  const bytes = new Uint8Array(15);
+  window.crypto.getRandomValues(bytes);
+  return `p${Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("")}`;
+}
+
+async function loadSerialPresets() {
+  if (!state.authenticated) return;
+  resourceFeedback("serial-presets", "正在读取受保护的串口预设……");
+  try {
+    const document = await (await request("/api/v1/serial/presets")).json();
+    if (!Array.isArray(document.presets)) throw new Error("串口预设响应格式无效。");
+    state.serialPresets = document.presets;
+    state.sync.serialPresets.lastSuccess = new Date().toISOString();
+    state.sync.serialPresets.error = "";
+    resourceFeedback("serial-presets");
+    renderSerialPresets();
+  } catch (error) {
+    state.sync.serialPresets.error = error.message;
+    resourceFeedback("serial-presets", "串口预设当前不可用；已禁用保存和发送。", true);
+    renderSerialPresets();
+  }
+}
+
+function serialPresetsWritable() {
+  return state.authenticated && Boolean(state.sync.serialPresets.lastSuccess) && !state.sync.serialPresets.error;
+}
+
+function renderSerialPresets() {
+  const target = $("#serial-preset-list");
+  if (!target) return;
+  target.replaceChildren();
+  if (!state.sync.serialPresets.lastSuccess) {
+    target.append(emptyState("等待预设", "打开此页后从受保护配置读取。"));
+  } else if (!state.serialPresets.length) {
+    target.append(emptyState("没有串口预设", "新建 Text 或严格 HEX 命令。"));
+  } else {
+    state.serialPresets.forEach((preset) => {
+      const row = element("div", `serial-preset-row${state.serialPresetEditing === preset.id ? " active" : ""}`);
+      const open = element("button", "serial-preset-open");
+      open.type = "button";
+      open.append(element("strong", "", preset.name), element("span", "",
+        window.S3DeckSerialTerminal.describePreset(preset)));
+      open.addEventListener("click", () => editSerialPreset(preset.id));
+      const send = element("button", "button small", "发送");
+      send.type = "button";
+      send.disabled = !state.serial.status?.canTransmit || state.serial.paused || !serialPresetsWritable();
+      send.addEventListener("click", () => sendSerialPreset(preset.id));
+      row.append(open, send);
+      target.append(row);
+    });
+  }
+  const writable = serialPresetsWritable();
+  $("#new-serial-preset").disabled = !writable;
+  $$("#serial-preset-form input, #serial-preset-form textarea, #serial-preset-form select, #serial-preset-form button").forEach((control) => {
+    control.disabled = !writable;
+  });
+  updateSerialPresetMode();
+  $("#delete-serial-preset").disabled = !writable || !state.serialPresetEditing;
+}
+
+function clearSerialPresetEditor() {
+  state.serialPresetEditing = "";
+  $("#serial-preset-form").reset();
+  $("#serial-preset-id").value = "";
+  $("#serial-preset-mode").value = "text";
+  $("#serial-preset-ending").value = "current";
+  setText("#serial-preset-editor-note", "新建一个有界命令");
+  updateSerialPresetMode();
+  renderSerialPresets();
+}
+
+function editSerialPreset(id) {
+  if (!serialPresetsWritable()) return;
+  const preset = state.serialPresets.find((candidate) => candidate.id === id);
+  if (!preset) return;
+  state.serialPresetEditing = id;
+  $("#serial-preset-id").value = id;
+  $("#serial-preset-name").value = preset.name;
+  $("#serial-preset-mode").value = preset.mode;
+  $("#serial-preset-payload").value = preset.payload;
+  $("#serial-preset-ending").value = preset.line_ending;
+  setText("#serial-preset-editor-note", "编辑受保护的预设");
+  updateSerialPresetMode();
+  renderSerialPresets();
+}
+
+function updateSerialPresetMode() {
+  const hexadecimal = $("#serial-preset-mode").value === "hex";
+  const ending = $("#serial-preset-ending");
+  if (hexadecimal) ending.value = "none";
+  ending.disabled = hexadecimal || !serialPresetsWritable();
+}
+
+async function persistSerialPresets(presets) {
+  if (!serialPresetsWritable()) throw new Error("串口预设不是最新状态，请先刷新。");
+  await request("/api/v1/serial/presets", { method: "PUT", body: JSON.stringify({ presets }) });
+  state.serialPresets = presets;
+  state.sync.serialPresets.lastSuccess = new Date().toISOString();
+  renderSerialPresets();
+}
+
+async function saveSerialPreset(event) {
+  event.preventDefault();
+  try {
+    if (!serialPresetsWritable()) throw new Error("串口预设不是最新状态，请先刷新。");
+    const mode = $("#serial-preset-mode").value;
+    let payload = $("#serial-preset-payload").value;
+    let ending = $("#serial-preset-ending").value;
+    if (mode === "hex") {
+      const bytes = window.S3DeckSerialTerminal.parseHex(payload);
+      payload = window.S3DeckSerialTerminal.formatHex(bytes);
+      bytes.fill(0);
+      ending = "none";
+    } else {
+      const checkEnding = ending === "current" ? "crlf" : ending;
+      const bytes = window.S3DeckSerialTerminal.encodeText(payload, checkEnding);
+      bytes.fill(0);
+    }
+    const id = state.serialPresetEditing || serialPresetID();
+    const preset = { id, name: $("#serial-preset-name").value.trim(), mode, payload, line_ending: ending };
+    if (!preset.name) throw new Error("请输入预设名称。");
+    const presets = state.serialPresets.filter((candidate) => candidate.id !== id);
+    const existingIndex = state.serialPresets.findIndex((candidate) => candidate.id === id);
+    if (existingIndex < 0) presets.push(preset);
+    else presets.splice(existingIndex, 0, preset);
+    await persistSerialPresets(presets);
+    clearSerialPresetEditor();
+    toast("串口预设已保存", "预设不会绕过 Web TX Lease 或暂停状态。");
+  } catch (error) { toast("无法保存串口预设", error.message, true); }
+}
+
+async function deleteSerialPreset() {
+  if (!serialPresetsWritable() || !state.serialPresetEditing) return;
+  const preset = state.serialPresets.find((candidate) => candidate.id === state.serialPresetEditing);
+  if (!preset || !await showDialog({ eyebrow: "串口预设", title: `删除“${preset.name}”？`,
+    paragraphs: ["此操作只删除预设，不会发送任何串口字节。"], confirmText: "删除预设", danger: true })) return;
+  try {
+    if (!serialPresetsWritable()) throw new Error("串口预设已变化，请刷新后重试。");
+    await persistSerialPresets(state.serialPresets.filter((candidate) => candidate.id !== preset.id));
+    clearSerialPresetEditor();
+    toast("串口预设已删除", "没有串口字节被发送。");
+  } catch (error) { toast("无法删除串口预设", error.message, true); }
+}
+
+function sendSerialPreset(id) {
+  const preset = state.serialPresets.find((candidate) => candidate.id === id);
+  if (!preset || !serialPresetsWritable()) return;
+  try {
+    const ending = preset.line_ending === "current" ? $("#serial-line-ending").value : preset.line_ending;
+    const payload = preset.mode === "hex" ? window.S3DeckSerialTerminal.parseHex(preset.payload) :
+      window.S3DeckSerialTerminal.encodeText(preset.payload, ending);
+    sendSerialPayload(payload);
+    payload.fill(0);
+  } catch (error) { toast("无法发送串口预设", error.message, true); }
+}
+
 function showDialog({ eyebrow, title, paragraphs = [], body = null, confirmText = "确认", danger = false, informational = false }) {
   const dialog = $("#app-dialog");
   setText("#dialog-eyebrow", eyebrow);
@@ -1150,6 +1631,20 @@ $("#refresh-history").addEventListener("click", loadHistory);
 $("#history-provider").addEventListener("change", loadHistory);
 $("#save-history").addEventListener("click", saveHistory);
 $("#clear-history").addEventListener("click", clearHistory);
+$("#serial-compose").addEventListener("submit", submitSerial);
+$("#serial-lease").addEventListener("click", changeSerialLease);
+$("#serial-pause").addEventListener("click", toggleSerialPause);
+$("#serial-search-next").addEventListener("click", searchSerialOutput);
+$("#serial-search").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") { event.preventDefault(); searchSerialOutput(); }
+});
+$("#serial-download").addEventListener("click", downloadSerialCapture);
+$$('[data-serial-mode]').forEach((button) => button.addEventListener("click", () => setSerialMode(button.dataset.serialMode)));
+$("#serial-preset-form").addEventListener("submit", saveSerialPreset);
+$("#new-serial-preset").addEventListener("click", clearSerialPresetEditor);
+$("#clear-serial-preset").addEventListener("click", clearSerialPresetEditor);
+$("#delete-serial-preset").addEventListener("click", deleteSerialPreset);
+$("#serial-preset-mode").addEventListener("change", updateSerialPresetMode);
 $("#deck-next-provider").addEventListener("click", () => { state.deckIndex += 1; renderDeckPreview(); });
 $("#export-backup").addEventListener("click", exportBackup);
 $("#preview-backup").addEventListener("click", previewBackup);

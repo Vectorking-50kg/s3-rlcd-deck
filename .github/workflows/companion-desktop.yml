@@ -65,6 +65,9 @@ jobs:
         run: |
           $unformatted = gofmt -l .
           if ($unformatted) { throw "Go source requires gofmt: $unformatted" }
+          node --check web/dist/app.js
+          node --check web/dist/serial-terminal.js
+          node --test web/serial_terminal_test.mjs
           go vet ./...
           go test ./...
           go test -race ./...

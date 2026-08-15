@@ -30,6 +30,23 @@ func (owner *historySettingsOwner) UpdateApplicationSettings(
 	return nil
 }
 
+func (owner *historySettingsOwner) UpdateHistoryEnabled(_ context.Context, enabled bool) error {
+	owner.application.HistoryEnabled = enabled
+	return nil
+}
+
+func (owner *historySettingsOwner) SerialPresets(context.Context) ([]configmodel.SerialPreset, error) {
+	return configmodel.CloneSerialPresets(owner.application.SerialPresets), nil
+}
+
+func (owner *historySettingsOwner) UpdateSerialPresets(
+	_ context.Context,
+	presets []configmodel.SerialPreset,
+) error {
+	owner.application.SerialPresets = configmodel.CloneSerialPresets(presets)
+	return nil
+}
+
 func (*historySettingsOwner) UpdateDeviceProfile(
 	context.Context,
 	configmodel.DeviceProfile,

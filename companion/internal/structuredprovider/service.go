@@ -83,9 +83,11 @@ func NewService(owner *DefinitionStore, secrets serviceSecretStore) (*Service, e
 	if owner == nil || secrets == nil {
 		return nil, ErrInvalidConfig
 	}
-	if _, err := owner.Configuration(context.Background()); err != nil {
+	configuration, err := owner.Configuration(context.Background())
+	if err != nil {
 		return nil, ErrDefinitionCommit
 	}
+	DestroyRestorableConfiguration(&configuration)
 	return &Service{
 		owner: owner, secrets: secrets, changed: make(chan struct{}, 1),
 		newCollector: func(config Config) (managedCollector, error) { return New(config) },
