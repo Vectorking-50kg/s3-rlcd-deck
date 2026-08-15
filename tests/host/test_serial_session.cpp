@@ -1,0 +1,257 @@
+#include "deck_serial_session.h"
+
+#include <assert.h>
+#include <stdint.h>
+
+namespace {
+
+struct FakeHardware {
+    bool install_succeeds = true;
+    unsigned installs = 0;
+    unsigned uninstalls = 0;
+    unsigned high_impedance = 0;
+    unsigned usb_clears = 0;
+    unsigned web_clears = 0;
+};
+
+bool install_uart(void *context)
+{
+    auto *hardware = static_cast<FakeHardware *>(context);
+    ++hardware->installs;
+    return hardware->install_succeeds;
+}
+
+void uninstall_uart(void *context)
+{
+    ++static_cast<FakeHardware *>(context)->uninstalls;
+}
+
+void set_tx_high_impedance(void *context)
+{
+    ++static_cast<FakeHardware *>(context)->high_impedance;
+}
+
+void clear_usb_tx(void *context)
+{
+    ++static_cast<FakeHardware *>(context)->usb_clears;
+}
+
+void clear_web_tx(void *context)
+{
+    ++static_cast<FakeHardware *>(context)->web_clears;
+}
+
+deck_serial_session_t *make_session(FakeHardware *hardware, uint64_t lease_ms = 600'000)
+{
+    const deck_serial_session_config_t config = {
+        {install_uart, uninstall_uart, set_tx_high_impedance, clear_usb_tx, clear_web_tx,
+         hardware},
+        lease_ms,
+    };
+    return deck_serial_session_create(&config);
+}
+
+deck_serial_session_snapshot_t snapshot(deck_serial_session_t *session)
+{
+    deck_serial_session_snapshot_t value{};
+    assert(deck_serial_session_snapshot(session, &value));
+    return value;
+}
+
+void test_entry_switch_lease_and_exit()
+{
+    FakeHardware hardware;
+    deck_serial_session_t *session = make_session(&hardware, 1'000);
+    assert(session != nullptr);
+    assert(hardware.high_impedance == 1);
+
+    auto state = snapshot(session);
+    assert(state.state == DECK_SERIAL_DISARMED);
+    assert(!state.uart_installed);
+
+    deck_serial_command_result_t result{};
+    assert(deck_serial_session_enter(session, 0, 100, &result));
+    assert(result.code == DECK_SERIAL_COMMAND_APPLIED);
+    assert(result.state == DECK_SERIAL_USB_TX);
+    assert(result.session_id == 1);
+    assert(hardware.installs == 1);
+
+    // Replayed physical input is idempotent and never creates a second session.
+    assert(deck_serial_session_enter(session, 0, 101, &result));
+    assert(result.code == DECK_SERIAL_COMMAND_NO_CHANGE);
+    assert(result.session_id == 1);
+    assert(hardware.installs == 1);
+
+    assert(deck_serial_session_request_web(session, 1, 10, true, 200, &result));
+    assert(result.code == DECK_SERIAL_COMMAND_APPLIED);
+    assert(result.state == DECK_SERIAL_WEB_TX);
+    assert(result.lease_id != 0);
+    const uint64_t lease_id = result.lease_id;
+    assert(hardware.usb_clears == 1);
+
+    // The exact request replays its prior result without touching queues or the lease.
+    deck_serial_command_result_t replay{};
+    assert(deck_serial_session_request_web(session, 1, 10, true, 999, &replay));
+    assert(replay.code == result.code);
+    assert(replay.lease_id == lease_id);
+    assert(hardware.usb_clears == 1);
+    assert(snapshot(session).lease_deadline_ms == 1'200);
+
+    assert(!deck_serial_session_accept_usb_input(session, 7));
+    assert(!deck_serial_session_accept_usb_input(session, 5));
+    assert(snapshot(session).usb_tx_rejected == 12);
+
+    assert(deck_serial_session_web_activity(session, 1, lease_id, 1'199));
+    assert(snapshot(session).lease_deadline_ms == 2'199);
+    deck_serial_session_tick(session, 2'198);
+    assert(snapshot(session).state == DECK_SERIAL_WEB_TX);
+    deck_serial_session_tick(session, 2'199);
+    state = snapshot(session);
+    assert(state.state == DECK_SERIAL_USB_TX);
+    assert(state.lease_id == 0);
+    assert(hardware.web_clears == 1);
+    assert(deck_serial_session_accept_usb_input(session, 1));
+
+    // A response replay is only valid while the transition it describes is
+    // still current. It must not claim WEB TX after the lease expired.
+    assert(deck_serial_session_request_web(session, 1, 10, true, 2'199, &replay));
+    assert(replay.code == DECK_SERIAL_COMMAND_STALE_REQUEST);
+    assert(replay.state == DECK_SERIAL_USB_TX);
+
+    // Stale session/request commands cannot reacquire ownership.
+    assert(deck_serial_session_request_web(session, 0, 11, true, 2'200, &result));
+    assert(result.code == DECK_SERIAL_COMMAND_STALE_SESSION);
+    assert(deck_serial_session_request_web(session, 1, 9, true, 2'200, &result));
+    assert(result.code == DECK_SERIAL_COMMAND_STALE_REQUEST);
+    assert(snapshot(session).state == DECK_SERIAL_USB_TX);
+
+    assert(deck_serial_session_request_web(session, 1, 12, true, 2'300, &result));
+    const uint64_t second_lease = result.lease_id;
+    assert(deck_serial_session_request_web(session, 1, 13, false, 2'301, &result));
+    assert(result.code == DECK_SERIAL_COMMAND_APPLIED);
+    assert(snapshot(session).state == DECK_SERIAL_USB_TX);
+    assert(!deck_serial_session_web_disconnect(session, 1, second_lease));
+
+    assert(deck_serial_session_request_web(session, 1, 14, true, 2'302, &result));
+    const uint64_t third_lease = result.lease_id;
+    assert(deck_serial_session_web_disconnect(session, 1, third_lease));
+    assert(snapshot(session).state == DECK_SERIAL_USB_TX);
+
+    assert(deck_serial_session_exit(session, 1, &result));
+    assert(result.code == DECK_SERIAL_COMMAND_APPLIED);
+    state = snapshot(session);
+    assert(state.state == DECK_SERIAL_DISARMED);
+    assert(!state.uart_installed);
+    assert(hardware.uninstalls == 1);
+    assert(hardware.usb_clears == 4);
+    assert(hardware.web_clears == 4);
+    assert(hardware.high_impedance == 2);
+
+    assert(deck_serial_session_exit(session, 1, &result));
+    assert(result.code == DECK_SERIAL_COMMAND_NO_CHANGE);
+    assert(hardware.uninstalls == 1);
+
+    assert(deck_serial_session_enter(session, 1, 3'000, &result));
+    assert(result.session_id == 2);
+    assert(result.state == DECK_SERIAL_USB_TX);
+    assert(snapshot(session).usb_tx_rejected == 0);
+    deck_serial_session_destroy(session);
+    assert(hardware.uninstalls == 2);
+    assert(hardware.high_impedance == 3);
+}
+
+void test_install_failure_is_fail_closed()
+{
+    FakeHardware hardware;
+    hardware.install_succeeds = false;
+    deck_serial_session_t *session = make_session(&hardware);
+    assert(session != nullptr);
+
+    deck_serial_command_result_t result{};
+    assert(deck_serial_session_enter(session, 0, 0, &result));
+    assert(result.code == DECK_SERIAL_COMMAND_UART_INSTALL_FAILED);
+    const auto state = snapshot(session);
+    assert(state.state == DECK_SERIAL_DISARMED);
+    assert(!state.uart_installed);
+    assert(state.session_id == 0);
+    assert(state.uart_install_failures == 1);
+    assert(state.uart_install_failed);
+    assert(hardware.uninstalls == 1);
+    assert(hardware.usb_clears == 1);
+    assert(hardware.web_clears == 1);
+    assert(hardware.high_impedance == 2);
+
+    // A later successful retry clears the current fault while preserving the
+    // cumulative diagnostic count.
+    hardware.install_succeeds = true;
+    assert(deck_serial_session_enter(session, 0, 1, &result));
+    const auto recovered = snapshot(session);
+    assert(recovered.state == DECK_SERIAL_USB_TX);
+    assert(recovered.uart_install_failures == 1);
+    assert(!recovered.uart_install_failed);
+    assert(deck_serial_session_exit(session, 1, &result));
+    assert(!snapshot(session).uart_install_failed);
+
+    deck_serial_session_destroy(session);
+    assert(hardware.uninstalls == 2);
+    assert(hardware.high_impedance == 4);
+}
+
+void test_expiry_boundary_and_exit_race_are_fail_closed()
+{
+    FakeHardware hardware;
+    deck_serial_session_t *session = make_session(&hardware, 100);
+    assert(session != nullptr);
+    deck_serial_command_result_t result{};
+    assert(deck_serial_session_enter(session, 0, 0, &result));
+    assert(deck_serial_session_request_web(session, 1, 1, true, 50, &result));
+    const uint64_t expired_lease = result.lease_id;
+
+    // A heartbeat exactly at the deadline loses to expiry.
+    assert(!deck_serial_session_web_activity(session, 1, expired_lease, 150));
+    assert(snapshot(session).state == DECK_SERIAL_USB_TX);
+
+    assert(deck_serial_session_request_web(session, 1, 2, true, 151, &result));
+    const uint64_t live_lease = result.lease_id;
+    assert(deck_serial_session_exit(session, 1, &result));
+    assert(!deck_serial_session_web_activity(session, 1, live_lease, 152));
+    assert(!deck_serial_session_web_disconnect(session, 1, live_lease));
+    assert(snapshot(session).state == DECK_SERIAL_DISARMED);
+
+    deck_serial_session_destroy(session);
+}
+
+void test_exit_barrier_supersedes_a_delayed_enter()
+{
+    FakeHardware hardware;
+    deck_serial_session_t *session = make_session(&hardware);
+    assert(session != nullptr);
+    deck_serial_command_result_t result{};
+
+    // This ENTER represents work stamped before BOOT but dequeued after the
+    // urgent exit command.
+    assert(deck_serial_session_exit(session, 1, &result));
+    assert(result.code == DECK_SERIAL_COMMAND_NO_CHANGE);
+    assert(deck_serial_session_enter(session, 0, 1, &result));
+    assert(result.code == DECK_SERIAL_COMMAND_STALE_REQUEST);
+    assert(snapshot(session).state == DECK_SERIAL_DISARMED);
+    assert(hardware.installs == 0);
+
+    // A genuinely new KEY press after BOOT uses the current epoch and may arm.
+    assert(deck_serial_session_enter(session, 1, 2, &result));
+    assert(result.code == DECK_SERIAL_COMMAND_APPLIED);
+    assert(snapshot(session).state == DECK_SERIAL_USB_TX);
+    assert(hardware.installs == 1);
+    deck_serial_session_destroy(session);
+}
+
+}  // namespace
+
+int main()
+{
+    test_entry_switch_lease_and_exit();
+    test_install_failure_is_fail_closed();
+    test_expiry_boundary_and_exit_race_are_fail_closed();
+    test_exit_barrier_supersedes_a_delayed_enter();
+    return 0;
+}

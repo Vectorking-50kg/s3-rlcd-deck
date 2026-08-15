@@ -48,6 +48,23 @@ typedef enum {
     DECK_SETUP_ACTIVE,
 } deck_setup_state_t;
 
+typedef enum {
+    DECK_SERIAL_VIEW_UNAVAILABLE = 0,
+    DECK_SERIAL_VIEW_DISARMED,
+    DECK_SERIAL_VIEW_USB_TX,
+    DECK_SERIAL_VIEW_WEB_TX,
+} deck_serial_view_state_t;
+
+typedef struct {
+    deck_serial_view_state_t state;
+    uint64_t session_id;
+    uint64_t owner_generation;
+    uint64_t usb_tx_rejected;
+    uint32_t uart_install_failures;
+    bool uart_install_failed;
+    bool uart_installed;
+} deck_serial_view_model_t;
+
 #define DECK_M0_SETUP_SSID_CAPACITY 13
 #define DECK_M0_SETUP_PASSWORD_CAPACITY 15
 #define DECK_M0_SETUP_ADDRESS_CAPACITY 16
@@ -88,6 +105,7 @@ typedef struct {
     uint64_t uptime_seconds;
     uint32_t minimum_free_heap_bytes;
     deck_ai_page_view_model_t ai_page;
+    deck_serial_view_model_t serial;
 } deck_m0_view_model_t;
 
 bool deck_m0_view_model_equal(const deck_m0_view_model_t *left, const deck_m0_view_model_t *right);

@@ -17,6 +17,7 @@ idf_component_register(
         health
         heap
         setup_mode
+        serial_service
 )
 
 target_compile_features(${COMPONENT_LIB} PRIVATE cxx_std_17)
