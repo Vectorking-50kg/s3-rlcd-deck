@@ -210,7 +210,9 @@ func (application *Runtime) handleSerialObserve(response http.ResponseWriter, re
 	if err != nil {
 		return
 	}
-	readResult := make(chan serialObserverInput, 1)
+	// An unbuffered hand-off prevents a copied raw input frame from surviving
+	// in an orphaned channel after the observer handler has exited.
+	readResult := make(chan serialObserverInput)
 	readerDone := make(chan struct{})
 	defer close(readerDone)
 	go readSerialObserver(connection, readResult, readerDone)
@@ -271,6 +273,7 @@ func readSerialObserver(
 	for {
 		messageType, message, err := connection.Read(context.Background())
 		if err != nil {
+			clear(message)
 			select {
 			case result <- serialObserverInput{err: err}:
 			case <-done:

@@ -393,6 +393,7 @@ func (hub *Hub) serveConnection(
 	messageType, message, err := connection.Read(helloContext)
 	cancelHello()
 	if err != nil {
+		clear(message)
 		return
 	}
 	if messageType != websocket.MessageText {
@@ -462,8 +463,10 @@ func (hub *Hub) serveConnection(
 		return
 	}
 
-	frames := make(chan receivedFrame, 1)
-	go readFrames(connection, frames)
+	frames := make(chan receivedFrame)
+	readerDone := make(chan struct{})
+	defer close(readerDone)
+	go readFrames(connection, frames, readerDone)
 	heartbeatTimer := time.NewTimer(hub.heartbeatTimeout)
 	defer heartbeatTimer.Stop()
 	heartbeatTicker := time.NewTicker(hub.heartbeatInterval)
@@ -595,14 +598,22 @@ func (hub *Hub) serveConnection(
 			if !keepConnection {
 				return
 			}
-			go readFrames(connection, frames)
+			go readFrames(connection, frames, readerDone)
 		}
 	}
 }
 
-func readFrames(connection *websocket.Conn, frames chan<- receivedFrame) {
+func readFrames(
+	connection *websocket.Conn,
+	frames chan<- receivedFrame,
+	done <-chan struct{},
+) {
 	messageType, message, err := connection.Read(context.Background())
-	frames <- receivedFrame{messageType: messageType, message: message, err: err}
+	select {
+	case frames <- receivedFrame{messageType: messageType, message: message, err: err}:
+	case <-done:
+		clear(message)
+	}
 }
 
 func (hub *Hub) writeHeartbeat(connection *websocket.Conn) bool {
