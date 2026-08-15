@@ -376,6 +376,55 @@ func TestHubNotifiesOnlyWhenTheAuthenticatedDeckSessionDisconnects(t *testing.T)
 	}
 }
 
+func TestHubFencesReplacementUntilDisconnectRevocationIsRegistered(t *testing.T) {
+	disconnectStarted := make(chan struct{})
+	releaseDisconnect := make(chan struct{})
+	disconnectReturned := make(chan struct{})
+	var firstDisconnect sync.Once
+	hub, err := New(Config{
+		Authenticator:     &testAuthenticator{},
+		HeartbeatInterval: time.Second,
+		HeartbeatTimeout:  5 * time.Second,
+		OnDisconnect: func(string) {
+			firstDisconnect.Do(func() {
+				close(disconnectStarted)
+				<-releaseDisconnect
+			})
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hub.Close()
+	oldConnection := new(websocket.Conn)
+	replacementConnection := new(websocket.Conn)
+	if !hub.reserve(testDeviceID, oldConnection) {
+		t.Fatal("initial Device Link reservation was rejected")
+	}
+	go func() {
+		hub.removeConnection(oldConnection, testDeviceID)
+		close(disconnectReturned)
+	}()
+	select {
+	case <-disconnectStarted:
+	case <-time.After(time.Second):
+		t.Fatal("disconnect callback did not start")
+	}
+	if hub.reserve(testDeviceID, replacementConnection) {
+		t.Fatal("replacement entered before old-generation revocation was registered")
+	}
+	close(releaseDisconnect)
+	select {
+	case <-disconnectReturned:
+	case <-time.After(time.Second):
+		t.Fatal("disconnect callback did not return")
+	}
+	if !hub.reserve(testDeviceID, replacementConnection) {
+		t.Fatal("replacement remained fenced after revocation registration")
+	}
+	hub.removeConnection(replacementConnection, testDeviceID)
+}
+
 func TestHubBroadcastsTheLatestBoundedSnapshotWithoutBlockingPublishers(t *testing.T) {
 	hub, _, server := newTestHub(t)
 	connection, _, err := dialTestDeck(t, server, testDeviceID, testDeviceToken)

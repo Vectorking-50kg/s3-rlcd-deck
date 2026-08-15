@@ -65,6 +65,7 @@ type Hub struct {
 	closed             bool
 	connections        map[*websocket.Conn]struct{}
 	sessions           map[string]*websocket.Conn
+	disconnecting      map[string]*websocket.Conn
 	snapshotSignals    map[*websocket.Conn]chan struct{}
 	latestSnapshot     []byte
 	snapshotGeneration uint64
@@ -118,6 +119,7 @@ func New(config Config) (*Hub, error) {
 		done:                make(chan struct{}),
 		connections:         make(map[*websocket.Conn]struct{}),
 		sessions:            make(map[string]*websocket.Conn),
+		disconnecting:       make(map[string]*websocket.Conn),
 		snapshotSignals:     make(map[*websocket.Conn]chan struct{}),
 	}, nil
 }
@@ -336,6 +338,9 @@ func (hub *Hub) reserve(deviceID string, connection *websocket.Conn) bool {
 	if _, duplicate := hub.sessions[deviceID]; duplicate {
 		return false
 	}
+	if _, disconnecting := hub.disconnecting[deviceID]; disconnecting {
+		return false
+	}
 	hub.sessions[deviceID] = connection
 	hub.snapshotSignals[connection] = make(chan struct{}, 1)
 	return true
@@ -347,12 +352,20 @@ func (hub *Hub) removeConnection(connection *websocket.Conn, deviceID string) {
 	removedActiveSession := false
 	if hub.sessions[deviceID] == connection {
 		delete(hub.sessions, deviceID)
+		hub.disconnecting[deviceID] = connection
 		removedActiveSession = true
 	}
 	delete(hub.snapshotSignals, connection)
 	hub.mu.Unlock()
 	if removedActiveSession && hub.onDisconnect != nil {
 		hub.onDisconnect(deviceID)
+	}
+	if removedActiveSession {
+		hub.mu.Lock()
+		if hub.disconnecting[deviceID] == connection {
+			delete(hub.disconnecting, deviceID)
+		}
+		hub.mu.Unlock()
 	}
 }
 

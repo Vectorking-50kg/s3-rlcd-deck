@@ -302,6 +302,10 @@ func (service *Service) Close() {
 	service.mu.Lock()
 	if !service.closed {
 		service.closed = true
+		activeSessionID := service.ring.Stats().SessionID
+		if activeSessionID != 0 {
+			service.leases.EndSession(activeSessionID)
+		}
 		service.deviceID = ""
 		service.state = StateDisarmed
 		service.webSequence = 0

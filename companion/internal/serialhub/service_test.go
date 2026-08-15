@@ -187,3 +187,36 @@ func TestSameSessionUSBStateDoesNotPublishUSBWhileRevokeResultIsPending(t *testi
 		t.Fatalf("USB was published before exact revoke result: status=%#v pending=%#v", status, pending)
 	}
 }
+
+func TestServiceCloseClearsRingObserversAndLeaseCapabilities(t *testing.T) {
+	service, err := NewService(ServiceConfig{RingConfig: Config{
+		CapacityBytes: 32, MaximumFrames: 8, MaximumObservers: 2,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = service.Reconcile("deck-a", 9, StateUSBTX); err != nil {
+		t.Fatal(err)
+	}
+	request, err := service.AcquireLease("browser-secret", 9)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = service.ApplyOwnerResult("deck-a", OwnerResult{
+		SessionID: 9, RequestID: request.RequestID, Owner: OwnerWeb,
+		LeaseID: request.RequestID,
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.Ring().OpenObserver(9); err != nil {
+		t.Fatal(err)
+	}
+	service.Close()
+	status := service.Status()
+	if status.DeviceID != "" || status.State != StateDisarmed ||
+		status.SessionID != 0 || status.Observers != 0 ||
+		status.Lease.Owner != OwnerUnavailable || status.Lease.ClientID != "" ||
+		status.Lease.LeaseID != 0 {
+		t.Fatalf("closed Service retained state or capability: %#v", status)
+	}
+}
