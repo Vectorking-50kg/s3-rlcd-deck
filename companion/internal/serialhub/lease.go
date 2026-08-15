@@ -173,15 +173,46 @@ func (manager *LeaseManager) ApplyOwnerRejection(result OwnerResult) error {
 	return nil
 }
 
-func (manager *LeaseManager) AbortAcquire(clientID string, requestID uint64) {
+func (manager *LeaseManager) ConfirmUSB(sessionID uint64) {
 	manager.mu.Lock()
-	if manager.pendingEnable && manager.pendingID == requestID &&
-		manager.status.ClientID == clientID {
-		manager.status = LeaseStatus{SessionID: manager.status.SessionID, Owner: OwnerUSB}
-		manager.pendingID = 0
-		manager.pendingEnable = false
-		manager.lastAttempt = time.Time{}
+	manager.status = LeaseStatus{SessionID: sessionID, Owner: OwnerUSB}
+	manager.pendingID = 0
+	manager.pendingEnable = false
+	manager.lastAttempt = time.Time{}
+	manager.mu.Unlock()
+}
+
+// RequireRevocation records a fail-closed disable transition even when the
+// transport outcome of the preceding enable request is unknown. An exact
+// pending disable is reused so disconnect and shutdown remain idempotent.
+func (manager *LeaseManager) RequireRevocation(sessionID uint64) (OwnerRequest, error) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if sessionID == 0 {
+		return OwnerRequest{}, ErrLeaseNotActive
 	}
+	if manager.pendingID != 0 && !manager.pendingEnable &&
+		manager.status.SessionID == sessionID {
+		return OwnerRequest{
+			SessionID: sessionID,
+			RequestID: manager.pendingID,
+			Enable:    false,
+		}, nil
+	}
+	request := manager.nextRequestLocked(sessionID, false)
+	manager.status.SessionID = sessionID
+	manager.status.Owner = OwnerTransitioning
+	manager.status.LeaseID = 0
+	manager.status.ExpiresAt = time.Time{}
+	return request, nil
+}
+
+func (manager *LeaseManager) FailClosed(sessionID uint64) {
+	manager.mu.Lock()
+	manager.status = LeaseStatus{SessionID: sessionID, Owner: OwnerUnavailable}
+	manager.pendingID = 0
+	manager.pendingEnable = false
+	manager.lastAttempt = time.Time{}
 	manager.mu.Unlock()
 }
 

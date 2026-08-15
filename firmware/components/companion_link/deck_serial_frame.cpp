@@ -41,6 +41,12 @@ bool valid_channel(uint8_t channel)
            channel == DECK_SERIAL_FRAME_WEB_TX;
 }
 
+bool sequence_after(uint64_t candidate, uint64_t previous)
+{
+    const uint64_t difference = candidate - previous;
+    return difference != 0 && difference < (UINT64_C(1) << 63U);
+}
+
 }  // namespace
 
 size_t deck_serial_frame_encode(
@@ -100,4 +106,39 @@ bool deck_serial_frame_decode(
         payload_size,
     };
     return true;
+}
+
+void deck_serial_frame_order_reset(deck_serial_frame_order_t *order)
+{
+    if (order != nullptr) {
+        *order = {};
+    }
+}
+
+bool deck_serial_frame_order_accepts(
+    const deck_serial_frame_order_t *order,
+    const deck_serial_frame_view_t *frame
+)
+{
+    if (order == nullptr || frame == nullptr || frame->session_id == 0 ||
+        frame->sequence == 0) {
+        return false;
+    }
+    return !order->has_value || order->session_id != frame->session_id ||
+           (sequence_after(frame->sequence, order->sequence) &&
+            frame->monotonic_ms >= order->monotonic_ms);
+}
+
+void deck_serial_frame_order_commit(
+    deck_serial_frame_order_t *order,
+    const deck_serial_frame_view_t *frame
+)
+{
+    if (order == nullptr || frame == nullptr) {
+        return;
+    }
+    order->session_id = frame->session_id;
+    order->sequence = frame->sequence;
+    order->monotonic_ms = frame->monotonic_ms;
+    order->has_value = true;
 }

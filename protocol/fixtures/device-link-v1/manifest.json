@@ -2,6 +2,8 @@
   "schema_version": 1,
   "fixtures": [
     {"file": "hello-valid.json", "kind": "hello", "accepted": true},
+    {"file": "hello-active-valid.json", "kind": "hello", "accepted": true},
+    {"file": "hello-active-without-serial.json", "kind": "hello", "accepted": false},
     {"file": "hello-wrong-board.json", "kind": "hello", "accepted": false},
     {"file": "hello-duplicate-device-id.json", "kind": "hello", "accepted": false},
     {"file": "serial-state-valid.json", "kind": "serial_state", "accepted": true},

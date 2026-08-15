@@ -98,6 +98,7 @@ deck_add_host_test(
     SOURCES
         test_serial_frame.cpp
         ../../firmware/components/companion_link/deck_serial_frame.cpp
+        ../../firmware/components/companion_link/deck_serial_request_tracker.cpp
     INCLUDE_DIRS ../../firmware/components/companion_link/include
 )
 target_compile_definitions(

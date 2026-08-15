@@ -41,6 +41,7 @@ type Config struct {
 	OnDeviceProfile     func(configmodel.DeviceProfile)
 	OnSerialState       func(deviceID string, sessionID uint64, state string) error
 	OnSerialFrame       func(deviceID string, frame serialprotocol.Frame) error
+	OnDisconnect        func(deviceID string)
 	OnSerialOwnerResult func(deviceID string, result SerialOwnerResult) error
 	SerialHistoryCursor func(deviceID string, sessionID uint64) (uint64, bool)
 }
@@ -54,6 +55,7 @@ type Hub struct {
 	onDeviceProfile     func(configmodel.DeviceProfile)
 	onSerialState       func(deviceID string, sessionID uint64, state string) error
 	onSerialFrame       func(deviceID string, frame serialprotocol.Frame) error
+	onDisconnect        func(deviceID string)
 	onSerialOwnerResult func(deviceID string, result SerialOwnerResult) error
 	serialHistoryCursor func(deviceID string, sessionID uint64) (uint64, bool)
 	done                chan struct{}
@@ -110,6 +112,7 @@ func New(config Config) (*Hub, error) {
 		onDeviceProfile:     config.OnDeviceProfile,
 		onSerialState:       config.OnSerialState,
 		onSerialFrame:       config.OnSerialFrame,
+		onDisconnect:        config.OnDisconnect,
 		onSerialOwnerResult: config.OnSerialOwnerResult,
 		serialHistoryCursor: config.SerialHistoryCursor,
 		done:                make(chan struct{}),
@@ -341,11 +344,16 @@ func (hub *Hub) reserve(deviceID string, connection *websocket.Conn) bool {
 func (hub *Hub) removeConnection(connection *websocket.Conn, deviceID string) {
 	hub.mu.Lock()
 	delete(hub.connections, connection)
+	removedActiveSession := false
 	if hub.sessions[deviceID] == connection {
 		delete(hub.sessions, deviceID)
+		removedActiveSession = true
 	}
 	delete(hub.snapshotSignals, connection)
 	hub.mu.Unlock()
+	if removedActiveSession && hub.onDisconnect != nil {
+		hub.onDisconnect(deviceID)
+	}
 }
 
 func (hub *Hub) snapshotSignal(connection *websocket.Conn) <-chan struct{} {
@@ -388,10 +396,12 @@ func (hub *Hub) serveConnection(
 		return
 	}
 	if messageType != websocket.MessageText {
+		clear(message)
 		_ = connection.Close(websocket.StatusPolicyViolation, "device.hello must be text")
 		return
 	}
 	hello, err := parseDeviceHello(message, authentication.deviceID)
+	clear(message)
 	if err != nil {
 		_ = connection.Close(websocket.StatusPolicyViolation, "invalid device.hello")
 		return
@@ -493,89 +503,96 @@ func (hub *Hub) serveConnection(
 				return
 			}
 		case frame := <-frames:
-			if frame.err != nil {
-				return
-			}
-			if frame.messageType == websocket.MessageBinary {
-				serialFrame, decodeErr := serialprotocol.Decode(frame.message)
-				if decodeErr != nil || hub.onSerialFrame == nil ||
-					hub.onSerialFrame(authentication.deviceID, serialFrame) != nil {
-					_ = connection.Close(websocket.StatusPolicyViolation, "invalid Serial binary frame")
-					return
+			keepConnection := func() bool {
+				defer clear(frame.message)
+				if frame.err != nil {
+					return false
 				}
-				go readFrames(connection, frames)
-				continue
-			}
-			if frame.messageType != websocket.MessageText {
-				_ = connection.Close(websocket.StatusPolicyViolation, "unsupported Device Link frame")
-				return
-			}
-			envelope, envelopeErr := protocol.ParseEnvelope(frame.message)
-			if envelopeErr != nil {
-				_ = connection.Close(websocket.StatusPolicyViolation, "invalid Device Link control message")
-				return
-			}
-			switch envelope.Type {
-			case MessageHeartbeat:
-				heartbeat, parseErr := parseHeartbeat(
-					frame.message,
-					previousMonotonic,
-					hasPreviousMonotonic,
-				)
-				if parseErr != nil {
-					_ = connection.Close(websocket.StatusPolicyViolation, "invalid device.heartbeat")
-					return
-				}
-				previousMonotonic = heartbeat.MonotonicMS
-				hasPreviousMonotonic = true
-				if !heartbeatTimer.Stop() {
-					select {
-					case <-heartbeatTimer.C:
-					default:
+				if frame.messageType == websocket.MessageBinary {
+					serialFrame, decodeErr := serialprotocol.Decode(frame.message)
+					defer clear(serialFrame.Payload)
+					if decodeErr != nil || hub.onSerialFrame == nil ||
+						hub.onSerialFrame(authentication.deviceID, serialFrame) != nil {
+						_ = connection.Close(websocket.StatusPolicyViolation, "invalid Serial binary frame")
+						return false
 					}
+					return true
 				}
-				heartbeatTimer.Reset(hub.heartbeatTimeout)
-			case MessageSerialState:
-				state, parseErr := parseSerialState(frame.message)
-				if parseErr != nil || hub.onSerialState == nil ||
-					hub.onSerialState(
-						authentication.deviceID,
-						state.SerialSessionID,
-						state.SerialState,
-					) != nil {
-					_ = connection.Close(websocket.StatusPolicyViolation, "invalid serial.state")
-					return
+				if frame.messageType != websocket.MessageText {
+					_ = connection.Close(websocket.StatusPolicyViolation, "unsupported Device Link frame")
+					return false
 				}
-				if state.SerialSessionID != 0 && hub.serialHistoryCursor != nil {
-					if afterSequence, available := hub.serialHistoryCursor(
-						authentication.deviceID,
-						state.SerialSessionID,
-					); available {
-						writeContext, cancel := context.WithTimeout(
-							context.Background(),
-							hub.heartbeatInterval,
-						)
-						writeErr := hub.writeSerialHistoryRequest(
-							writeContext,
-							authentication.deviceID,
-							state.SerialSessionID,
-							afterSequence,
-						)
-						cancel()
-						if writeErr != nil {
-							return
+				envelope, envelopeErr := protocol.ParseEnvelope(frame.message)
+				if envelopeErr != nil {
+					_ = connection.Close(websocket.StatusPolicyViolation, "invalid Device Link control message")
+					return false
+				}
+				switch envelope.Type {
+				case MessageHeartbeat:
+					heartbeat, parseErr := parseHeartbeat(
+						frame.message,
+						previousMonotonic,
+						hasPreviousMonotonic,
+					)
+					if parseErr != nil {
+						_ = connection.Close(websocket.StatusPolicyViolation, "invalid device.heartbeat")
+						return false
+					}
+					previousMonotonic = heartbeat.MonotonicMS
+					hasPreviousMonotonic = true
+					if !heartbeatTimer.Stop() {
+						select {
+						case <-heartbeatTimer.C:
+						default:
 						}
 					}
+					heartbeatTimer.Reset(hub.heartbeatTimeout)
+				case MessageSerialState:
+					state, parseErr := parseSerialState(frame.message)
+					if parseErr != nil || hub.onSerialState == nil ||
+						hub.onSerialState(
+							authentication.deviceID,
+							state.SerialSessionID,
+							state.SerialState,
+						) != nil {
+						_ = connection.Close(websocket.StatusPolicyViolation, "invalid serial.state")
+						return false
+					}
+					if state.SerialSessionID != 0 && hub.serialHistoryCursor != nil {
+						if afterSequence, available := hub.serialHistoryCursor(
+							authentication.deviceID,
+							state.SerialSessionID,
+						); available {
+							writeContext, cancel := context.WithTimeout(
+								context.Background(),
+								hub.heartbeatInterval,
+							)
+							writeErr := hub.writeSerialHistoryRequest(
+								writeContext,
+								authentication.deviceID,
+								state.SerialSessionID,
+								afterSequence,
+							)
+							cancel()
+							if writeErr != nil {
+								return false
+							}
+						}
+					}
+				case MessageSerialOwnerResult:
+					result, parseErr := parseSerialOwnerResult(frame.message)
+					if parseErr != nil || hub.onSerialOwnerResult == nil ||
+						hub.onSerialOwnerResult(authentication.deviceID, result) != nil {
+						_ = connection.Close(websocket.StatusPolicyViolation, "invalid serial.owner.result")
+						return false
+					}
+				default:
+					_ = connection.Close(websocket.StatusPolicyViolation, "unsupported Device Link control message")
+					return false
 				}
-			case MessageSerialOwnerResult:
-				result, parseErr := parseSerialOwnerResult(frame.message)
-				if parseErr != nil || hub.onSerialOwnerResult == nil ||
-					hub.onSerialOwnerResult(authentication.deviceID, result) != nil {
-					_ = connection.Close(websocket.StatusPolicyViolation, "invalid serial.owner.result")
-					return
-				}
-			default:
-				_ = connection.Close(websocket.StatusPolicyViolation, "unsupported Device Link control message")
+				return true
+			}()
+			if !keepConnection {
 				return
 			}
 			go readFrames(connection, frames)

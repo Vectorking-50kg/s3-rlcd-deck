@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/devicelink"
@@ -33,6 +34,66 @@ type serialObserverInput struct {
 	messageType websocket.MessageType
 	message     []byte
 	err         error
+}
+
+type serialObserverRegistry struct {
+	mu          sync.Mutex
+	connections map[*websocket.Conn]struct{}
+	closing     bool
+	drained     chan struct{}
+}
+
+func (registry *serialObserverRegistry) register(connection *websocket.Conn) bool {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	if registry.closing {
+		return false
+	}
+	if registry.connections == nil {
+		registry.connections = make(map[*websocket.Conn]struct{})
+	}
+	registry.connections[connection] = struct{}{}
+	return true
+}
+
+func (registry *serialObserverRegistry) unregister(connection *websocket.Conn) {
+	registry.mu.Lock()
+	if _, found := registry.connections[connection]; found {
+		delete(registry.connections, connection)
+		if registry.closing && len(registry.connections) == 0 &&
+			registry.drained != nil {
+			close(registry.drained)
+			registry.drained = nil
+		}
+	}
+	registry.mu.Unlock()
+}
+
+func (registry *serialObserverRegistry) closeAndWait(ctx context.Context) error {
+	registry.mu.Lock()
+	registry.closing = true
+	if len(registry.connections) == 0 {
+		registry.mu.Unlock()
+		return nil
+	}
+	if registry.drained == nil {
+		registry.drained = make(chan struct{})
+	}
+	drained := registry.drained
+	connections := make([]*websocket.Conn, 0, len(registry.connections))
+	for connection := range registry.connections {
+		connections = append(connections, connection)
+	}
+	registry.mu.Unlock()
+	for _, connection := range connections {
+		_ = connection.CloseNow()
+	}
+	select {
+	case <-drained:
+		return nil
+	case <-ctx.Done():
+		return errors.New("Serial observer shutdown timed out")
+	}
 }
 
 type serialManagementStatus struct {
@@ -134,6 +195,11 @@ func (application *Runtime) handleSerialObserve(response http.ResponseWriter, re
 		_ = connection.Close(websocket.StatusPolicyViolation, "unsupported Serial observer")
 		return
 	}
+	if !application.serialObservers.register(connection) {
+		_ = connection.Close(websocket.StatusGoingAway, "Companion is stopping")
+		return
+	}
+	defer application.serialObservers.unregister(connection)
 	connection.SetReadLimit(4 << 10)
 	clientID, err := randomWebToken()
 	if err != nil {
@@ -173,7 +239,7 @@ func (application *Runtime) handleSerialObserve(response http.ResponseWriter, re
 				return
 			}
 		case <-poll.C:
-			if request, expired := application.serialHub.Leases().Expire(); expired {
+			if request, expired := application.serialHub.ExpireLease(); expired {
 				application.sendSerialOwnerRequest(request)
 			}
 			batch, readErr := application.serialHub.Ring().ReadObserver(
@@ -185,19 +251,8 @@ func (application *Runtime) handleSerialObserve(response http.ResponseWriter, re
 				return
 			}
 			overwrittenBytes = batch.OverwrittenBytes
-			for _, frame := range batch.Frames {
-				document, encodeErr := serialprotocol.Encode(frame)
-				if encodeErr != nil {
-					return
-				}
-				ctx, cancel := context.WithTimeout(context.Background(), serialObserverWriteLimit)
-				writeErr := connection.Write(ctx, websocket.MessageBinary, document)
-				cancel()
-				clear(document)
-				clear(frame.Payload)
-				if writeErr != nil {
-					return
-				}
+			if !writeSerialObserverBatch(connection, batch.Frames) {
+				return
 			}
 		}
 	}
@@ -221,6 +276,7 @@ func readSerialObserver(
 			messageType: messageType,
 			message:     append([]byte(nil), message...),
 		}
+		clear(message)
 		select {
 		case result <- input:
 		case <-done:
@@ -228,6 +284,28 @@ func readSerialObserver(
 			return
 		}
 	}
+}
+
+func writeSerialObserverBatch(connection *websocket.Conn, frames []serialprotocol.Frame) bool {
+	defer func() {
+		for index := range frames {
+			clear(frames[index].Payload)
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), serialObserverWriteLimit)
+	defer cancel()
+	for _, frame := range frames {
+		document, err := serialprotocol.Encode(frame)
+		if err != nil {
+			return false
+		}
+		err = connection.Write(ctx, websocket.MessageBinary, document)
+		clear(document)
+		if err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func (application *Runtime) handleSerialObserverInput(
@@ -266,17 +344,17 @@ func (application *Runtime) handleSerialObserverInput(
 			control.LeaseID != 0 {
 			return writeSerialObserverResult(connection, "serial.lease.result", false, 0)
 		}
-		request, err := application.serialHub.Leases().Acquire(clientID, control.SerialSessionID)
+		request, err := application.serialHub.AcquireLease(clientID, control.SerialSessionID)
 		if err != nil {
 			return writeSerialObserverResult(connection, "serial.lease.result", false, 0)
 		}
-		if !application.sendSerialOwnerRequest(request) {
-			application.serialHub.Leases().AbortAcquire(clientID, request.RequestID)
-			return writeSerialObserverResult(connection, "serial.lease.result", false, 0)
-		}
+		// A transport error cannot prove that the Deck did not receive or apply
+		// the request. Keep the exact request pending and let the supervisor
+		// retry until a matching Deck result arrives.
+		application.sendSerialOwnerRequest(request)
 		return writeSerialObserverResult(connection, "serial.lease.result", true, request.RequestID)
 	case "serial.lease.heartbeat":
-		activity, err := application.serialHub.Leases().Heartbeat(clientID, control.LeaseID)
+		activity, err := application.serialHub.HeartbeatLease(clientID, control.LeaseID)
 		if err != nil || control.SerialSessionID != activity.SessionID {
 			return writeSerialObserverResult(connection, "serial.lease.heartbeat.result", false, 0)
 		}
@@ -294,7 +372,7 @@ func (application *Runtime) handleSerialObserverInput(
 			control.LeaseID != status.Lease.LeaseID || status.Lease.ClientID != clientID {
 			return writeSerialObserverResult(connection, "serial.lease.result", false, 0)
 		}
-		request, err := application.serialHub.Leases().Disconnect(clientID)
+		request, err := application.serialHub.DisconnectLease(clientID)
 		if err != nil {
 			return writeSerialObserverResult(connection, "serial.lease.result", false, 0)
 		}
@@ -312,25 +390,33 @@ func (application *Runtime) handleSerialObserverInput(
 }
 
 func (application *Runtime) sendSerialOwnerRequest(request serialhub.OwnerRequest) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), serialObserverWriteLimit)
+	defer cancel()
+	return application.sendSerialOwnerRequestContext(ctx, request, time.Second)
+}
+
+func (application *Runtime) sendSerialOwnerRequestContext(
+	ctx context.Context,
+	request serialhub.OwnerRequest,
+	minimumInterval time.Duration,
+) bool {
 	status := application.serialHub.Status()
 	if status.DeviceID == "" || status.SessionID != request.SessionID {
 		return false
 	}
-	if !application.serialHub.Leases().ClaimRequestAttempt(request.RequestID, time.Second) {
+	if !application.serialHub.ClaimOwnerRequestAttempt(request.RequestID, minimumInterval) {
 		return true
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), serialObserverWriteLimit)
 	err := application.deviceLink.RequestSerialOwner(ctx, status.DeviceID, devicelink.SerialOwnerRequest{
 		SerialSessionID: request.SessionID,
 		RequestID:       request.RequestID,
 		Enable:          request.Enable,
 	})
-	cancel()
 	return err == nil
 }
 
 func (application *Runtime) retrySerialOwnerRequest() {
-	request, _, pending := application.serialHub.Leases().PendingRequest()
+	request, _, pending := application.serialHub.PendingOwnerRequest()
 	if pending {
 		application.sendSerialOwnerRequest(request)
 	}
@@ -344,7 +430,7 @@ func (application *Runtime) runSerialLeaseSupervisor(ctx context.Context) error 
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			if request, expired := application.serialHub.Leases().Expire(); expired {
+			if request, expired := application.serialHub.ExpireLease(); expired {
 				application.sendSerialOwnerRequest(request)
 			}
 			application.retrySerialOwnerRequest()
@@ -353,9 +439,37 @@ func (application *Runtime) runSerialLeaseSupervisor(ctx context.Context) error 
 }
 
 func (application *Runtime) revokeSerialObserverLease(clientID string) {
-	request, err := application.serialHub.Leases().Disconnect(clientID)
+	request, err := application.serialHub.DisconnectLease(clientID)
 	if err == nil {
 		application.sendSerialOwnerRequest(request)
+	}
+}
+
+func (application *Runtime) closeSerialObservers(ctx context.Context) error {
+	return application.serialObservers.closeAndWait(ctx)
+}
+
+func (application *Runtime) revokeSerialOwnerForShutdown(ctx context.Context) error {
+	status := application.serialHub.Status()
+	request, required := application.serialHub.RequireOwnerRevocation(status.DeviceID)
+	if !required {
+		return nil
+	}
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		application.sendSerialOwnerRequestContext(ctx, request, 100*time.Millisecond)
+		status = application.serialHub.Status()
+		if status.SessionID != request.SessionID ||
+			(status.State == serialhub.StateUSBTX && status.Lease.Owner == serialhub.OwnerUSB) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			application.serialHub.MarkOwnerUnavailable()
+			return errors.New("Serial owner revoke was not confirmed before shutdown")
+		case <-ticker.C:
+		}
 	}
 }
 
@@ -389,12 +503,16 @@ func writeSerialObserverStatus(
 		OverwrittenBytes uint64          `json:"overwritten_bytes"`
 		LeaseOwner       serialhub.Owner `json:"lease_owner"`
 		LeaseHeld        bool            `json:"lease_held_by_this_observer"`
+		LeaseID          uint64          `json:"lease_id,omitempty"`
 	}{
 		Type: "serial.observer.state", ProtocolVersion: 1,
 		DeviceID: status.DeviceID, SerialState: status.State,
 		SerialSessionID: status.SessionID, BufferedBytes: status.BufferedBytes,
 		OverwrittenBytes: overwrittenBytes, LeaseOwner: status.Lease.Owner,
 		LeaseHeld: status.Lease.ClientID == clientID && status.Lease.Owner == serialhub.OwnerWeb,
+	}
+	if document.LeaseHeld {
+		document.LeaseID = status.Lease.LeaseID
 	}
 	return writeSerialObserverJSON(connection, document)
 }

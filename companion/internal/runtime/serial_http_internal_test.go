@@ -5,6 +5,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -168,7 +170,7 @@ func TestSerialStatusNeverExposesObserverOrLeaseCapabilities(t *testing.T) {
 	if err := application.serialHub.Reconcile("deck-status", 101, serialhub.StateUSBTX); err != nil {
 		t.Fatal(err)
 	}
-	request, err := application.serialHub.Leases().Acquire("private-browser-id", 101)
+	request, err := application.serialHub.AcquireLease("private-browser-id", 101)
 	if err != nil || request.RequestID == 0 {
 		t.Fatalf("Acquire() = %#v, %v", request, err)
 	}
@@ -191,5 +193,183 @@ func TestSerialStatusNeverExposesObserverOrLeaseCapabilities(t *testing.T) {
 		bytes.Contains(document, []byte(`"lease_id"`)) ||
 		bytes.Contains(document, []byte(`"client_id"`)) {
 		t.Fatalf("public Serial status leaked a capability: status=%d document=%s", response.StatusCode, document)
+	}
+}
+
+func TestSerialAcquireWriteFailureRemainsPendingAndTransitioning(t *testing.T) {
+	application := newSerialHTTPRuntime(t)
+	if err := application.serialHub.Reconcile("deck-offline", 202, serialhub.StateUSBTX); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(application.managementRoutes())
+	defer server.Close()
+	application.config.Management.AllowedOrigin = server.URL
+	const sessionToken = "serial-ambiguous-write-session"
+	if !application.sessions.add(sessionToken, "unused-csrf", time.Now()) {
+		t.Fatal("add management session")
+	}
+	header := http.Header{}
+	header.Set("Cookie", managementSessionCookie+"="+sessionToken)
+	header.Set("Origin", server.URL)
+	connection, response, err := websocket.Dial(
+		context.Background(),
+		"ws"+server.URL[4:]+"/api/v1/serial/observe",
+		&websocket.DialOptions{HTTPHeader: header, Subprotocols: []string{serialObserverSubprotocol}},
+	)
+	if err != nil {
+		t.Fatalf("Dial(observer) response=%v error=%v", response, err)
+	}
+	defer connection.CloseNow()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	_, _, err = connection.Read(ctx) // initial observer state
+	cancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, _ := json.Marshal(serialObserverControl{
+		Type: "serial.lease.acquire", ProtocolVersion: 1, SerialSessionID: 202,
+	})
+	if err = connection.Write(context.Background(), websocket.MessageText, request); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+	_, result, err := connection.Read(ctx)
+	cancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var acknowledgement struct {
+		Type        string `json:"type"`
+		Accepted    bool   `json:"accepted"`
+		ReferenceID uint64 `json:"reference_id"`
+	}
+	if err = json.Unmarshal(result, &acknowledgement); err != nil ||
+		acknowledgement.Type != "serial.lease.result" || !acknowledgement.Accepted ||
+		acknowledgement.ReferenceID == 0 {
+		t.Fatalf("ambiguous send acknowledgement=%s error=%v", result, err)
+	}
+	status := application.serialHub.Status()
+	pending, clientID, exists := application.serialHub.PendingOwnerRequest()
+	if status.Lease.Owner != serialhub.OwnerTransitioning || status.Lease.Owner == serialhub.OwnerUSB ||
+		!exists || pending.RequestID != acknowledgement.ReferenceID || clientID == "" {
+		t.Fatalf("ambiguous send was not retained: status=%#v pending=%#v client=%q", status, pending, clientID)
+	}
+}
+
+func TestSerialObserverRegistryForceClosesHijackedConnections(t *testing.T) {
+	application := newSerialHTTPRuntime(t)
+	if err := application.serialHub.Reconcile("deck-observer-close", 303, serialhub.StateUSBTX); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(application.managementRoutes())
+	defer server.Close()
+	application.config.Management.AllowedOrigin = server.URL
+	const sessionToken = "serial-observer-close-session"
+	if !application.sessions.add(sessionToken, "unused-csrf", time.Now()) {
+		t.Fatal("add management session")
+	}
+	header := http.Header{}
+	header.Set("Cookie", managementSessionCookie+"="+sessionToken)
+	header.Set("Origin", server.URL)
+	connection, response, err := websocket.Dial(
+		context.Background(),
+		"ws"+server.URL[4:]+"/api/v1/serial/observe",
+		&websocket.DialOptions{HTTPHeader: header, Subprotocols: []string{serialObserverSubprotocol}},
+	)
+	if err != nil {
+		t.Fatalf("Dial(observer) response=%v error=%v", response, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	_, _, err = connection.Read(ctx)
+	cancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+	err = application.closeSerialObservers(ctx)
+	cancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+	_, _, readErr := connection.Read(ctx)
+	cancel()
+	if readErr == nil {
+		t.Fatal("observer remained connected after registry shutdown")
+	}
+	if got := application.serialHub.Status().Observers; got != 0 {
+		t.Fatalf("observer count after shutdown=%d", got)
+	}
+}
+
+func TestShutdownSerialRevokeFailsClosedWithoutAnExactDeckResult(t *testing.T) {
+	application := newSerialHTTPRuntime(t)
+	if err := application.serialHub.Reconcile("deck-revoke-timeout", 404, serialhub.StateUSBTX); err != nil {
+		t.Fatal(err)
+	}
+	request, err := application.serialHub.AcquireLease("browser", 404)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = application.serialHub.ApplyOwnerResult("deck-revoke-timeout", serialhub.OwnerResult{
+		SessionID: 404, RequestID: request.RequestID, Owner: serialhub.OwnerWeb,
+		LeaseID: request.RequestID,
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	err = application.revokeSerialOwnerForShutdown(ctx)
+	cancel()
+	if err == nil {
+		t.Fatal("shutdown revoke succeeded without an exact Deck result")
+	}
+	status := application.serialHub.Status()
+	if status.Lease.Owner != serialhub.OwnerUnavailable || status.Lease.Owner == serialhub.OwnerUSB {
+		t.Fatalf("shutdown timeout claimed an unconfirmed USB owner: %#v", status)
+	}
+}
+
+func TestShutdownSerialRevokeCompletesOnlyAfterExactDeckResult(t *testing.T) {
+	application := newSerialHTTPRuntime(t)
+	if err := application.serialHub.Reconcile("deck-revoke", 505, serialhub.StateUSBTX); err != nil {
+		t.Fatal(err)
+	}
+	acquire, err := application.serialHub.AcquireLease("browser", 505)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = application.serialHub.ApplyOwnerResult("deck-revoke", serialhub.OwnerResult{
+		SessionID: 505, RequestID: acquire.RequestID, Owner: serialhub.OwnerWeb,
+		LeaseID: acquire.RequestID,
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	go func() {
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			request, _, pending := application.serialHub.PendingOwnerRequest()
+			if pending && !request.Enable {
+				result <- application.serialHub.ApplyOwnerResult("deck-revoke", serialhub.OwnerResult{
+					SessionID: 505, RequestID: request.RequestID, Owner: serialhub.OwnerUSB,
+				}, true)
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+		result <- errors.New("shutdown revoke request was not published")
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	err = application.revokeSerialOwnerForShutdown(ctx)
+	cancel()
+	if applyErr := <-result; applyErr != nil {
+		t.Fatal(applyErr)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := application.serialHub.Status()
+	if status.State != serialhub.StateUSBTX || status.Lease.Owner != serialhub.OwnerUSB {
+		t.Fatalf("confirmed shutdown owner=%#v", status)
 	}
 }

@@ -100,13 +100,28 @@ func (service *Service) Reconcile(deviceID string, sessionID uint64, state State
 		return ErrSessionBusy
 	}
 	previousSessionID := service.ring.Stats().SessionID
+	previousState := service.state
 	if err := service.ring.Begin(sessionID); err != nil {
 		return err
+	}
+	if previousSessionID != 0 && previousSessionID != sessionID {
+		service.leases.EndSession(previousSessionID)
 	}
 	service.deviceID = deviceID
 	service.state = state
 	if previousSessionID != sessionID {
 		service.webSequence = 0
+	}
+	if state == StateUSBTX {
+		_, _, pending := service.leases.PendingRequest()
+		if previousSessionID == sessionID && pending {
+			service.state = previousState
+		} else {
+			// A current Deck state publication is authoritative confirmation that
+			// no Web Lease remains after owner-side expiry or reconnect. It must
+			// not consume a same-Session request still waiting for its exact result.
+			service.leases.ConfirmUSB(sessionID)
+		}
 	}
 	return nil
 }
@@ -156,16 +171,121 @@ func (service *Service) Ring() *Ring {
 	return service.ring
 }
 
-func (service *Service) Leases() *LeaseManager {
-	return service.leases
+func (service *Service) AcquireLease(clientID string, sessionID uint64) (OwnerRequest, error) {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	if service.closed || service.deviceID == "" || service.state == StateDisarmed ||
+		service.ring.Stats().SessionID != sessionID {
+		return OwnerRequest{}, ErrLeaseNotActive
+	}
+	return service.leases.Acquire(clientID, sessionID)
+}
+
+func (service *Service) DisconnectLease(clientID string) (OwnerRequest, error) {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	if service.closed {
+		return OwnerRequest{}, ErrClosed
+	}
+	return service.leases.Disconnect(clientID)
+}
+
+func (service *Service) HeartbeatLease(clientID string, leaseID uint64) (OwnerActivity, error) {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	if service.closed || service.state != StateWebTX {
+		return OwnerActivity{}, ErrLeaseNotActive
+	}
+	return service.leases.Heartbeat(clientID, leaseID)
+}
+
+func (service *Service) ExpireLease() (OwnerRequest, bool) {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	if service.closed {
+		return OwnerRequest{}, false
+	}
+	return service.leases.Expire()
+}
+
+func (service *Service) ApplyOwnerResult(
+	deviceID string,
+	result OwnerResult,
+	accepted bool,
+) error {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	if service.closed || deviceID == "" || deviceID != service.deviceID ||
+		result.SessionID == 0 || result.SessionID != service.ring.Stats().SessionID {
+		return ErrStaleOwnerResult
+	}
+	var err error
+	if accepted {
+		err = service.leases.ApplyOwnerResult(result)
+	} else {
+		err = service.leases.ApplyOwnerRejection(result)
+	}
+	if err != nil {
+		return err
+	}
+	switch result.Owner {
+	case OwnerUSB:
+		service.state = StateUSBTX
+	case OwnerWeb:
+		service.state = StateWebTX
+	default:
+		// A rejected result can prove neither owner. Preserve the current Deck
+		// state while the Lease itself remains unavailable.
+	}
+	return nil
+}
+
+func (service *Service) PendingOwnerRequest() (OwnerRequest, string, bool) {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	if service.closed {
+		return OwnerRequest{}, "", false
+	}
+	return service.leases.PendingRequest()
+}
+
+func (service *Service) ClaimOwnerRequestAttempt(requestID uint64, minimumInterval time.Duration) bool {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	return !service.closed && service.leases.ClaimRequestAttempt(requestID, minimumInterval)
+}
+
+func (service *Service) RequireOwnerRevocation(deviceID string) (OwnerRequest, bool) {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	if service.closed || deviceID == "" || deviceID != service.deviceID {
+		return OwnerRequest{}, false
+	}
+	sessionID := service.ring.Stats().SessionID
+	lease := service.leases.Status()
+	if sessionID == 0 || (service.state != StateWebTX &&
+		lease.Owner != OwnerWeb && lease.Owner != OwnerTransitioning) {
+		return OwnerRequest{}, false
+	}
+	request, err := service.leases.RequireRevocation(sessionID)
+	return request, err == nil
+}
+
+func (service *Service) MarkOwnerUnavailable() {
+	service.mu.Lock()
+	if !service.closed {
+		service.leases.FailClosed(service.ring.Stats().SessionID)
+	}
+	service.mu.Unlock()
 }
 
 func (service *Service) Status() ServiceStatus {
 	service.mu.Lock()
 	deviceID := service.deviceID
 	state := service.state
-	service.mu.Unlock()
 	ring := service.ring.Stats()
+	lease := service.leases.Status()
+	service.mu.Unlock()
 	return ServiceStatus{
 		DeviceID:         deviceID,
 		State:            state,
@@ -174,7 +294,7 @@ func (service *Service) Status() ServiceStatus {
 		BufferedFrames:   ring.BufferedFrames,
 		OverwrittenBytes: ring.OverwrittenBytes,
 		Observers:        ring.Observers,
-		Lease:            service.leases.Status(),
+		Lease:            lease,
 	}
 }
 

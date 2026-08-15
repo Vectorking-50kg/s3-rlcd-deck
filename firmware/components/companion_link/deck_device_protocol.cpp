@@ -238,9 +238,9 @@ bool safe_version(const char *value)
     return true;
 }
 
-bool parse_capabilities(JsonCursor *cursor)
+bool parse_capabilities(JsonCursor *cursor, bool *has_serial)
 {
-    if (!cursor->consume('[')) {
+    if (has_serial == nullptr || !cursor->consume('[')) {
         return false;
     }
     unsigned seen = 0;
@@ -270,6 +270,7 @@ bool parse_capabilities(JsonCursor *cursor)
             return false;
         }
     }
+    *has_serial = (seen & 2U) != 0;
     return count != 0;
 }
 
@@ -404,6 +405,7 @@ bool deck_device_protocol_validate_hello(
     }
     uint16_t seen = 0;
     bool serial_disarmed = false;
+    bool has_serial_capability = false;
     uint64_t serial_session_id = 0;
     bool done = false;
     while (!done) {
@@ -447,7 +449,7 @@ bool deck_device_protocol_validate_hello(
             }
         } else if (std::strcmp(key, "capabilities") == 0) {
             bit = 32U;
-            if (!parse_capabilities(&cursor)) {
+            if (!parse_capabilities(&cursor, &has_serial_capability)) {
                 return false;
             }
         } else if (std::strcmp(key, "serial_state") == 0) {
@@ -478,7 +480,9 @@ bool deck_device_protocol_validate_hello(
         }
     }
     return seen == 0xffU && cursor.finished() &&
-           (serial_disarmed ? serial_session_id == 0 : serial_session_id != 0);
+           (serial_disarmed
+                ? serial_session_id == 0
+                : serial_session_id != 0 && has_serial_capability);
 }
 
 bool deck_device_protocol_parse_heartbeat(

@@ -26,6 +26,17 @@ void shared_hello_fixtures_match_the_device_contract()
     assert(deck_device_protocol_validate_hello(
         valid.data(), valid.size(), "deck-001122334455"
     ));
+    const std::string active = fixture("hello-active-valid.json");
+    assert(deck_device_protocol_validate_hello(
+        active.data(), active.size(), "deck-001122334455"
+    ));
+    const std::string active_without_serial =
+        fixture("hello-active-without-serial.json");
+    assert(!deck_device_protocol_validate_hello(
+        active_without_serial.data(),
+        active_without_serial.size(),
+        "deck-001122334455"
+    ));
     const std::string wrong_board = fixture("hello-wrong-board.json");
     assert(!deck_device_protocol_validate_hello(
         wrong_board.data(), wrong_board.size(), "deck-001122334455"

@@ -714,6 +714,9 @@ Companion Serial Hub 只在 RAM 保存当前 Session，payload 上限 8 MiB、fr
 Web TX Lease 同时只能属于一个观察者，默认 10 分钟。Acquire、release、disconnect 与 timeout
 均先进入 `transitioning`，只有 Deck owner 的 exact request result 才能发布最终状态；在 Deck
 确认 USB 前 UI 不得提前显示 USB。Lease/browser/request capability 不得出现在普通管理状态 API。
+Device Link 写失败属于送达结果不明，必须保留原 request 重试；Companion 重启后由 Deck 将外部
+request ID 映射到 Link 生命周期内单调 ID。Runtime 停止时先有界关闭全部 observer，再撤权并等待
+exact result，最后才能关闭 Device Link 和清空 Hub。
 完整决定见 [ADR 0020](adr/0020-keep-serial-hub-history-volatile-and-lease-web-transmit.md)。
 
 ### 10.3 AI 快照

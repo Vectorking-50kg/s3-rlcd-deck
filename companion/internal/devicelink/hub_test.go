@@ -344,6 +344,38 @@ func TestHubSerialControlHistoryAndWebFrameRoundTrip(t *testing.T) {
 	}
 }
 
+func TestHubNotifiesOnlyWhenTheAuthenticatedDeckSessionDisconnects(t *testing.T) {
+	disconnected := make(chan string, 1)
+	hub, err := New(Config{
+		Authenticator: &testAuthenticator{}, HeartbeatInterval: time.Second,
+		HeartbeatTimeout: 5 * time.Second,
+		OnSerialState:    func(string, uint64, string) error { return nil },
+		OnDisconnect:     func(deviceID string) { disconnected <- deviceID },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewTLSServer(hub)
+	defer func() { hub.Close(); server.Close() }()
+	connection, _, err := dialTestDeck(t, server, testDeviceID, testDeviceToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = connection.Write(context.Background(), websocket.MessageText, activeHello(77)); err != nil {
+		t.Fatal(err)
+	}
+	_ = readControlType(t, connection, MessageHeartbeat)
+	connection.CloseNow()
+	select {
+	case deviceID := <-disconnected:
+		if deviceID != testDeviceID {
+			t.Fatalf("disconnect device=%q", deviceID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("active Deck disconnect callback timed out")
+	}
+}
+
 func TestHubBroadcastsTheLatestBoundedSnapshotWithoutBlockingPublishers(t *testing.T) {
 	hub, _, server := newTestHub(t)
 	connection, _, err := dialTestDeck(t, server, testDeviceID, testDeviceToken)

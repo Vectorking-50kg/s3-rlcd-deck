@@ -36,7 +36,12 @@
         {
           "if": {"properties": {"serial_state": {"const": "disarmed"}}},
           "then": {"properties": {"serial_session_id": {"const": 0}}},
-          "else": {"properties": {"serial_session_id": {"minimum": 1}}}
+          "else": {
+            "properties": {
+              "serial_session_id": {"minimum": 1},
+              "capabilities": {"contains": {"const": "serial"}}
+            }
+          }
         }
       ]
     },

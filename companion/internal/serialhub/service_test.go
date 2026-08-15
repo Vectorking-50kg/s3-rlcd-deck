@@ -70,13 +70,13 @@ func TestServiceBuildsWebFramesOnlyForTheCurrentLeaseHolder(t *testing.T) {
 	if err = service.Reconcile("deck-a", 5, StateWebTX); err != nil {
 		t.Fatal(err)
 	}
-	request, err := service.Leases().Acquire("browser-a", 5)
+	request, err := service.AcquireLease("browser-a", 5)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = service.Leases().ApplyOwnerResult(OwnerResult{
+	if err = service.ApplyOwnerResult("deck-a", OwnerResult{
 		SessionID: 5, RequestID: request.RequestID, Owner: OwnerWeb, LeaseID: request.RequestID,
-	}); err != nil {
+	}, true); err != nil {
 		t.Fatal(err)
 	}
 	deviceID, frame, err := service.BuildWebFrame("browser-a", request.RequestID, []byte{0, 0xff})
@@ -86,5 +86,104 @@ func TestServiceBuildsWebFramesOnlyForTheCurrentLeaseHolder(t *testing.T) {
 	}
 	if _, _, err = service.BuildWebFrame("browser-b", request.RequestID, []byte("x")); !errors.Is(err, ErrLeaseNotActive) {
 		t.Fatalf("non-holder BuildWebFrame() error=%v", err)
+	}
+}
+
+func TestServiceEndsTheOldLeaseWhenDeckStartsANewSession(t *testing.T) {
+	service, err := NewService(ServiceConfig{RingConfig: Config{
+		CapacityBytes: 32, MaximumFrames: 8, MaximumObservers: 2,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	if err = service.Reconcile("deck-a", 5, StateUSBTX); err != nil {
+		t.Fatal(err)
+	}
+	request, err := service.AcquireLease("browser-a", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = service.ApplyOwnerResult("deck-a", OwnerResult{
+		SessionID: 5, RequestID: request.RequestID, Owner: OwnerWeb, LeaseID: request.RequestID,
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+
+	// A Deck restart or a direct A -> B Serial Session switch is an
+	// authoritative USB state for B. It must not inherit A's browser Lease.
+	if err = service.Reconcile("deck-a", 6, StateUSBTX); err != nil {
+		t.Fatal(err)
+	}
+	status := service.Status()
+	if status.SessionID != 6 || status.State != StateUSBTX ||
+		status.Lease.SessionID != 6 || status.Lease.Owner != OwnerUSB ||
+		status.Lease.ClientID != "" || status.Lease.LeaseID != 0 {
+		t.Fatalf("new Session inherited old Lease: %#v", status)
+	}
+	if _, err = service.AcquireLease("browser-b", 6); err != nil {
+		t.Fatalf("new Session could not acquire a fresh Lease: %v", err)
+	}
+}
+
+func TestSameSessionStateCannotConsumeAPendingExactOwnerRequest(t *testing.T) {
+	service, err := NewService(ServiceConfig{RingConfig: Config{
+		CapacityBytes: 32, MaximumFrames: 8, MaximumObservers: 2,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	if err = service.Reconcile("deck-a", 7, StateUSBTX); err != nil {
+		t.Fatal(err)
+	}
+	request, err := service.AcquireLease("browser", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = service.Reconcile("deck-a", 7, StateUSBTX); err != nil {
+		t.Fatal(err)
+	}
+	pending, clientID, exists := service.PendingOwnerRequest()
+	status := service.Status()
+	if !exists || pending != request || clientID != "browser" ||
+		status.Lease.Owner != OwnerTransitioning {
+		t.Fatalf("same-Session state consumed pending request: status=%#v pending=%#v", status, pending)
+	}
+}
+
+func TestSameSessionUSBStateDoesNotPublishUSBWhileRevokeResultIsPending(t *testing.T) {
+	service, err := NewService(ServiceConfig{RingConfig: Config{
+		CapacityBytes: 32, MaximumFrames: 8, MaximumObservers: 2,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	if err = service.Reconcile("deck-a", 8, StateUSBTX); err != nil {
+		t.Fatal(err)
+	}
+	acquire, err := service.AcquireLease("browser", 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = service.ApplyOwnerResult("deck-a", OwnerResult{
+		SessionID: 8, RequestID: acquire.RequestID, Owner: OwnerWeb,
+		LeaseID: acquire.RequestID,
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	revoke, err := service.DisconnectLease("browser")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = service.Reconcile("deck-a", 8, StateUSBTX); err != nil {
+		t.Fatal(err)
+	}
+	pending, _, exists := service.PendingOwnerRequest()
+	status := service.Status()
+	if !exists || pending != revoke || status.State != StateWebTX ||
+		status.Lease.Owner != OwnerTransitioning {
+		t.Fatalf("USB was published before exact revoke result: status=%#v pending=%#v", status, pending)
 	}
 }

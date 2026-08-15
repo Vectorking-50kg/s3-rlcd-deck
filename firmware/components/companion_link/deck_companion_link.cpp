@@ -7,6 +7,7 @@
 #include "deck_companion_pairing_esp.h"
 #include "deck_device_protocol.h"
 #include "deck_serial_frame.h"
+#include "deck_serial_request_tracker.h"
 
 #include <atomic>
 #include <cstdio>
@@ -155,17 +156,14 @@ struct deck_companion_link {
     deck_serial_session_snapshot_t published_serial{};
     bool has_published_serial = false;
     std::atomic<bool> serial_publication_dirty{false};
-    bool pending_serial_owner_request = false;
-    uint64_t pending_serial_request_id = 0;
+    deck_serial_request_tracker_t serial_requests{};
     bool serial_history_active = false;
     bool serial_stream_ready = false;
     uint64_t serial_history_session_id = 0;
     uint64_t serial_history_cursor = 0;
     uint64_t sent_serial_session_id = 0;
     uint64_t sent_serial_sequence = 0;
-    uint64_t accepted_web_session_id = 0;
-    uint64_t accepted_web_sequence = 0;
-    uint64_t accepted_web_monotonic_ms = 0;
+    deck_serial_frame_order_t accepted_web_order{};
     uint64_t next_serial_revoke_ms = 0;
 };
 
@@ -250,12 +248,12 @@ void disconnect_transport(deck_companion_link_t *link)
     deck_companion_link_frame_reset(&link->frame_assembler);
     link->has_server_monotonic = false;
     link->has_published_serial = false;
-    link->pending_serial_owner_request = false;
-    link->pending_serial_request_id = 0;
+    deck_serial_request_transport_reset(&link->serial_requests);
     link->serial_history_active = false;
     link->serial_stream_ready = false;
     link->serial_history_session_id = 0;
     link->serial_history_cursor = 0;
+    deck_serial_frame_order_reset(&link->accepted_web_order);
     link->timing = {};
 }
 
@@ -557,9 +555,7 @@ bool send_serial_state_if_changed(deck_companion_link_t *link)
         if (serial.state == DECK_SERIAL_DISARMED) {
             link->sent_serial_session_id = 0;
             link->sent_serial_sequence = 0;
-            link->accepted_web_session_id = 0;
-            link->accepted_web_sequence = 0;
-            link->accepted_web_monotonic_ms = 0;
+            deck_serial_frame_order_reset(&link->accepted_web_order);
         }
     }
     return true;
@@ -697,7 +693,7 @@ const char *serial_command_code_name(deck_serial_command_code_t code)
 
 bool send_pending_serial_owner_result(deck_companion_link_t *link)
 {
-    if (!link->pending_serial_owner_request) {
+    if (!link->serial_requests.pending) {
         return true;
     }
     deck_serial_command_result_t result{};
@@ -706,7 +702,7 @@ bool send_pending_serial_owner_result(deck_companion_link_t *link)
         if (link->serial == nullptr ||
             !deck_serial_service_command_result(
                 link->serial,
-                link->pending_serial_request_id,
+                link->serial_requests.service_request_id,
                 &result
             )) {
             return true;
@@ -720,7 +716,9 @@ bool send_pending_serial_owner_result(deck_companion_link_t *link)
         sizeof(message),
         "{\"type\":\"serial.owner.result\",\"protocol_version\":1,\"serial_session_id\":%llu,\"request_id\":%llu,\"code\":\"%s\",\"serial_state\":\"%s\",\"owner_generation\":%llu,\"lease_id\":%llu}",
         static_cast<unsigned long long>(wire_session_id),
-        static_cast<unsigned long long>(result.request_id),
+        static_cast<unsigned long long>(
+            link->serial_requests.external_request_id
+        ),
         serial_command_code_name(result.code),
         serial_state_name(result.state),
         static_cast<unsigned long long>(result.owner_generation),
@@ -730,8 +728,14 @@ bool send_pending_serial_owner_result(deck_companion_link_t *link)
         !send_text(link, message, static_cast<size_t>(size))) {
         return false;
     }
-    link->pending_serial_owner_request = false;
-    link->pending_serial_request_id = 0;
+    uint64_t external_request_id = 0;
+    if (!deck_serial_request_complete(
+            &link->serial_requests,
+            result.request_id,
+            &external_request_id
+        )) {
+        return false;
+    }
     return true;
 }
 
@@ -764,20 +768,33 @@ bool handle_serial_control(
     }
     switch (control.kind) {
         case DECK_DEVICE_SERIAL_OWNER_REQUEST:
-            if (link->pending_serial_owner_request) {
-                return false;
+            {
+                uint64_t service_request_id = 0;
+                const deck_serial_request_begin_result_t begin =
+                    deck_serial_request_begin(
+                        &link->serial_requests,
+                        control.request_id,
+                        &service_request_id
+                    );
+                if (begin == DECK_SERIAL_REQUEST_REPLAY) {
+                    return true;
+                }
+                if (begin != DECK_SERIAL_REQUEST_NEW) {
+                    return false;
+                }
+                if (!deck_serial_service_request_web(
+                        link->serial,
+                        control.session_id,
+                        service_request_id,
+                        control.enable
+                    )) {
+                    deck_serial_request_transport_reset(
+                        &link->serial_requests
+                    );
+                    return false;
+                }
+                return true;
             }
-            if (!deck_serial_service_request_web(
-                    link->serial,
-                    control.session_id,
-                    control.request_id,
-                    control.enable
-                )) {
-                return false;
-            }
-            link->pending_serial_owner_request = true;
-            link->pending_serial_request_id = control.request_id;
-            return true;
         case DECK_DEVICE_SERIAL_OWNER_ACTIVITY:
             if (serial.state != DECK_SERIAL_WEB_TX ||
                 serial.lease_id != control.lease_id) {
@@ -822,9 +839,7 @@ bool handle_serial_binary(
         serial.session_id != frame.session_id || serial.lease_id == 0) {
         return false;
     }
-    if (link->accepted_web_session_id == frame.session_id &&
-        (!sequence_after(frame.sequence, link->accepted_web_sequence) ||
-         frame.monotonic_ms < link->accepted_web_monotonic_ms)) {
+    if (!deck_serial_frame_order_accepts(&link->accepted_web_order, &frame)) {
         return false;
     }
     if (!deck_serial_service_submit_web(
@@ -836,9 +851,7 @@ bool handle_serial_binary(
         )) {
         return false;
     }
-    link->accepted_web_session_id = frame.session_id;
-    link->accepted_web_sequence = frame.sequence;
-    link->accepted_web_monotonic_ms = frame.monotonic_ms;
+    deck_serial_frame_order_commit(&link->accepted_web_order, &frame);
     return true;
 }
 

@@ -1,4 +1,5 @@
 #include "deck_serial_frame.h"
+#include "deck_serial_request_tracker.h"
 
 #include <algorithm>
 #include <cassert>
@@ -123,6 +124,83 @@ void encoder_is_byte_exact_and_bounded()
     ) == 0);
 }
 
+void web_frame_order_is_strict_but_resets_for_a_new_connection()
+{
+    const uint8_t payload = 'x';
+    deck_serial_frame_view_t frame{
+        DECK_SERIAL_FRAME_WEB_TX,
+        42,
+        900,
+        5000,
+        &payload,
+        1,
+    };
+    deck_serial_frame_order_t order{};
+    assert(deck_serial_frame_order_accepts(&order, &frame));
+    deck_serial_frame_order_commit(&order, &frame);
+    assert(!deck_serial_frame_order_accepts(&order, &frame));
+    frame.sequence = 901;
+    frame.monotonic_ms = 4999;
+    assert(!deck_serial_frame_order_accepts(&order, &frame));
+
+    // A newly connected Companion starts its process-local sequence and
+    // monotonic epoch from one. The Link disconnect fence authorizes that new
+    // generation without weakening ordering inside either connection.
+    deck_serial_frame_order_reset(&order);
+    frame.sequence = 1;
+    frame.monotonic_ms = 0;
+    assert(deck_serial_frame_order_accepts(&order, &frame));
+    deck_serial_frame_order_commit(&order, &frame);
+    assert(!deck_serial_frame_order_accepts(&order, &frame));
+}
+
+void companion_request_ids_are_mapped_to_a_link_lifetime_sequence()
+{
+    deck_serial_request_tracker_t tracker{};
+    uint64_t service_request_id = 0;
+    assert(deck_serial_request_begin(
+               &tracker,
+               900,
+               &service_request_id
+           ) == DECK_SERIAL_REQUEST_NEW);
+    assert(service_request_id == 1);
+    uint64_t replay_service_request_id = 0;
+    assert(deck_serial_request_begin(
+               &tracker,
+               900,
+               &replay_service_request_id
+           ) == DECK_SERIAL_REQUEST_REPLAY);
+    assert(replay_service_request_id == service_request_id);
+    assert(deck_serial_request_begin(
+               &tracker,
+               901,
+               &replay_service_request_id
+           ) == DECK_SERIAL_REQUEST_BUSY);
+    uint64_t external_request_id = 0;
+    assert(deck_serial_request_complete(
+        &tracker,
+        service_request_id,
+        &external_request_id
+    ));
+    assert(external_request_id == 900);
+
+    // A restarted Companion may start again at external request 1. The Serial
+    // Service still receives a strictly newer Link-lifetime ID.
+    assert(deck_serial_request_begin(
+               &tracker,
+               1,
+               &service_request_id
+           ) == DECK_SERIAL_REQUEST_NEW);
+    assert(service_request_id == 2);
+    deck_serial_request_transport_reset(&tracker);
+    assert(deck_serial_request_begin(
+               &tracker,
+               1,
+               &service_request_id
+           ) == DECK_SERIAL_REQUEST_NEW);
+    assert(service_request_id == 3);
+}
+
 }  // namespace
 
 int main()
@@ -130,5 +208,7 @@ int main()
     constants_match_the_shared_catalog();
     shared_fixtures_match_the_binary_contract();
     encoder_is_byte_exact_and_bounded();
+    web_frame_order_is_strict_but_resets_for_a_new_connection();
+    companion_request_ids_are_mapped_to_a_link_lifetime_sequence();
     return 0;
 }

@@ -27,6 +27,15 @@ expiry, Device Link failure, or Companion shutdown requests Deck revocation firs
 revokes autonomously when WSS disconnects or its Lease expires. Unsent USB or Web source queues are
 cleared during the serialized owner transition, while target-RX rings remain independent.
 
+A Device Link write failure is an ambiguous delivery result: the Companion retains the exact
+pending transition and retries instead of publishing a guessed owner. The Deck maps each
+process-local Companion request ID onto a Link-lifetime monotonic service request ID, so a restarted
+Companion cannot be rejected as stale; replies still carry the originating external request ID.
+Each new authenticated transport generation also resets only the Web-frame ordering fence, allowing
+the new process epoch to begin at sequence one without weakening ordering inside a connection.
+Runtime shutdown first closes and joins all hijacked observer WebSockets under one deadline, then
+requests and waits for exact owner revocation before closing Device Link and zeroing the Hub.
+
 Lease IDs, browser IDs, and pending request capabilities never appear in the management status
 document. Raw Web input is accepted only from the exact Lease holder, wrapped by the Companion in a
 bounded binary frame, and revalidated by the Deck owner immediately before UART FIFO submission.

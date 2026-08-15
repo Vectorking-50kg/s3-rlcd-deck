@@ -228,7 +228,9 @@ Only one observer may hold the ten-minute Web TX Lease. Acquire/release results 
 `transitioning` until the Deck's sole owner acknowledges the exact request. Observer disconnect and
 Lease expiry request Deck revocation before USB is reported locally; Device Link disconnect and the
 Deck's independent deadline also return the target owner to USB. Raw input from any other observer
-is rejected. See
+is rejected. A transport write failure leaves the request pending for exact-result retry. Runtime
+shutdown closes and joins every observer, then waits within its common deadline for Deck revocation
+before closing Device Link and clearing the Hub. See
 [`ADR 0020`](../docs/adr/0020-keep-serial-hub-history-volatile-and-lease-web-transmit.md).
 
 LAN management is off by default. Enabling it requires all three explicit options and causes the status document to report a security warning:

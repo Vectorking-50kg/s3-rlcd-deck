@@ -63,6 +63,7 @@ type Runtime struct {
 	pairing                 *pairing.Service
 	deviceLink              *devicelink.Hub
 	serialHub               *serialhub.Service
+	serialObservers         serialObserverRegistry
 	codexCollector          CodexCollector
 	codexObserver           CodexObserver
 	cursorCollector         CursorCollector
@@ -125,11 +126,10 @@ func New(config Config) (*Runtime, error) {
 			return serialService.Reconcile(deviceID, sessionID, serialhub.State(state))
 		},
 		OnSerialFrame: serialService.Ingest,
+		OnDisconnect: func(deviceID string) {
+			serialService.RequireOwnerRevocation(deviceID)
+		},
 		OnSerialOwnerResult: func(deviceID string, result devicelink.SerialOwnerResult) error {
-			status := serialService.Status()
-			if deviceID != status.DeviceID {
-				return serialhub.ErrStaleOwnerResult
-			}
 			owner := serialhub.OwnerUnavailable
 			if result.SerialState == "usb_tx" {
 				owner = serialhub.OwnerUSB
@@ -140,10 +140,8 @@ func New(config Config) (*Runtime, error) {
 				SessionID: result.SerialSessionID, RequestID: result.RequestID,
 				Owner: owner, LeaseID: result.LeaseID,
 			}
-			if result.Code == "applied" || result.Code == "no_change" {
-				return serialService.Leases().ApplyOwnerResult(ownerResult)
-			}
-			return serialService.Leases().ApplyOwnerRejection(ownerResult)
+			accepted := result.Code == "applied" || result.Code == "no_change"
+			return serialService.ApplyOwnerResult(deviceID, ownerResult, accepted)
 		},
 		SerialHistoryCursor: func(deviceID string, sessionID uint64) (uint64, bool) {
 			status := serialService.Status()
@@ -422,9 +420,15 @@ func (application *Runtime) Run(ctx context.Context) error {
 
 	shutdownContext, cancel := context.WithTimeout(context.Background(), application.shutdownTimeout)
 	defer cancel()
+	observerShutdownError := application.closeSerialObservers(shutdownContext)
+	serialRevokeError := application.revokeSerialOwnerForShutdown(shutdownContext)
 	application.deviceLink.Close()
 	application.serialHub.Close()
-	shutdownErrors := shutdownServers(shutdownContext, managementServer, deviceHubServer)
+	shutdownErrors := errors.Join(
+		observerShutdownError,
+		serialRevokeError,
+		shutdownServers(shutdownContext, managementServer, deviceHubServer),
+	)
 	for _, done := range collectorDone {
 		select {
 		case <-done:
