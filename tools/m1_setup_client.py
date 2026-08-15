@@ -174,8 +174,6 @@ def read_state(identifier: str) -> dict[str, str] | None:
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise HelperFailure("network_state_invalid") from error
     if not isinstance(document, dict) or set(document) != {
-        "wifi_interface",
-        "connection_name",
         "connection_uuid",
         "original_uuid",
     } or any(not isinstance(value, str) for value in document.values()):
@@ -655,8 +653,6 @@ class NetworkManagerSession:
         write_state(
             self.identifier,
             {
-                "wifi_interface": self.wifi_interface,
-                "connection_name": self.connection_name,
                 "connection_uuid": self.connection_uuid,
                 "original_uuid": self.original_uuid,
             },
@@ -754,7 +750,6 @@ class NetworkManagerSession:
             cleanup_failed = True
         if cleanup_failed:
             raise HelperFailure("network_cleanup_failed")
-        state_path(self.identifier).unlink(missing_ok=True)
 
 
 def verify_control_path(wifi_interface: str, control_interface: str) -> None:
@@ -955,9 +950,7 @@ def cleanup_transaction(
     journal = read_state(identifier)
     if journal is not None:
         if (
-            journal["wifi_interface"] != wifi_interface
-            or journal["connection_name"] != expected_name
-            or (
+            (
                 journal["connection_uuid"]
                 and UUID_PATTERN.fullmatch(journal["connection_uuid"]) is None
             )
@@ -975,7 +968,7 @@ def cleanup_transaction(
             identifier,
             budget,
         )
-        session.connection_name = journal["connection_name"]
+        session.connection_name = expected_name
         session.connection_uuid = journal["connection_uuid"].lower()
         session.original_uuid = journal["original_uuid"].lower()
         if not session.connection_uuid:
@@ -983,8 +976,18 @@ def cleanup_transaction(
                 budget.cleanup(5)
             ).get(expected_name, "")
         session._cleanup()
-    if expected_name in saved_connections(budget.cleanup(5)):
+    remaining_connections = saved_connections(budget.cleanup(5))
+    if expected_name in remaining_connections or (
+        journal is not None
+        and journal["connection_uuid"]
+        and journal["connection_uuid"].lower() in remaining_connections.values()
+    ):
         raise HelperFailure("network_cleanup_failed")
+    if journal is not None and active_connection_uuid(
+        wifi_interface, budget.cleanup(5)
+    ) != journal["original_uuid"].lower():
+        raise HelperFailure("network_cleanup_failed")
+    state_path(identifier).unlink(missing_ok=True)
     if read_state(identifier) is not None:
         raise HelperFailure("network_cleanup_failed")
     return {"network_restored": True}

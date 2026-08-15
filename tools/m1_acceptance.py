@@ -63,6 +63,24 @@ REQUIRED_CHECKS = (
     "windows_native_shell_observed",
     "cleanup_restored",
 )
+NATIVE_RUN_REPOSITORY = "Vectorking-50kg/s3-rlcd-deck"
+NATIVE_RUN_WORKFLOW = "Companion desktop native smoke"
+NATIVE_RUN_WORKFLOW_PATH = ".github/workflows/companion-desktop.yml"
+NATIVE_RUN_REQUIRED_STEPS = {
+    "macos": {
+        "Verify checkout identity",
+        "Verify and build Companion",
+        "Verify native Keychain secret store",
+        "Run native menu-bar smoke",
+    },
+    "windows": {
+        "Verify checkout identity",
+        "Verify Companion",
+        "Build native tray executable",
+        "Verify native Credential Manager secret store",
+        "Run native tray smoke",
+    },
+}
 
 
 class AcceptanceFailure(RuntimeError):
@@ -1127,32 +1145,92 @@ def wait_for_host(host: str, timeout: float) -> None:
     raise AcceptanceFailure(f"network host {host} did not become reachable")
 
 
-def verified_native_run(url: str, commit: str) -> tuple[bool, bool]:
+def verified_native_run(url: str, commit: str) -> dict[str, Any] | None:
     matched = re.fullmatch(
-        r"https://github\.com/[^/]+/[^/]+/actions/runs/([0-9]+)", url
+        rf"https://github\.com/{re.escape(NATIVE_RUN_REPOSITORY)}/actions/runs/([0-9]+)",
+        url,
     )
     if matched is None:
-        return False, False
+        return None
+    run_id = int(matched.group(1))
     try:
+        workflow = json.loads(command_output([
+            "gh",
+            "api",
+            f"repos/{NATIVE_RUN_REPOSITORY}/actions/workflows/companion-desktop.yml",
+        ]))
         document = json.loads(command_output([
-            "gh", "run", "view", matched.group(1),
-            "--json", "headSha,conclusion,jobs",
+            "gh", "run", "view", str(run_id),
+            "--json",
+            "databaseId,workflowDatabaseId,workflowName,url,event,headSha,conclusion,jobs",
         ]))
     except (subprocess.SubprocessError, json.JSONDecodeError):
-        return False, False
-    if document.get("headSha") != commit or document.get("conclusion") != "success":
-        return False, False
+        return None
+    workflow_id = workflow.get("id")
+    if (
+        not isinstance(workflow_id, int)
+        or workflow_id <= 0
+        or workflow.get("name") != NATIVE_RUN_WORKFLOW
+        or workflow.get("path") != NATIVE_RUN_WORKFLOW_PATH
+        or workflow.get("state") != "active"
+        or document.get("databaseId") != run_id
+        or document.get("workflowDatabaseId") != workflow_id
+        or document.get("workflowName") != NATIVE_RUN_WORKFLOW
+        or document.get("url") != url
+        or document.get("event") not in {"pull_request", "push"}
+        or document.get("headSha") != commit
+        or document.get("conclusion") != "success"
+    ):
+        return None
     jobs = [job for job in document.get("jobs", []) if isinstance(job, dict)]
-    macos = any(
-        job.get("name") in {"macOS native (arm64)", "macOS native (amd64)"}
-        and job.get("conclusion") == "success"
-        for job in jobs
-    )
-    windows = any(
-        job.get("name") == "Windows native (amd64)" and job.get("conclusion") == "success"
-        for job in jobs
-    )
-    return macos, windows
+
+    def job_evidence(
+        accepted_names: set[str], required_steps: set[str]
+    ) -> dict[str, Any] | None:
+        for job in jobs:
+            job_id = job.get("databaseId")
+            job_url = job.get("url")
+            steps = {
+                step.get("name"): step.get("conclusion")
+                for step in job.get("steps", [])
+                if isinstance(step, dict)
+            }
+            if (
+                job.get("name") in accepted_names
+                and job.get("conclusion") == "success"
+                and isinstance(job_id, int)
+                and job_id > 0
+                and job_url == f"{url}/job/{job_id}"
+                and all(steps.get(step) == "success" for step in required_steps)
+            ):
+                return {
+                    "job_id": job_id,
+                    "job_name": job["name"],
+                    "job_url": job_url,
+                    "required_steps": sorted(required_steps),
+                }
+        return None
+
+    return {
+        "repository": NATIVE_RUN_REPOSITORY,
+        "workflow": NATIVE_RUN_WORKFLOW,
+        "workflow_id": workflow_id,
+        "workflow_path": NATIVE_RUN_WORKFLOW_PATH,
+        "run_id": run_id,
+        "run_url": url,
+        "event": document["event"],
+        "head_sha": commit,
+        "jobs": {
+            "macos": job_evidence(
+                {"macOS native (arm64)", "macOS native (amd64)"},
+                NATIVE_RUN_REQUIRED_STEPS["macos"],
+            ),
+            "windows": job_evidence(
+                {"Windows native (amd64)"},
+                NATIVE_RUN_REQUIRED_STEPS["windows"],
+            ),
+        },
+    }
 
 
 def build_summary(
@@ -1168,6 +1246,7 @@ def build_summary(
     serial_log: pathlib.Path | None,
     source_dirty: bool,
     toolchain_environment: dict[str, str] | None = None,
+    native_run_evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     failures = [name for name in REQUIRED_CHECKS if checks.get(name) is not True]
     if source_dirty:
@@ -1189,6 +1268,7 @@ def build_summary(
         "deck_error_count": deck_error_count,
         "companion_error_count": companion_error_count,
         "raw_log_sha256": raw_hash,
+        "native_run": native_run_evidence,
         "redaction_statement": "Secret credential material is never retained in acceptance evidence.",
         "failures": failures,
     }
@@ -1229,14 +1309,13 @@ def main() -> int:
     deck_error_count = 0
     link_error_generation = 0
     companion_error_count = 0
-    dirty = not source_tree_clean()
-    commit = command_output(["git", "rev-parse", "HEAD"])
+    dirty = True
+    commit = ""
     observed_firmware_commit = ""
     observed_companion_commit = ""
-    token = hashlib.sha256(os.urandom(64)).hexdigest()
-    secrets = SensitiveValueTracker(token)
-    data_root = tempfile.TemporaryDirectory(prefix="s3deck-m1-companion-")
-    data_directory = pathlib.Path(data_root.name)
+    secrets = SensitiveValueTracker()
+    data_root: tempfile.TemporaryDirectory[str] | None = None
+    data_directory: pathlib.Path | None = None
     companion_log = arguments.result_dir / "companion.jsonl"
     companion: CompanionProcess | None = None
     managed_processes: list[CompanionProcess] = []
@@ -1246,9 +1325,16 @@ def main() -> int:
     summary: dict[str, Any] = {"status": "failed"}
     summary_written = False
     toolchain_environment: dict[str, str] | None = None
+    native_run_evidence: dict[str, Any] | None = None
     try:
+        dirty = not source_tree_clean()
+        commit = command_output(["git", "rev-parse", "HEAD"])
         if dirty:
             raise AcceptanceFailure("source tree is dirty; commit before auditable acceptance")
+        token = hashlib.sha256(os.urandom(64)).hexdigest()
+        secrets.add(token)
+        data_root = tempfile.TemporaryDirectory(prefix="s3deck-m1-companion-")
+        data_directory = pathlib.Path(data_root.name)
         helper_path = REPOSITORY_ROOT / "tools/m1_setup_client.py"
         helper_sha256 = hashlib.sha256(helper_path.read_bytes()).hexdigest()
         setup_client = SetupClientAdapter(
@@ -1477,11 +1563,20 @@ def main() -> int:
             raise AcceptanceFailure("temporary device trust cleanup failed")
         checks["management_device_authority_separated"] = True
 
-        native_macos, native_windows = verified_native_run(
+        native_run_evidence = verified_native_run(
             arguments.native_run_url, commit
         )
-        checks["macos_native_shell_observed"] = native_macos
-        checks["windows_native_shell_observed"] = native_windows
+        native_jobs = (
+            native_run_evidence.get("jobs", {})
+            if native_run_evidence is not None
+            else {}
+        )
+        checks["macos_native_shell_observed"] = isinstance(
+            native_jobs.get("macos"), dict
+        )
+        checks["windows_native_shell_observed"] = isinstance(
+            native_jobs.get("windows"), dict
+        )
         companion_status, runtime_status = management.request("GET", "/api/v1/status")
         if companion_status == 200:
             companion_error_count = int(runtime_status.get("device_link_auth_errors", 0)) + int(runtime_status.get("device_link_protocol_errors", 0))
@@ -1598,11 +1693,12 @@ def main() -> int:
         except Exception as error:
             checks["credentials_absent_from_evidence"] = False
             print(f"M1 evidence scan failed: {error}", file=sys.stderr)
-        try:
-            data_root.cleanup()
-        except Exception as error:
-            checks["cleanup_restored"] = False
-            print(f"M1 temporary-data cleanup failed: {error}", file=sys.stderr)
+        if data_root is not None:
+            try:
+                data_root.cleanup()
+            except Exception as error:
+                checks["cleanup_restored"] = False
+                print(f"M1 temporary-data cleanup failed: {error}", file=sys.stderr)
         try:
             summary = build_summary(
                 firmware_commit=observed_firmware_commit,
@@ -1616,6 +1712,7 @@ def main() -> int:
                 serial_log=serial_path,
                 source_dirty=dirty,
                 toolchain_environment=toolchain_environment,
+                native_run_evidence=native_run_evidence,
             )
         except Exception as error:
             print(f"M1 summary assembly failed: {error}", file=sys.stderr)

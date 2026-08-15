@@ -277,6 +277,20 @@ def test_serial_evidence_keeps_redacted_link_state_and_drops_setup_secret() -> N
 
 def test_summary_passes_only_with_every_real_gate_and_hashes_redacted_log() -> None:
     checks = {name: True for name in m1.REQUIRED_CHECKS}
+    native_run = {
+        "repository": m1.NATIVE_RUN_REPOSITORY,
+        "workflow": m1.NATIVE_RUN_WORKFLOW,
+        "workflow_id": 321,
+        "workflow_path": m1.NATIVE_RUN_WORKFLOW_PATH,
+        "run_id": 123,
+        "run_url": "https://github.com/Vectorking-50kg/s3-rlcd-deck/actions/runs/123",
+        "event": "pull_request",
+        "head_sha": "a" * 40,
+        "jobs": {
+            "macos": {"job_id": 456},
+            "windows": {"job_id": 789},
+        },
+    }
     with tempfile.TemporaryDirectory() as directory:
         log = pathlib.Path(directory) / "serial.jsonl"
         log.write_text('{"line":"safe"}\n', encoding="utf-8")
@@ -291,9 +305,11 @@ def test_summary_passes_only_with_every_real_gate_and_hashes_redacted_log() -> N
             companion_error_count=3,
             serial_log=log,
             source_dirty=False,
+            native_run_evidence=native_run,
         )
     assert summary["status"] == "passed"
     assert summary["raw_log_sha256"] == hashlib.sha256(b'{"line":"safe"}\n').hexdigest()
+    assert summary["native_run"] == native_run
     assert "token" not in json.dumps(summary).lower()
 
     checks["wrong_certificate_rejected"] = False
@@ -415,23 +431,112 @@ def test_serial_module_falls_back_to_the_pinned_idf_environment() -> None:
 
 def test_native_run_requires_same_commit_and_both_real_platform_jobs() -> None:
     full = "c" * 40
+    url = (
+        "https://github.com/Vectorking-50kg/s3-rlcd-deck/actions/runs/123"
+    )
+    macos_steps = [
+        {"name": name, "conclusion": "success"}
+        for name in m1.NATIVE_RUN_REQUIRED_STEPS["macos"]
+    ]
+    windows_steps = [
+        {"name": name, "conclusion": "success"}
+        for name in m1.NATIVE_RUN_REQUIRED_STEPS["windows"]
+    ]
+    workflow = {
+        "id": 321,
+        "name": m1.NATIVE_RUN_WORKFLOW,
+        "path": m1.NATIVE_RUN_WORKFLOW_PATH,
+        "state": "active",
+    }
     document = {
+        "databaseId": 123,
+        "workflowDatabaseId": 321,
+        "workflowName": m1.NATIVE_RUN_WORKFLOW,
+        "url": url,
+        "event": "pull_request",
         "headSha": full,
         "conclusion": "success",
         "jobs": [
-            {"name": "macOS native (arm64)", "conclusion": "success"},
-            {"name": "Windows native (amd64)", "conclusion": "success"},
+            {
+                "name": "macOS native (arm64)",
+                "databaseId": 456,
+                "url": url + "/job/456",
+                "conclusion": "success",
+                "steps": macos_steps,
+            },
+            {
+                "name": "Windows native (amd64)",
+                "databaseId": 789,
+                "url": url + "/job/789",
+                "conclusion": "success",
+                "steps": windows_steps,
+            },
         ],
     }
-    with mock.patch.object(m1, "command_output", return_value=json.dumps(document)):
-        assert m1.verified_native_run(
-            "https://github.com/owner/repo/actions/runs/123", full
-        ) == (True, True)
+    with mock.patch.object(
+        m1,
+        "command_output",
+        side_effect=[json.dumps(workflow), json.dumps(document)],
+    ):
+        evidence = m1.verified_native_run(url, full)
+        assert evidence is not None
+        assert evidence["workflow_id"] == 321
+        assert evidence["workflow_path"] == m1.NATIVE_RUN_WORKFLOW_PATH
+        assert evidence["workflow"] == m1.NATIVE_RUN_WORKFLOW
+        assert evidence["jobs"]["macos"]["job_id"] == 456
+        assert evidence["jobs"]["windows"]["job_id"] == 789
     document["jobs"].pop()
-    with mock.patch.object(m1, "command_output", return_value=json.dumps(document)):
-        assert m1.verified_native_run(
-            "https://github.com/owner/repo/actions/runs/123", full
-        ) == (True, False)
+    with mock.patch.object(
+        m1,
+        "command_output",
+        side_effect=[json.dumps(workflow), json.dumps(document)],
+    ):
+        evidence = m1.verified_native_run(url, full)
+        assert evidence is not None
+        assert evidence["jobs"]["macos"] is not None
+        assert evidence["jobs"]["windows"] is None
+    document["workflowName"] = "Untrusted lookalike workflow"
+    with mock.patch.object(
+        m1,
+        "command_output",
+        side_effect=[json.dumps(workflow), json.dumps(document)],
+    ):
+        assert m1.verified_native_run(url, full) is None
+    document["workflowName"] = m1.NATIVE_RUN_WORKFLOW
+    workflow["path"] = ".github/workflows/lookalike.yml"
+    with mock.patch.object(
+        m1,
+        "command_output",
+        side_effect=[json.dumps(workflow), json.dumps(document)],
+    ):
+        assert m1.verified_native_run(url, full) is None
+    assert m1.verified_native_run(
+        "https://github.com/other/repo/actions/runs/123", full
+    ) is None
+
+
+def test_failure_after_result_directory_creation_still_writes_summary() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        result = pathlib.Path(directory) / "result"
+        arguments = m1.argparse.Namespace(
+            port="/dev/null",
+            result_dir=result,
+            setup_client_command_file=pathlib.Path("unused.json"),
+            hub_address="192.168.1.10:7780",
+            native_run_url=(
+                "https://github.com/Vectorking-50kg/s3-rlcd-deck/actions/runs/123"
+            ),
+            stage_timeout=75.0,
+        )
+        with mock.patch.object(
+            m1, "parse_arguments", return_value=arguments
+        ), mock.patch.object(
+            m1, "source_tree_clean", side_effect=OSError("git unavailable")
+        ):
+            assert m1.main() == 1
+        summary = json.loads((result / "summary.json").read_text(encoding="utf-8"))
+        assert summary["status"] == "failed"
+        assert "source_dirty" in summary["failures"]
 
 
 def test_companion_logs_are_drained_redacted_and_secret_observation_fails_gate() -> None:
@@ -804,6 +909,7 @@ if __name__ == "__main__":
     test_summary_toolchain_identity_uses_the_pinned_environment()
     test_serial_module_falls_back_to_the_pinned_idf_environment()
     test_native_run_requires_same_commit_and_both_real_platform_jobs()
+    test_failure_after_result_directory_creation_still_writes_summary()
     test_companion_logs_are_drained_redacted_and_secret_observation_fails_gate()
     test_post_flash_monitor_requests_a_fresh_boot_after_ready_handshake()
     test_boot_gate_accepts_only_the_expected_software_reset()

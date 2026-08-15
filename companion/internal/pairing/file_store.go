@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"sync"
 	"time"
 
@@ -190,12 +189,7 @@ func (store *FileStore) ListTrusts(ctx context.Context) ([]StoredTrust, error) {
 	if store.lock == nil {
 		return nil, errors.New("pairing store is closed")
 	}
-	trusts := make([]StoredTrust, 0, len(store.state.Trusts))
-	for _, trust := range store.state.Trusts {
-		trusts = append(trusts, trust)
-	}
-	sort.Slice(trusts, func(left, right int) bool { return trusts[left].DeviceID < trusts[right].DeviceID })
-	return trusts, nil
+	return sortedTrusts(store.state.Trusts), nil
 }
 
 func (store *FileStore) RevokeTrust(ctx context.Context, deviceID string, now time.Time) error {

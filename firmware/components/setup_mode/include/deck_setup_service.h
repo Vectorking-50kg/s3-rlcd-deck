@@ -50,10 +50,6 @@ bool deck_setup_service_submit_temperature_offset(
     int16_t temperature_offset_tenths_c
 );
 
-bool deck_setup_service_pair_companion(
-    deck_setup_service_t *service,
-    const deck_companion_pair_request_t *request
-);
 bool deck_setup_service_select_companion(
     deck_setup_service_t *service,
     const char *profile_id

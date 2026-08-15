@@ -2000,66 +2000,6 @@ bool deck_setup_service_submit_temperature_offset(
     return enqueue_command(service, command);
 }
 
-bool deck_setup_service_pair_companion(
-    deck_setup_service_t *service,
-    const deck_companion_pair_request_t *request
-)
-{
-    if (service == nullptr || request == nullptr ||
-        strnlen(request->hub_address, sizeof(request->hub_address)) >=
-            sizeof(request->hub_address) ||
-        strnlen(request->code, sizeof(request->code)) >= sizeof(request->code) ||
-        !service->accepting_commands.load(std::memory_order_acquire)) {
-        return false;
-    }
-    deck_setup_snapshot_t setup{};
-    if (xSemaphoreTake(service->state_mutex, portMAX_DELAY) != pdTRUE) {
-        return false;
-    }
-    const bool setup_active = snapshot_locked(service, &setup) && setup.active;
-    xSemaphoreGive(service->state_mutex);
-    if (!setup_active) {
-        return false;
-    }
-    Command command{};
-    command.type = CommandType::pair_companion;
-    command.companion_pair = *request;
-    uint8_t response_ack[DECK_SETUP_RESPONSE_ACK_SIZE];
-    fill_random(nullptr, response_ack, sizeof(response_ack));
-    command.response_generation = deck_setup_response_barrier_issue(
-        service->pair_response_barrier,
-        0,
-        response_ack
-    );
-    if (command.response_generation == 0) {
-        secure_clear(
-            reinterpret_cast<char *>(&command.companion_pair),
-            sizeof(command.companion_pair)
-        );
-        secure_clear(reinterpret_cast<char *>(response_ack), sizeof(response_ack));
-        return false;
-    }
-    const bool queued = enqueue_command(service, command);
-    if (queued) {
-        (void)deck_setup_response_barrier_acknowledge(
-            service->pair_response_barrier,
-            0,
-            response_ack
-        );
-    } else {
-        deck_setup_response_barrier_release(
-            service->pair_response_barrier,
-            command.response_generation
-        );
-    }
-    secure_clear(
-        reinterpret_cast<char *>(&command.companion_pair),
-        sizeof(command.companion_pair)
-    );
-    secure_clear(reinterpret_cast<char *>(response_ack), sizeof(response_ack));
-    return queued;
-}
-
 namespace {
 
 bool queue_companion_profile_command(

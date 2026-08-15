@@ -13,6 +13,7 @@ import (
 	"io"
 	"math/big"
 	"regexp"
+	"sort"
 	"time"
 
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/protocol"
@@ -57,6 +58,17 @@ type Store interface {
 	LookupTrust(context.Context, string) (StoredTrust, error)
 	ListTrusts(context.Context) ([]StoredTrust, error)
 	RevokeTrust(context.Context, string, time.Time) error
+}
+
+func sortedTrusts(source map[string]StoredTrust) []StoredTrust {
+	trusts := make([]StoredTrust, 0, len(source))
+	for _, trust := range source {
+		trusts = append(trusts, trust)
+	}
+	sort.Slice(trusts, func(left, right int) bool {
+		return trusts[left].DeviceID < trusts[right].DeviceID
+	})
+	return trusts
 }
 
 type Auditor interface {

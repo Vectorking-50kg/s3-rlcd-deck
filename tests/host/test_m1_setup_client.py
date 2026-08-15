@@ -299,8 +299,6 @@ def test_remote_cleanup_replays_the_nonsecret_journal_and_verifies_state() -> No
         helper.write_state(
             identifier,
             {
-                "wifi_interface": "wlan0",
-                "connection_name": "s3deck-m1-" + identifier[:12],
                 "connection_uuid": temporary_uuid,
                 "original_uuid": original_uuid,
             },
@@ -308,7 +306,7 @@ def test_remote_cleanup_replays_the_nonsecret_journal_and_verifies_state() -> No
         with mock.patch.object(
             helper,
             "active_connection_uuid",
-            side_effect=[temporary_uuid, "", original_uuid],
+            side_effect=[temporary_uuid, "", original_uuid, original_uuid],
         ), mock.patch.object(
             helper,
             "saved_connections",
@@ -330,6 +328,38 @@ def test_remote_cleanup_replays_the_nonsecret_journal_and_verifies_state() -> No
         "down" in command and temporary_uuid in command for command in calls
     )
     assert any("up" in command and original_uuid in command for command in calls)
+
+
+def test_primary_cleanup_retains_uuid_journal_for_fresh_verification() -> None:
+    identifier = "5" * 32
+    original_uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+        helper.tempfile, "gettempdir", return_value=directory
+    ):
+        session = helper.NetworkManagerSession(
+            "wlan0",
+            "eth0",
+            {
+                "ssid": "S3Deck-1234",
+                "password": "SETUP-PASSWORD",
+                "address": "192.168.4.1",
+            },
+            "192.168.31.45",
+            identifier,
+            helper.OperationBudget(75),
+        )
+        session.original_uuid = original_uuid
+        session._write_state()
+        with mock.patch.object(
+            helper, "saved_connections", return_value={}
+        ), mock.patch.object(
+            helper, "active_connection_uuid", return_value=original_uuid
+        ):
+            session._cleanup()
+        assert helper.read_state(identifier) == {
+            "connection_uuid": "",
+            "original_uuid": original_uuid,
+        }
 
 
 def test_pair_transaction_reads_the_real_page_and_acknowledges_202() -> None:
@@ -469,6 +499,7 @@ if __name__ == "__main__":
     test_networkmanager_requires_independent_deletion_proof()
     test_partial_network_open_always_runs_compensating_cleanup()
     test_remote_cleanup_replays_the_nonsecret_journal_and_verifies_state()
+    test_primary_cleanup_retains_uuid_journal_for_fresh_verification()
     test_pair_transaction_reads_the_real_page_and_acknowledges_202()
     test_snapshot_transaction_reads_the_real_page_and_profiles()
     test_restore_transaction_removes_only_temporary_profiles()

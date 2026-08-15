@@ -55,9 +55,10 @@ committed record unchanged and keep recovery available. Stored network passwords
 included in diagnostic events, screen errors, or HIL reports.
 
 Handled page, status, scan, and submission requests refresh the inactivity timer.
-Development builds use 12 seconds for automated HIL; release builds use the required 600
-seconds. Wi-Fi validation independently allows 20 seconds for association and DHCP in both
-variants, and an in-flight validation keeps Setup active until it reaches a result. When
+Development builds use 120 seconds for recovery-page and automated HIL transactions; release
+builds use the required 600 seconds. Wi-Fi validation independently allows 20 seconds for
+association and DHCP in both variants, and an in-flight validation keeps Setup active until it
+reaches a result. When
 Setup closes after a failed candidate, the service restores and reconnects the last
 committed station configuration.
 
