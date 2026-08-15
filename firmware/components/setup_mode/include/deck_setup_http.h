@@ -15,6 +15,7 @@ extern "C" {
 #endif
 
 #define DECK_SETUP_SCAN_SSID_CAPACITY 33
+#define DECK_SETUP_PAIR_ACK_SIZE 16
 
 typedef enum {
     DECK_SETUP_HTTP_NOT_FOUND = 0,
@@ -27,6 +28,7 @@ typedef enum {
     DECK_SETUP_HTTP_WIFI_CLEAR_REQUEST,
     DECK_SETUP_HTTP_WIFI_CLEAR_CONFIRM,
     DECK_SETUP_HTTP_COMPANION_PAIR,
+    DECK_SETUP_HTTP_COMPANION_PAIR_ACK,
     DECK_SETUP_HTTP_COMPANION_SELECT,
     DECK_SETUP_HTTP_COMPANION_PRIORITY,
     DECK_SETUP_HTTP_COMPANION_REVOKE,
@@ -80,6 +82,15 @@ typedef enum {
 
 const deck_setup_http_route_spec_t *deck_setup_http_routes(size_t *route_count);
 deck_setup_http_route_t deck_setup_http_route(const char *method, const char *path);
+bool deck_setup_http_address_is_setup_gateway(
+    const uint8_t *local_address,
+    size_t local_address_size
+);
+bool deck_setup_http_extract_ipv4(
+    const uint8_t *address,
+    size_t address_size,
+    uint8_t ipv4[4]
+);
 bool deck_setup_http_convert_scan_results(
     const deck_setup_scan_observation_t *observations,
     size_t observation_count,
@@ -108,6 +119,11 @@ deck_setup_companion_request_result_t deck_setup_http_parse_companion_pair_reque
     const char *body,
     size_t body_size,
     deck_companion_pair_request_t *request
+);
+bool deck_setup_http_parse_pair_ack_request(
+    const char *body,
+    size_t body_size,
+    uint8_t response_ack[DECK_SETUP_PAIR_ACK_SIZE]
 );
 bool deck_setup_http_parse_companion_profile_request(
     const char *body,

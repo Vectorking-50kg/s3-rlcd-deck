@@ -55,9 +55,10 @@ committed record unchanged and keep recovery available. Stored network passwords
 included in diagnostic events, screen errors, or HIL reports.
 
 Handled page, status, scan, and submission requests refresh the inactivity timer.
-Development builds use 12 seconds for automated HIL; release builds use the required 600
-seconds. Wi-Fi validation independently allows 20 seconds for association and DHCP in both
-variants, and an in-flight validation keeps Setup active until it reaches a result. When
+Development builds use 120 seconds for recovery-page and automated HIL transactions; release
+builds use the required 600 seconds. Wi-Fi validation independently allows 20 seconds for
+association and DHCP in both variants, and an in-flight validation keeps Setup active until it
+reaches a result. When
 Setup closes after a failed candidate, the service restores and reconnects the last
 committed station configuration.
 
@@ -312,7 +313,10 @@ Profile set and Wi-Fi configuration unchanged.
 
 The one-time certificate-discovery request is allowed only while the computer is connected
 to the Deck's fresh random WPA2 Setup AP. The Deck validates the returned certificate hash
-before committing it and closes Setup after successful Pairing. Normal operation never
+before committing it. A successful Pair response carries a random 128-bit, single-use ACK
+capability. Setup closes only after the same Setup client has received the 202 response and
+returned that capability; a missing, stale, replayed, or different-client ACK keeps the
+recovery surface active and reports `pair_response`. Normal operation never
 uses discovery trust: the `companion_link` module initiates WSS with the exact stored
 certificate, device identity, and per-Deck Token. It sends `device.hello` first, accepts
 only strict version-1 heartbeat frames up to 16 KiB, marks the Companion offline after 30
@@ -331,6 +335,12 @@ the replacement transport starts. The ESP-IDF
 `tcp_transport` component is compiled without log calls because its
 stock handshake error path prints custom headers; Deck-owned diagnostics remain redacted.
 All credentials remain private to the Profile and Device Link modules.
+
+Development builds expose only redacted M1 diagnostics: build identity, Setup access through
+the explicit HIL command, and Companion state/error counters. The acceptance controller keeps
+the Mac on its normal LAN and delegates the real recovery-page transaction to a separately
+wired, NetworkManager-managed Linux helper. Setup credentials are sent over SSH standard input,
+replaced by a fixed marker in evidence, and never compiled into release firmware.
 
 Release firmware also advertises the `diagnostics` capability. The `health` component owns one
 volatile 64-event `Deck Diagnostic Ring`; callers can record only fixed level/component/code enums,

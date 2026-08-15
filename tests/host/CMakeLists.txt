@@ -304,6 +304,13 @@ deck_add_host_test(
         ../../firmware/components/transaction_store/include
         ../../firmware/components/wifi_config/include
 )
+deck_add_host_test(
+    test_setup_response_barrier
+    SOURCES
+        test_setup_response_barrier.cpp
+        ../../firmware/components/setup_mode/deck_setup_response_barrier.cpp
+    INCLUDE_DIRS ../../firmware/components/setup_mode/include
+)
 
 add_test(
     NAME hil_boot_smoke_replay
@@ -332,6 +339,14 @@ add_test(
 add_test(
     NAME hil_app_flash_contract
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_hil_app_flash.py
+)
+add_test(
+    NAME m1_acceptance_contract
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_m1_acceptance.py
+)
+add_test(
+    NAME m1_setup_client_contract
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_m1_setup_client.py
 )
 add_test(
     NAME companion_native_smoke_contract

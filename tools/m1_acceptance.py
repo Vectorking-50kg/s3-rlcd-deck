@@ -1,0 +1,1739 @@
+#!/usr/bin/env python3
+"""Run the real M1 Pairing and Device Link acceptance transaction."""
+
+from __future__ import annotations
+
+import argparse
+import datetime
+import hashlib
+import http.cookiejar
+import importlib
+import json
+import os
+import pathlib
+import platform
+import re
+import signal
+import ssl
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.error
+import urllib.request
+
+try:
+    import termios
+except ImportError:  # pragma: no cover - M1 hardware execution is macOS-only.
+    termios = None
+from typing import Any, Callable
+
+
+REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[1]
+HIL_READY = b"DECK_HIL_READY\n"
+REDACTED_SETUP_ACCESS = "[REDACTED HIL SETUP ACCESS]"
+REDACTED_NON_DIAGNOSTIC = "[REDACTED NON-DIAGNOSTIC LINE]"
+REDACTED_INVALID_DIAGNOSTIC = "[REDACTED INVALID DIAGNOSTIC LINE]"
+FATAL_MARKERS = ("task_wdt:", "guru meditation error", "panic'ed", "assert failed")
+LINK_SCHEMA = {
+    "type": str,
+    "state": str,
+    "has_active_profile": bool,
+    "profile_generation": int,
+    "reconnect_attempts": int,
+    "error_count": int,
+    "last_error": str,
+    "error_generation": int,
+    "last_heartbeat_monotonic_ms": int,
+}
+SETUP_ACCESS_SCHEMA = {"type": str, "ssid": str, "password": str, "address": str}
+BUILD_IDENTITY_SCHEMA = {"type": str, "firmware_commit": str}
+REQUIRED_CHECKS = (
+    "builds_clean",
+    "recovery_pairing",
+    "credentials_absent_from_evidence",
+    "deck_reboot_reconnected",
+    "companion_offline_recovered",
+    "wrong_certificate_rejected",
+    "revoked_device_trust_rejected",
+    "protocol_major_rejected",
+    "management_device_authority_separated",
+    "macos_native_shell_observed",
+    "windows_native_shell_observed",
+    "cleanup_restored",
+)
+NATIVE_RUN_REPOSITORY = "Vectorking-50kg/s3-rlcd-deck"
+NATIVE_RUN_WORKFLOW = "Companion desktop native smoke"
+NATIVE_RUN_WORKFLOW_PATH = ".github/workflows/companion-desktop.yml"
+NATIVE_RUN_REQUIRED_STEPS = {
+    "macos": {
+        "Verify checkout identity",
+        "Verify and build Companion",
+        "Verify native Keychain secret store",
+        "Run native menu-bar smoke",
+    },
+    "windows": {
+        "Verify checkout identity",
+        "Verify Companion",
+        "Build native tray executable",
+        "Verify native Credential Manager secret store",
+        "Run native tray smoke",
+    },
+}
+
+
+class AcceptanceFailure(RuntimeError):
+    pass
+
+
+class AcceptanceTimeout(AcceptanceFailure):
+    pass
+
+
+class SerialDisconnected(AcceptanceFailure):
+    pass
+
+
+def accept_boot_event(event: dict[str, Any], stage: str) -> bool:
+    if event.get("type") != "boot_ok":
+        return False
+    reason = str(event.get("reset_reason", "unknown"))
+    # Every M1 boot is initiated through esp_restart(), including the first
+    # boot after OpenOCD's app-only flash. Anything else is an unexplained
+    # reset and cannot serve as acceptance evidence.
+    if reason != "software":
+        raise AcceptanceFailure(f"{stage}: unexpected reset reason {reason} observed")
+    return True
+
+
+class SensitiveValueTracker:
+    _bare_secret = re.compile(
+        r"(?i)(?:authorization\s*:\s*bearer|"
+        r"\b(?:device[ _-]?)?token\b\s*[:=]|"
+        r"\b(?:certificate[ _-]?)?fingerprint\b\s*[:=]|"
+        r"\b(?:pairing[ _-]?)?code\b\s*[:=]\s*[0-9]{6}|"
+        r"sha256:[0-9a-f]{64}|"
+        r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-]))"
+    )
+
+    def __init__(self, *values: str) -> None:
+        self._lock = threading.Lock()
+        self._values: set[str] = set()
+        self._recent_output: list[str] = []
+        self._observed = False
+        for value in values:
+            self.add(value)
+
+    def add(self, value: str) -> None:
+        if len(value) >= 4:
+            with self._lock:
+                self._values.add(value)
+                self._observed = self._observed or any(
+                    value in text for text in self._recent_output
+                )
+
+    def observe(self, text: str) -> bool:
+        with self._lock:
+            self._recent_output.append(text[-4096:])
+            if len(self._recent_output) > 256:
+                del self._recent_output[0]
+            leaked = self._bare_secret.search(text) is not None or any(
+                value in text for value in self._values
+            )
+            self._observed = self._observed or leaked
+            return leaked
+
+    def clean(self) -> bool:
+        with self._lock:
+            return not self._observed
+
+    def values(self) -> tuple[str, ...]:
+        with self._lock:
+            return tuple(self._values)
+
+
+def load_setup_client_command(path: pathlib.Path) -> list[str]:
+    try:
+        if not path.is_file() or path.stat().st_size > 4096:
+            raise AcceptanceFailure("Setup client command file is invalid")
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise AcceptanceFailure("Setup client command file is invalid") from error
+    if (
+        not isinstance(document, list)
+        or not 1 <= len(document) <= 32
+        or any(
+            not isinstance(argument, str)
+            or not argument
+            or len(argument) > 512
+            or re.search(r"[\x00-\x1f\x7f]", argument) is not None
+            for argument in document
+        )
+    ):
+        raise AcceptanceFailure("Setup client command file is invalid")
+    return document
+
+
+def companion_profiles_valid(document: Any) -> bool:
+    if not isinstance(document, dict) or set(document) != {
+        "profile_ids",
+        "active_profile_id",
+    }:
+        return False
+    profile_ids = document.get("profile_ids")
+    active_profile_id = document.get("active_profile_id")
+    return (
+        isinstance(profile_ids, list)
+        and len(profile_ids) <= 5
+        and all(
+            isinstance(profile_id, str)
+            and re.fullmatch(r"sha256:[0-9a-f]{64}", profile_id) is not None
+            for profile_id in profile_ids
+        )
+        and len(set(profile_ids)) == len(profile_ids)
+        and isinstance(active_profile_id, str)
+        and (not active_profile_id or active_profile_id in profile_ids)
+    )
+
+
+class SetupClientAdapter:
+    """Run the real recovery-page transaction on a dual-homed helper host."""
+
+    def __init__(
+        self,
+        command: list[str],
+        secrets: SensitiveValueTracker,
+        expected_helper_sha256: str,
+    ) -> None:
+        self._command = list(command)
+        self._secrets = secrets
+        if re.fullmatch(r"[0-9a-f]{64}", expected_helper_sha256) is None:
+            raise AcceptanceFailure("Setup client identity is invalid")
+        self._expected_helper_sha256 = expected_helper_sha256
+        self._pending_transactions: set[str] = set()
+
+    def _invoke(
+        self,
+        action: str,
+        document: dict[str, Any],
+        timeout: float,
+        sensitive_values: tuple[str, ...] = (),
+    ) -> dict[str, Any]:
+        request = {
+            "protocol_version": 1,
+            "action": action,
+            "expected_helper_sha256": self._expected_helper_sha256,
+            **document,
+        }
+        try:
+            completed = subprocess.run(
+                self._command,
+                input=json.dumps(request, separators=(",", ":")) + "\n",
+                capture_output=True,
+                text=True,
+                timeout=timeout + 5,
+                start_new_session=True,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise AcceptanceFailure(
+                f"Setup client {action} transaction failed"
+            ) from error
+        combined = completed.stdout + completed.stderr
+        leaked = any(value and value in combined for value in sensitive_values)
+        if leaked:
+            self._secrets.observe(combined)
+        if completed.returncode != 0 or completed.stderr or leaked:
+            raise AcceptanceFailure(f"Setup client {action} transaction failed")
+        if len(completed.stdout.encode("utf-8")) > 8192:
+            raise AcceptanceFailure(f"Setup client {action} response is invalid")
+        try:
+            response = json.loads(completed.stdout)
+        except (UnicodeError, json.JSONDecodeError) as error:
+            raise AcceptanceFailure(
+                f"Setup client {action} response is invalid"
+            ) from error
+        if (
+            not isinstance(response, dict)
+            or response.get("protocol_version") != 1
+            or response.get("action") != action
+            or response.get("ok") is not True
+        ):
+            raise AcceptanceFailure(f"Setup client {action} response is invalid")
+        return response
+
+    def _cleanup_transaction(self, identifier: str, timeout: float) -> None:
+        response = self._invoke(
+            "cleanup",
+            {
+                "transaction_id": identifier,
+                "transaction_timeout_seconds": max(35.0, timeout),
+            },
+            max(35.0, timeout),
+        )
+        if set(response) != {
+            "protocol_version",
+            "action",
+            "ok",
+            "network_restored",
+        } or response.get("network_restored") is not True:
+            raise AcceptanceFailure("Setup client cleanup response is invalid")
+        self._pending_transactions.discard(identifier)
+
+    def _request(
+        self,
+        action: str,
+        document: dict[str, Any],
+        timeout: float,
+        sensitive_values: tuple[str, ...] = (),
+    ) -> dict[str, Any]:
+        transaction_timeout = max(35.0 if action == "probe" else 60.0, timeout)
+        identifier = os.urandom(16).hex()
+        self._pending_transactions.add(identifier)
+        primary_result: dict[str, Any] | None = None
+        primary_error: BaseException | None = None
+        try:
+            primary_result = self._invoke(
+                action,
+                {
+                    **document,
+                    "transaction_id": identifier,
+                    "transaction_timeout_seconds": transaction_timeout,
+                },
+                transaction_timeout,
+                sensitive_values,
+            )
+        except BaseException as error:
+            primary_error = error
+        try:
+            self._cleanup_transaction(identifier, 45.0)
+        except BaseException as cleanup_error:
+            raise AcceptanceFailure(
+                f"Setup client {action} network cleanup could not be verified"
+            ) from cleanup_error
+        if primary_error is not None:
+            raise primary_error
+        assert primary_result is not None
+        return primary_result
+
+    def cleanup_pending(self, timeout: float = 45.0) -> None:
+        failures = False
+        for identifier in tuple(self._pending_transactions):
+            try:
+                self._cleanup_transaction(identifier, timeout)
+            except BaseException:
+                failures = True
+        if failures or self._pending_transactions:
+            raise AcceptanceFailure("Setup client network cleanup could not be verified")
+
+    def probe(self, timeout: float) -> None:
+        response = self._request(
+            "probe",
+            {},
+            timeout,
+        )
+        if set(response) != {
+            "protocol_version",
+            "action",
+            "ok",
+            "helper_sha256",
+            "control_path",
+        } or response.get("helper_sha256") != self._expected_helper_sha256 or response.get(
+            "control_path"
+        ) != "wired":
+            raise AcceptanceFailure("Setup client probe response is invalid")
+
+    def pair(
+        self,
+        access: dict[str, Any],
+        hub_address: str,
+        pairing_code: str,
+        timeout: float,
+    ) -> dict[str, Any]:
+        response = self._request(
+            "pair",
+            {
+                "access": access,
+                "hub_address": hub_address,
+                "pairing_code": pairing_code,
+            },
+            timeout,
+            (str(access.get("password", "")), pairing_code),
+        )
+        if set(response) != {
+            "protocol_version",
+            "action",
+            "ok",
+            "recovery_page",
+            "response_acknowledged",
+        } or response.get("recovery_page") is not True or response.get(
+            "response_acknowledged"
+        ) is not True:
+            raise AcceptanceFailure("Setup client pair response is invalid")
+
+    def snapshot(
+        self,
+        access: dict[str, Any],
+        timeout: float,
+    ) -> dict[str, Any]:
+        response = self._request(
+            "snapshot",
+            {"access": access},
+            timeout,
+            (str(access.get("password", "")),),
+        )
+        if set(response) != {
+            "protocol_version",
+            "action",
+            "ok",
+            "recovery_page",
+            "profiles",
+        } or response.get("recovery_page") is not True or not companion_profiles_valid(
+            response.get("profiles")
+        ):
+            raise AcceptanceFailure("Setup client snapshot response is invalid")
+        return response["profiles"]
+
+    def restore(
+        self,
+        access: dict[str, Any],
+        original_profiles: dict[str, Any],
+        timeout: float,
+    ) -> None:
+        response = self._request(
+            "restore",
+            {"access": access, "original_profiles": original_profiles},
+            timeout,
+            (str(access.get("password", "")),),
+        )
+        if set(response) != {
+            "protocol_version",
+            "action",
+            "ok",
+            "profiles_restored",
+        } or response.get("profiles_restored") is not True:
+            raise AcceptanceFailure("Setup client restore response is invalid")
+
+
+class CleanupTransaction:
+    def __init__(self) -> None:
+        self.setup_pending = False
+        self.trust_may_need_restore = False
+        self.original_profiles: dict[str, Any] | None = None
+        self.profiles_may_need_restore = False
+
+    def begin_setup(self) -> None:
+        self.setup_pending = True
+
+    def observe_setup_closed(self) -> None:
+        self.setup_pending = False
+
+    def needs_compensation(self) -> bool:
+        return (
+            self.trust_may_need_restore
+            or self.profiles_may_need_restore
+            or self.setup_pending
+        )
+
+    def restored(self) -> bool:
+        return not self.needs_compensation()
+
+
+def utc_now() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def command_output(
+    arguments: list[str],
+    environment: dict[str, str] | None = None,
+) -> str:
+    result = subprocess.run(
+        arguments,
+        cwd=REPOSITORY_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    return result.stdout.strip()
+
+
+def toolchain_identity(
+    environment: dict[str, str] | None = None,
+) -> dict[str, str]:
+    identity: dict[str, str] = {}
+    for name, command in (("go", ["go", "version"]), ("esp_idf", ["idf.py", "--version"])):
+        try:
+            identity[name] = command_output(command, environment)
+        except (OSError, subprocess.SubprocessError):
+            identity[name] = "unavailable"
+    return identity
+
+
+def run_preflight(output: pathlib.Path) -> dict[str, str]:
+    commands = (
+        ["./tools/test_host.sh"],
+        ["./tools/test_companion.sh"],
+        ["./tools/idf.sh", "dev", "build"],
+        ["./tools/idf.sh", "release", "build"],
+    )
+    with output.open("w", encoding="utf-8") as log:
+        environment = dict(os.environ)
+        idf_root = environment.get("IDF_PATH")
+        if not idf_root:
+            default_idf = pathlib.Path.home() / ".espressif/v6.0.2/esp-idf"
+            if default_idf.is_dir():
+                export = subprocess.run(
+                    ["zsh", "-lc", f"source {default_idf}/export.sh >/dev/null 2>&1 && env -0"],
+                    check=True,
+                    capture_output=True,
+                ).stdout
+                environment.update(
+                    entry.decode().split("=", 1) for entry in export.split(b"\0") if b"=" in entry
+                )
+        for command in commands:
+            log.write("$ " + " ".join(command) + "\n")
+            log.flush()
+            result = subprocess.run(
+                command,
+                cwd=REPOSITORY_ROOT,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=environment,
+            )
+            if result.returncode != 0:
+                raise AcceptanceFailure(f"preflight command failed: {' '.join(command)}")
+    return environment
+
+
+def run_app_flash(port: str, output: pathlib.Path, environment: dict[str, str]) -> None:
+    python = pathlib.Path(environment.get("IDF_PYTHON_ENV_PATH", "")) / "bin" / "python"
+    if not python.is_file():
+        python = pathlib.Path(sys.executable)
+    command = [
+        str(python),
+        str(REPOSITORY_ROOT / "tools/hil_app_flash.py"),
+        "--port",
+        port,
+        "--build-dir",
+        str(REPOSITORY_ROOT / "build/dev"),
+    ]
+    with output.open("w", encoding="utf-8") as log:
+        log.write("$ tools/hil_app_flash.py --port [EXPLICIT DECK] --build-dir build/dev\n")
+        log.flush()
+        result = subprocess.run(
+            command,
+            cwd=REPOSITORY_ROOT,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=environment,
+        )
+    if result.returncode != 0:
+        raise AcceptanceFailure("safe app-only Deck flashing failed")
+
+
+def load_serial_module(environment: dict[str, str]) -> Any:
+    def valid(module: Any) -> bool:
+        serial_factory = getattr(module, "Serial", None)
+        serial_exception = getattr(module, "SerialException", None)
+        return callable(serial_factory) and isinstance(serial_exception, type) and issubclass(
+            serial_exception, Exception
+        )
+
+    try:
+        ambient = importlib.import_module("serial")
+    except ModuleNotFoundError:
+        ambient = None
+    if valid(ambient):
+        return ambient
+    python = pathlib.Path(environment.get("IDF_PYTHON_ENV_PATH", "")) / "bin/python"
+    if not python.is_file():
+        raise AcceptanceFailure("pyserial is unavailable in the pinned toolchain")
+    try:
+        site_packages = command_output(
+            [
+                str(python),
+                "-c",
+                "import site; print(site.getsitepackages()[0])",
+            ],
+            environment,
+        )
+        sys.path.insert(0, site_packages)
+        sys.modules.pop("serial", None)
+        pinned = importlib.import_module("serial")
+        if valid(pinned):
+            return pinned
+    except (ModuleNotFoundError, OSError, subprocess.SubprocessError):
+        pass
+    raise AcceptanceFailure("pyserial is unavailable in the pinned toolchain")
+
+
+def text_is_redacted(text: str, sensitive_values: tuple[str, ...] = ()) -> bool:
+    lowered = text.lower()
+    if any(value and value in text for value in sensitive_values) or \
+       SensitiveValueTracker._bare_secret.search(text) is not None:
+        return False
+    return not any(
+        forbidden in lowered
+        for forbidden in (
+            '"password"',
+            '"token"',
+            '"certificate',
+            '"fingerprint"',
+            '"code"',
+            "authorization:",
+        )
+    )
+
+
+def evidence_is_redacted(
+    path: pathlib.Path,
+    sensitive_values: tuple[str, ...] = (),
+) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        return text_is_redacted(path.read_text(encoding="utf-8"), sensitive_values)
+    except (OSError, UnicodeError):
+        return False
+
+
+def evidence_directory_is_redacted(
+    directory: pathlib.Path,
+    sensitive_values: tuple[str, ...] = (),
+) -> bool:
+    evidence = [path for path in directory.rglob("*") if path.is_file() and path.name != "summary.json"]
+    return bool(evidence) and all(
+        evidence_is_redacted(path, sensitive_values) for path in evidence
+    )
+
+
+def source_tree_clean() -> bool:
+    return command_output(
+        ["git", "status", "--porcelain", "--untracked-files=all"]
+    ) == ""
+
+
+def companion_for_current_host(commit: str) -> pathlib.Path:
+    if platform.system() != "Darwin":
+        raise AcceptanceFailure("real M1 Deck acceptance currently requires the macOS host")
+    architecture = command_output(["go", "env", "GOARCH"])
+    executable = REPOSITORY_ROOT / "build/companion" / f"darwin-{architecture}" / "s3deck-companion"
+    expected = f"s3deck-companion 0.1.0-dev (commit {commit})"
+    try:
+        observed = command_output([str(executable), "--version"])
+    except (OSError, subprocess.SubprocessError) as error:
+        raise AcceptanceFailure("current Companion artifact is unavailable") from error
+    if observed != expected:
+        raise AcceptanceFailure("Companion artifact does not match the clean source commit")
+    return executable
+
+
+def sanitize_serial_line(line: str) -> tuple[str, dict[str, Any] | None]:
+    if any(marker in line.lower() for marker in FATAL_MARKERS):
+        return "[REDACTED FATAL TARGET LINE]", None
+    candidate = line.strip()
+    if not candidate.startswith("{"):
+        return REDACTED_NON_DIAGNOSTIC, None
+    try:
+        event = json.loads(candidate)
+    except json.JSONDecodeError:
+        return REDACTED_INVALID_DIAGNOSTIC, None
+    if not isinstance(event, dict):
+        return REDACTED_INVALID_DIAGNOSTIC, None
+    event_type = event.get("type")
+    if event_type == "hil_setup_access" and set(event) == set(SETUP_ACCESS_SCHEMA) and all(
+        type(event[name]) is expected for name, expected in SETUP_ACCESS_SCHEMA.items()
+    ):
+        return REDACTED_SETUP_ACCESS, event
+    if event_type == "companion_link_state" and set(event) == set(LINK_SCHEMA) and all(
+        type(event[name]) is expected for name, expected in LINK_SCHEMA.items()
+    ):
+        return json.dumps(event, separators=(",", ":"), sort_keys=True), event
+    if event_type == "deck_build_identity" and set(event) == set(BUILD_IDENTITY_SCHEMA) and all(
+        type(event[name]) is expected for name, expected in BUILD_IDENTITY_SCHEMA.items()
+    ):
+        if re.fullmatch(r"[0-9a-f]{40}", event["firmware_commit"]) is not None:
+            return json.dumps(event, separators=(",", ":"), sort_keys=True), event
+    # Preserve only exact, known credential-free diagnostics used to prove boot.
+    if event_type == "boot_ok" and set(event) == {
+        "type", "firmware_version", "reset_reason", "uptime_ms", "minimum_free_heap_bytes"
+    }:
+        return json.dumps(event, separators=(",", ":"), sort_keys=True), event
+    return REDACTED_NON_DIAGNOSTIC, event
+
+
+def serial_line_may_contain_secret(line: str, sanitized: str) -> bool:
+    return sanitized != REDACTED_SETUP_ACCESS
+
+
+class SerialEvidence:
+    def __init__(
+        self,
+        serial_module: Any,
+        port: str,
+        output: pathlib.Path,
+        timeout: float,
+        secrets: SensitiveValueTracker,
+    ) -> None:
+        self._serial_exception = serial_module.SerialException
+        self._connection = self.open_connection(serial_module, port, timeout)
+        self._output = output.open("w", encoding="utf-8")
+        self._stage_timeout = timeout
+        self._secrets = secrets
+
+    @staticmethod
+    def open_connection(serial_module: Any, port: str, timeout: float) -> Any:
+        platform_serial_error = termios.error if termios is not None else OSError
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                return serial_module.Serial(
+                    port=port, baudrate=115200, timeout=0.25, write_timeout=0.25
+                )
+            except (OSError, platform_serial_error, serial_module.SerialException):
+                time.sleep(0.25)
+        raise AcceptanceFailure("Deck serial port did not enumerate after app flash")
+
+    def close(self) -> None:
+        self._connection.close()
+        self._output.close()
+
+    def reopen(self, serial_module: Any, port: str, timeout: float) -> None:
+        platform_serial_error = termios.error if termios is not None else OSError
+        try:
+            self._connection.close()
+        except (OSError, platform_serial_error, self._serial_exception):
+            pass
+        time.sleep(0.75)
+        self._connection = self.open_connection(serial_module, port, timeout)
+
+    def event_after_reenumeration(
+        self,
+        serial_module: Any,
+        port: str,
+        predicate: Callable[[dict[str, Any]], bool],
+        stage: str,
+        timeout: float,
+    ) -> dict[str, Any]:
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AcceptanceTimeout(f"{stage}: USB re-enumeration timed out")
+            self.reopen(serial_module, port, remaining)
+            try:
+                event_budget = deadline - time.monotonic()
+                if event_budget <= 0:
+                    raise AcceptanceTimeout(
+                        f"{stage}: USB re-enumeration timed out"
+                    )
+                return self.event(
+                    predicate,
+                    stage,
+                    min(3.0, event_budget),
+                )
+            except (SerialDisconnected, AcceptanceTimeout):
+                # macOS may briefly reopen the stale pre-reset CDC device
+                # before publishing the new endpoint. A stale endpoint can
+                # either detach or remain readable but silent, so retry both
+                # outcomes inside one deadline and never request another reset.
+                continue
+
+    def restart_and_wait(
+        self,
+        serial_module: Any,
+        port: str,
+        timeout: float,
+        stage: str,
+    ) -> dict[str, Any]:
+        self.command(b"DECK_RESTART\n")
+        self.event(
+            lambda event: event.get("type") == "restart_ack",
+            f"{stage}: restart acknowledgement",
+            min(3.0, timeout),
+        )
+        return self.event_after_reenumeration(
+            serial_module,
+            port,
+            lambda event: accept_boot_event(event, stage),
+            stage,
+            timeout,
+        )
+
+    def command(self, command: bytes) -> None:
+        try:
+            self._connection.write(command)
+        except (OSError, self._serial_exception) as error:
+            raise SerialDisconnected("Deck serial endpoint disconnected") from error
+
+    def fresh_boot(self, serial_module: Any, port: str, timeout: float) -> dict[str, Any]:
+        # The app-only flasher resets before this monitor can open. Establish the
+        # diagnostic host handshake and first try to catch that pending one-shot
+        # event. Only request a second reset when the original event was already
+        # emitted before the monitor opened.
+        try:
+            self.command(HIL_READY)
+        except SerialDisconnected:
+            return self.event_after_reenumeration(
+                serial_module,
+                port,
+                lambda event: accept_boot_event(event, "post-flash boot"),
+                "post-flash reenumerated boot",
+                timeout,
+            )
+        try:
+            return self.event(
+                lambda event: accept_boot_event(event, "post-flash boot"),
+                "post-flash pending boot",
+                2.0,
+            )
+        except SerialDisconnected:
+            # The diagnostic firmware deliberately performs a USB detach after
+            # an app-only JTAG flash so the host cannot retain OpenOCD's stale
+            # CDC endpoint. Reopen the newly enumerated endpoint and preserve
+            # this boot; another reset would discard the evidence we need.
+            return self.event_after_reenumeration(
+                serial_module,
+                port,
+                lambda event: accept_boot_event(event, "post-flash boot"),
+                "post-flash reenumerated boot",
+                timeout,
+            )
+        except AcceptanceTimeout:
+            return self.restart_and_wait(
+                serial_module,
+                port,
+                timeout,
+                "post-flash fresh boot",
+            )
+
+    def event(
+        self,
+        predicate: Callable[[dict[str, Any]], bool],
+        stage: str,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        deadline = time.monotonic() + (timeout or self._stage_timeout)
+        next_ready = 0.0
+        while time.monotonic() < deadline:
+            now = time.monotonic()
+            if now >= next_ready:
+                try:
+                    self._connection.write(HIL_READY)
+                except (OSError, self._serial_exception) as error:
+                    raise SerialDisconnected("Deck serial endpoint disconnected") from error
+                next_ready = now + 0.5
+            try:
+                raw = self._connection.readline()
+            except (OSError, self._serial_exception) as error:
+                raise SerialDisconnected("Deck serial endpoint disconnected") from error
+            if not raw:
+                continue
+            line = raw.decode("utf-8", errors="replace")
+            sanitized, event = sanitize_serial_line(line)
+            if serial_line_may_contain_secret(line, sanitized) and self._secrets.observe(line):
+                sanitized = "[REDACTED SECRET TARGET LINE]"
+            envelope = {"captured_at": utc_now(), "line": sanitized}
+            self._output.write(json.dumps(envelope, separators=(",", ":")) + "\n")
+            self._output.flush()
+            if sanitized == "[REDACTED FATAL TARGET LINE]":
+                raise AcceptanceFailure(f"{stage}: fatal Deck log observed")
+            if sanitized == "[REDACTED SECRET TARGET LINE]":
+                raise AcceptanceFailure(f"{stage}: credential appeared in Deck output")
+            if event is not None and predicate(event):
+                return event
+        raise AcceptanceTimeout(f"{stage}: timed out waiting for Deck state")
+
+
+def direct_opener(*handlers: Any) -> urllib.request.OpenerDirector:
+    """Create an opener that cannot inherit proxy settings for private endpoints."""
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), *handlers)
+
+
+def open_direct(
+    request: urllib.request.Request,
+    *,
+    timeout: float,
+    context: ssl.SSLContext | None = None,
+) -> Any:
+    handlers: tuple[Any, ...] = (
+        (urllib.request.HTTPSHandler(context=context),) if context is not None else ()
+    )
+    return direct_opener(*handlers).open(request, timeout=timeout)
+
+
+class ManagementClient:
+    def __init__(self, address: str, token: str) -> None:
+        self.address = address
+        self.origin = f"http://{address}"
+        self.cookie_jar = http.cookiejar.CookieJar()
+        self.opener = direct_opener(urllib.request.HTTPCookieProcessor(self.cookie_jar))
+        status, login = self.request("POST", "/api/v1/login", {"token": token}, authenticated=False)
+        if status != 200 or type(login.get("csrf_token")) is not str:
+            raise AcceptanceFailure("management login failed")
+        self.csrf = login["csrf_token"]
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        document: dict[str, Any] | None = None,
+        authenticated: bool = True,
+    ) -> tuple[int, dict[str, Any]]:
+        data = None if document is None else json.dumps(document).encode()
+        request = urllib.request.Request(self.origin + path, data=data, method=method)
+        request.add_header("Origin", self.origin)
+        if data is not None:
+            request.add_header("Content-Type", "application/json")
+        if authenticated and method in {"POST", "PUT", "PATCH", "DELETE"}:
+            request.add_header("X-CSRF-Token", self.csrf)
+        try:
+            with self.opener.open(request, timeout=3) as response:
+                body = response.read()
+                return response.status, json.loads(body) if body else {}
+        except urllib.error.HTTPError as error:
+            error.read()
+            return error.code, {}
+
+
+class CompanionProcess:
+    def __init__(
+        self,
+        executable: pathlib.Path,
+        data_directory: pathlib.Path,
+        token: str,
+        output: pathlib.Path,
+        secrets: SensitiveValueTracker | None = None,
+    ) -> None:
+        self.executable = executable
+        self.data_directory = data_directory
+        self.token = token
+        self.output = output
+        self.process: subprocess.Popen[bytes] | None = None
+        self._reader: threading.Thread | None = None
+        self._log: Any = None
+        self._secrets = secrets or SensitiveValueTracker(token)
+        self._secrets.add(token)
+
+    def _drain_output(self, stream: Any) -> None:
+        assert self._log is not None
+        for raw in iter(stream.readline, b""):
+            line = raw.decode("utf-8", errors="replace")
+            self._secrets.observe(line)
+            envelope = {"captured_at": utc_now(), "line": REDACTED_NON_DIAGNOSTIC}
+            self._log.write(json.dumps(envelope, separators=(",", ":")) + "\n")
+            self._log.flush()
+        stream.close()
+
+    def logs_redacted(self) -> bool:
+        return self._secrets.clean()
+
+    def start(self) -> ManagementClient:
+        if self.process is not None:
+            raise AcceptanceFailure("Companion is already running")
+        environment = dict(os.environ)
+        environment["S3DECK_MANAGEMENT_TOKEN"] = self.token
+        self._log = self.output.open("a", encoding="utf-8")
+        self.process = subprocess.Popen(
+            [
+                str(self.executable), "--headless",
+                "--management-address", "127.0.0.1:7777",
+                "--device-hub-address", "0.0.0.0:7780",
+                "--data-directory", str(self.data_directory),
+            ],
+            cwd=REPOSITORY_ROOT,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        assert self.process.stdout is not None
+        self._reader = threading.Thread(
+            target=self._drain_output,
+            args=(self.process.stdout,),
+            name="m1-companion-log",
+            daemon=True,
+        )
+        self._reader.start()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if self.process.poll() is not None:
+                raise AcceptanceFailure("Companion exited before becoming ready")
+            try:
+                return ManagementClient("127.0.0.1:7777", self.token)
+            except (OSError, urllib.error.URLError, AcceptanceFailure):
+                time.sleep(0.1)
+        raise AcceptanceFailure("Companion management listener did not become ready")
+
+    def stop(self) -> None:
+        process = self.process
+        self.process = None
+        if process is None:
+            return
+        failure: AcceptanceFailure | None = None
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGTERM)
+            try:
+                process.wait(timeout=8)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=2)
+                failure = AcceptanceFailure("Companion exceeded bounded shutdown")
+        if process.returncode != 0:
+            failure = failure or AcceptanceFailure(
+                f"Companion exited with {process.returncode}"
+            )
+        if self._reader is not None:
+            self._reader.join(timeout=2)
+            if self._reader.is_alive():
+                failure = failure or AcceptanceFailure(
+                    "Companion output drain exceeded its bound"
+                )
+        self._reader = None
+        if self._log is not None:
+            self._log.close()
+            self._log = None
+        if failure is not None:
+            raise failure
+
+    def ensure_started(self) -> ManagementClient:
+        if self.process is None:
+            return self.start()
+        return ManagementClient("127.0.0.1:7777", self.token)
+
+
+def enter_setup_access(
+    serial_evidence: SerialEvidence,
+    cleanup: CleanupTransaction,
+    stage: str,
+) -> dict[str, Any]:
+    cleanup.begin_setup()
+    serial_evidence.command(b"DECK_SETUP\n")
+    serial_evidence.event(
+        lambda event: event.get("type") == "setup_state" and event.get("active") is True,
+        f"{stage}: enter Setup",
+    )
+    serial_evidence.command(b"DECK_HIL_SETUP_ACCESS\n")
+    access = serial_evidence.event(
+        lambda event: event.get("type") == "hil_setup_access",
+        f"{stage}: Setup access",
+    )
+    return access
+
+
+def device_hub_json(
+    method: str,
+    path: str,
+    document: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    data = None if document is None else json.dumps(document).encode()
+    request = urllib.request.Request(
+        "https://127.0.0.1:7780" + path,
+        data=data,
+        method=method,
+        headers=headers or {},
+    )
+    if data is not None:
+        request.add_header("Content-Type", "application/json")
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    try:
+        with open_direct(request, timeout=3, context=context) as response:
+            body = response.read()
+            return response.status, json.loads(body) if body else {}
+    except urllib.error.HTTPError as error:
+        error.read()
+        return error.code, {}
+
+
+def plain_http_status(origin: str, path: str) -> int:
+    request = urllib.request.Request(origin.rstrip("/") + path, method="GET")
+    try:
+        with open_direct(request, timeout=3) as response:
+            response.read()
+            return response.status
+    except urllib.error.HTTPError as error:
+        error.read()
+        return error.code
+
+
+def pair_deck(
+    management: ManagementClient,
+    serial_evidence: SerialEvidence,
+    setup_client: SetupClientAdapter,
+    hub_address: str,
+    stage_timeout: float,
+    cleanup: CleanupTransaction,
+    secrets: SensitiveValueTracker,
+    stage: str,
+    before_submit: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    access = enter_setup_access(serial_evidence, cleanup, stage)
+    secrets.add(access["password"])
+    original_profiles = setup_client.snapshot(access, stage_timeout)
+    if before_submit is not None:
+        before_submit(original_profiles)
+    status, issued = management.request("POST", "/api/v1/pairing/codes")
+    if status != 200 or re.fullmatch(r"[0-9]{6}", str(issued.get("code", ""))) is None:
+        raise AcceptanceFailure(f"{stage}: Companion did not issue a six-digit Pairing code")
+    secrets.add(str(issued["code"]))
+    setup_client.pair(
+        access,
+        hub_address,
+        str(issued["code"]),
+        stage_timeout,
+    )
+    issued = {}
+    serial_evidence.event(
+        lambda event: event.get("type") == "setup_state" and event.get("active") is False,
+        f"{stage}: Pairing commit and Setup close",
+        30,
+    )
+    cleanup.observe_setup_closed()
+    return serial_evidence.event(
+        lambda event: event.get("type") == "companion_link_state"
+        and event.get("state") == "online",
+        f"{stage}: Device Link online",
+        60,
+    )
+
+
+def close_setup_by_restart(
+    serial_evidence: SerialEvidence,
+    serial_module: Any,
+    port: str,
+    timeout: float,
+    cleanup: CleanupTransaction,
+) -> None:
+    serial_evidence.restart_and_wait(
+        serial_module, port, timeout, "Setup close restart"
+    )
+    serial_evidence.event(
+        lambda event: event.get("type") == "setup_state"
+        and event.get("active") is False,
+        "Setup inactive after restart",
+        timeout,
+    )
+    cleanup.observe_setup_closed()
+
+
+def is_new_link_error(
+    event: dict[str, Any],
+    baseline_generation: int,
+    expected_error: str,
+) -> bool:
+    return (
+        event.get("type") == "companion_link_state"
+        and event.get("last_error") == expected_error
+        and int(event.get("error_generation", 0)) > baseline_generation
+        and event.get("state") != "online"
+    )
+
+
+def wait_for_host(host: str, timeout: float) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        result = subprocess.run(["ping", "-c", "1", "-W", "1000", host], capture_output=True)
+        if result.returncode == 0:
+            return
+        time.sleep(0.5)
+    raise AcceptanceFailure(f"network host {host} did not become reachable")
+
+
+def verified_native_run(url: str, commit: str) -> dict[str, Any] | None:
+    matched = re.fullmatch(
+        rf"https://github\.com/{re.escape(NATIVE_RUN_REPOSITORY)}/actions/runs/([0-9]+)",
+        url,
+    )
+    if matched is None:
+        return None
+    run_id = int(matched.group(1))
+    try:
+        workflow = json.loads(command_output([
+            "gh",
+            "api",
+            f"repos/{NATIVE_RUN_REPOSITORY}/actions/workflows/companion-desktop.yml",
+        ]))
+        document = json.loads(command_output([
+            "gh", "run", "view", str(run_id),
+            "--json",
+            "databaseId,workflowDatabaseId,workflowName,url,event,headSha,conclusion,jobs",
+        ]))
+    except (subprocess.SubprocessError, json.JSONDecodeError):
+        return None
+    workflow_id = workflow.get("id")
+    if (
+        not isinstance(workflow_id, int)
+        or workflow_id <= 0
+        or workflow.get("name") != NATIVE_RUN_WORKFLOW
+        or workflow.get("path") != NATIVE_RUN_WORKFLOW_PATH
+        or workflow.get("state") != "active"
+        or document.get("databaseId") != run_id
+        or document.get("workflowDatabaseId") != workflow_id
+        or document.get("workflowName") != NATIVE_RUN_WORKFLOW
+        or document.get("url") != url
+        or document.get("event") not in {"pull_request", "push"}
+        or document.get("headSha") != commit
+        or document.get("conclusion") != "success"
+    ):
+        return None
+    jobs = [job for job in document.get("jobs", []) if isinstance(job, dict)]
+
+    def job_evidence(
+        accepted_names: set[str], required_steps: set[str]
+    ) -> dict[str, Any] | None:
+        for job in jobs:
+            job_id = job.get("databaseId")
+            job_url = job.get("url")
+            steps = {
+                step.get("name"): step.get("conclusion")
+                for step in job.get("steps", [])
+                if isinstance(step, dict)
+            }
+            if (
+                job.get("name") in accepted_names
+                and job.get("conclusion") == "success"
+                and isinstance(job_id, int)
+                and job_id > 0
+                and job_url == f"{url}/job/{job_id}"
+                and all(steps.get(step) == "success" for step in required_steps)
+            ):
+                return {
+                    "job_id": job_id,
+                    "job_name": job["name"],
+                    "job_url": job_url,
+                    "required_steps": sorted(required_steps),
+                }
+        return None
+
+    return {
+        "repository": NATIVE_RUN_REPOSITORY,
+        "workflow": NATIVE_RUN_WORKFLOW,
+        "workflow_id": workflow_id,
+        "workflow_path": NATIVE_RUN_WORKFLOW_PATH,
+        "run_id": run_id,
+        "run_url": url,
+        "event": document["event"],
+        "head_sha": commit,
+        "jobs": {
+            "macos": job_evidence(
+                {"macOS native (arm64)", "macOS native (amd64)"},
+                NATIVE_RUN_REQUIRED_STEPS["macos"],
+            ),
+            "windows": job_evidence(
+                {"Windows native (amd64)"},
+                NATIVE_RUN_REQUIRED_STEPS["windows"],
+            ),
+        },
+    }
+
+
+def build_summary(
+    *,
+    firmware_commit: str,
+    companion_commit: str,
+    started_at: str,
+    ended_at: str,
+    checks: dict[str, bool],
+    reconnect_count: int,
+    deck_error_count: int,
+    companion_error_count: int,
+    serial_log: pathlib.Path | None,
+    source_dirty: bool,
+    toolchain_environment: dict[str, str] | None = None,
+    native_run_evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    failures = [name for name in REQUIRED_CHECKS if checks.get(name) is not True]
+    if source_dirty:
+        failures.append("source_dirty")
+    raw_hash = ""
+    if serial_log is not None and serial_log.is_file():
+        raw_hash = hashlib.sha256(serial_log.read_bytes()).hexdigest()
+    return {
+        "schema_version": 1,
+        "status": "passed" if not failures else "failed",
+        "firmware_commit": firmware_commit,
+        "companion_commit": companion_commit,
+        "platform": platform.platform(),
+        "toolchains": toolchain_identity(toolchain_environment),
+        "started_at": started_at,
+        "ended_at": ended_at,
+        "checks": {name: checks.get(name, False) for name in REQUIRED_CHECKS},
+        "reconnect_count": reconnect_count,
+        "deck_error_count": deck_error_count,
+        "companion_error_count": companion_error_count,
+        "raw_log_sha256": raw_hash,
+        "native_run": native_run_evidence,
+        "redaction_statement": "Secret credential material is never retained in acceptance evidence.",
+        "failures": failures,
+    }
+
+
+def parse_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run real M1 Pairing and Device Link acceptance.")
+    parser.add_argument("--port", required=True)
+    parser.add_argument("--result-dir", type=pathlib.Path, required=True)
+    parser.add_argument(
+        "--setup-client-command-file",
+        type=pathlib.Path,
+        required=True,
+        help="JSON argv for a dual-homed Setup client helper reached over its wired path",
+    )
+    parser.add_argument(
+        "--hub-address",
+        required=True,
+        help="normal-LAN Companion Device Hub address stored by the Deck",
+    )
+    parser.add_argument(
+        "--native-run-url",
+        required=True,
+        help="successful same-commit Actions run containing macOS and Windows native observations",
+    )
+    parser.add_argument("--stage-timeout", type=float, default=75.0)
+    return parser.parse_args()
+
+
+def main() -> int:
+    arguments = parse_arguments()
+    started_at = utc_now()
+    arguments.result_dir.mkdir(parents=True, exist_ok=False)
+    serial_path = arguments.result_dir / "serial.jsonl"
+    summary_path = arguments.result_dir / "summary.json"
+    checks: dict[str, bool] = {}
+    reconnect_count = 0
+    deck_error_count = 0
+    link_error_generation = 0
+    companion_error_count = 0
+    dirty = True
+    commit = ""
+    observed_firmware_commit = ""
+    observed_companion_commit = ""
+    secrets = SensitiveValueTracker()
+    data_root: tempfile.TemporaryDirectory[str] | None = None
+    data_directory: pathlib.Path | None = None
+    companion_log = arguments.result_dir / "companion.jsonl"
+    companion: CompanionProcess | None = None
+    managed_processes: list[CompanionProcess] = []
+    serial_evidence: SerialEvidence | None = None
+    setup_client: SetupClientAdapter | None = None
+    cleanup = CleanupTransaction()
+    summary: dict[str, Any] = {"status": "failed"}
+    summary_written = False
+    toolchain_environment: dict[str, str] | None = None
+    native_run_evidence: dict[str, Any] | None = None
+    try:
+        dirty = not source_tree_clean()
+        commit = command_output(["git", "rev-parse", "HEAD"])
+        if dirty:
+            raise AcceptanceFailure("source tree is dirty; commit before auditable acceptance")
+        token = hashlib.sha256(os.urandom(64)).hexdigest()
+        secrets.add(token)
+        data_root = tempfile.TemporaryDirectory(prefix="s3deck-m1-companion-")
+        data_directory = pathlib.Path(data_root.name)
+        helper_path = REPOSITORY_ROOT / "tools/m1_setup_client.py"
+        helper_sha256 = hashlib.sha256(helper_path.read_bytes()).hexdigest()
+        setup_client = SetupClientAdapter(
+            load_setup_client_command(arguments.setup_client_command_file),
+            secrets,
+            helper_sha256,
+        )
+        setup_client.probe(max(35.0, min(arguments.stage_timeout, 45.0)))
+        environment = run_preflight(arguments.result_dir / "preflight.log")
+        toolchain_environment = environment
+        if command_output(["idf.py", "--version"], environment) != "ESP-IDF v6.0.2":
+            raise AcceptanceFailure("M1 acceptance requires ESP-IDF v6.0.2")
+        executable = companion_for_current_host(commit)
+        observed_companion_commit = commit
+        serial = load_serial_module(environment)
+        run_app_flash(arguments.port, arguments.result_dir / "app-flash.log", environment)
+        checks["builds_clean"] = True
+
+        serial_evidence = SerialEvidence(
+            serial,
+            arguments.port,
+            serial_path,
+            arguments.stage_timeout,
+            secrets,
+        )
+        serial_evidence.fresh_boot(serial, arguments.port, arguments.stage_timeout)
+        serial_evidence.command(b"DECK_BUILD_IDENTITY\n")
+        build_identity = serial_evidence.event(
+            lambda event: event.get("type") == "deck_build_identity",
+            "Deck build identity",
+        )
+        observed_firmware_commit = str(build_identity["firmware_commit"])
+        if observed_firmware_commit != commit:
+            raise AcceptanceFailure("Deck firmware does not match the clean source commit")
+
+        companion = CompanionProcess(
+            executable, data_directory, token, companion_log, secrets
+        )
+        managed_processes.append(companion)
+        management = companion.start()
+
+        def remember_original_profiles(original_profiles: dict[str, Any]) -> None:
+            cleanup.original_profiles = original_profiles
+            cleanup.profiles_may_need_restore = True
+
+        online = pair_deck(
+            management,
+            serial_evidence,
+            setup_client,
+            arguments.hub_address,
+            arguments.stage_timeout,
+            cleanup,
+            secrets,
+            "first Pairing",
+            remember_original_profiles,
+        )
+        checks["recovery_pairing"] = True
+        reconnect_count += 1
+        deck_error_count = max(deck_error_count, int(online["error_count"]))
+        link_error_generation = int(online["error_generation"])
+
+        serial_evidence.restart_and_wait(
+            serial,
+            arguments.port,
+            arguments.stage_timeout,
+            "Deck reboot",
+        )
+        online = serial_evidence.event(lambda event: event.get("type") == "companion_link_state" and event.get("state") == "online", "reconnect after Deck reboot", 60)
+        reconnect_count += 1
+        checks["deck_reboot_reconnected"] = True
+
+        companion.stop()
+        serial_evidence.event(lambda event: event.get("type") == "companion_link_state" and event.get("state") in {"offline", "connecting"}, "Companion offline", 45)
+        management = companion.start()
+        online = serial_evidence.event(lambda event: event.get("type") == "companion_link_state" and event.get("state") == "online", "Companion recovery", 60)
+        link_error_generation = int(online["error_generation"])
+        reconnect_count += 1
+        checks["companion_offline_recovered"] = True
+
+        # Wrong-certificate identity on the same address must never reach the real Hub.
+        companion.stop()
+        with tempfile.TemporaryDirectory(prefix="s3deck-wrong-cert-") as wrong_directory:
+            wrong = CompanionProcess(
+                executable,
+                pathlib.Path(wrong_directory),
+                token,
+                companion_log,
+                secrets,
+            )
+            managed_processes.append(wrong)
+            try:
+                wrong.start()
+                observed = serial_evidence.event(
+                    lambda event: is_new_link_error(
+                        event, link_error_generation, "tls_pin_mismatch"
+                    ),
+                    "wrong certificate rejection",
+                    45,
+                )
+                deck_error_count = int(observed["error_count"])
+                link_error_generation = int(observed["error_generation"])
+                checks["wrong_certificate_rejected"] = True
+            finally:
+                wrong.stop()
+
+        # A special acceptance binary uses the persisted identity/trust but sends major 2.
+        incompatible = data_directory / "s3deck-companion-major2"
+        subprocess.run(
+            ["go", "build", "-trimpath", "-ldflags", f"-X main.version=0.2.0-dev -X main.commit={commit} -X main.hilServerProtocolVersion=2", "-o", str(incompatible), "./cmd/s3deck-companion"],
+            cwd=REPOSITORY_ROOT / "companion", check=True,
+        )
+        incompatible_process = CompanionProcess(
+            incompatible,
+            data_directory,
+            token,
+            companion_log,
+            secrets,
+        )
+        managed_processes.append(incompatible_process)
+        try:
+            management = incompatible_process.start()
+            observed = serial_evidence.event(
+                lambda event: is_new_link_error(
+                    event, link_error_generation, "protocol_major_rejected"
+                ),
+                "protocol major rejection",
+                45,
+            )
+            deck_error_count = int(observed["error_count"])
+            link_error_generation = int(observed["error_generation"])
+            checks["protocol_major_rejected"] = True
+        finally:
+            incompatible_process.stop()
+
+        management = companion.start()
+        online = serial_evidence.event(lambda event: event.get("type") == "companion_link_state" and event.get("state") == "online", "recovery before revoke", 60)
+        link_error_generation = int(online["error_generation"])
+        status, devices = management.request("GET", "/api/v1/devices")
+        device_list = devices.get("devices", [])
+        if status != 200 or len(device_list) != 1 or type(device_list[0].get("device_id")) is not str:
+            raise AcceptanceFailure("management did not expose one redacted paired Deck")
+        status, _ = management.request("DELETE", "/api/v1/devices/" + device_list[0]["device_id"])
+        if status != 204:
+            raise AcceptanceFailure("management device revocation failed")
+        cleanup.trust_may_need_restore = True
+        observed = serial_evidence.event(
+            lambda event: is_new_link_error(
+                event, link_error_generation, "auth_rejected"
+            ),
+            "revoked Token rejection",
+            45,
+        )
+        deck_error_count = int(observed["error_count"])
+        link_error_generation = int(observed["error_generation"])
+        checks["revoked_device_trust_rejected"] = True
+
+        # Restore a valid device trust/Profile before leaving the user's Deck.
+        pair_deck(
+            management,
+            serial_evidence,
+            setup_client,
+            arguments.hub_address,
+            arguments.stage_timeout,
+            cleanup,
+            secrets,
+            "trust restoration",
+        )
+        cleanup.trust_may_need_restore = False
+        reconnect_count += 1
+
+        # Cross-port and cross-token rejection is performed against live listeners.
+        status, _ = device_hub_json("GET", "/api/v1/status")
+        if status != 404:
+            raise AcceptanceFailure("Device Hub exposed a management route")
+        if plain_http_status(
+            "http://127.0.0.1:7777", "/api/v1/device/health"
+        ) != 404:
+            raise AcceptanceFailure("management listener exposed a Device Hub route")
+        status, _ = device_hub_json(
+            "GET",
+            "/api/v1/device/health",
+            headers={
+                "Authorization": "Bearer " + token,
+                "X-Device-ID": "deck-authority1",
+                "X-Device-Identity": "YXV0aG9yaXR5LXNlcGFyYXRpb24taWRlbnRpdHk",
+                "X-Protocol-Version": "1",
+            },
+        )
+        if status != 401:
+            raise AcceptanceFailure("management credential authorized Device Hub")
+        status, temporary_code = management.request("POST", "/api/v1/pairing/codes")
+        if status != 200:
+            raise AcceptanceFailure("temporary authority code unavailable")
+        secrets.add(str(temporary_code.get("code", "")))
+        status, temporary_credential = device_hub_json(
+            "POST",
+            "/api/v1/pairing/redeem",
+            {
+                "code": temporary_code.get("code"),
+                "device_id": "deck-authority1",
+                "device_identity": "YXV0aG9yaXR5LXNlcGFyYXRpb24taWRlbnRpdHk",
+                "protocol_version": 1,
+            },
+        )
+        if status != 200 or type(temporary_credential.get("token")) is not str:
+            raise AcceptanceFailure("temporary device credential unavailable")
+        temporary_token = temporary_credential["token"]
+        secrets.add(temporary_token)
+        unauthorized_management = ManagementClient.__new__(ManagementClient)
+        unauthorized_management.address = "127.0.0.1:7777"
+        unauthorized_management.origin = "http://127.0.0.1:7777"
+        unauthorized_management.cookie_jar = http.cookiejar.CookieJar()
+        unauthorized_management.opener = direct_opener(
+            urllib.request.HTTPCookieProcessor(unauthorized_management.cookie_jar)
+        )
+        login_status, _ = unauthorized_management.request(
+            "POST", "/api/v1/login", {"token": temporary_token}, authenticated=False
+        )
+        temporary_token = ""
+        temporary_credential = {}
+        temporary_code = {}
+        if login_status != 401:
+            raise AcceptanceFailure("device credential authorized management Web")
+        revoke_status, _ = management.request("DELETE", "/api/v1/devices/deck-authority1")
+        if revoke_status != 204:
+            raise AcceptanceFailure("temporary device trust cleanup failed")
+        checks["management_device_authority_separated"] = True
+
+        native_run_evidence = verified_native_run(
+            arguments.native_run_url, commit
+        )
+        native_jobs = (
+            native_run_evidence.get("jobs", {})
+            if native_run_evidence is not None
+            else {}
+        )
+        checks["macos_native_shell_observed"] = isinstance(
+            native_jobs.get("macos"), dict
+        )
+        checks["windows_native_shell_observed"] = isinstance(
+            native_jobs.get("windows"), dict
+        )
+        companion_status, runtime_status = management.request("GET", "/api/v1/status")
+        if companion_status == 200:
+            companion_error_count = int(runtime_status.get("device_link_auth_errors", 0)) + int(runtime_status.get("device_link_protocol_errors", 0))
+
+        # Leave the Deck with exactly the Profile set and active selection it had before M1.
+        cleanup_access = enter_setup_access(
+            serial_evidence,
+            cleanup,
+            "restore original Companion Profiles",
+        )
+        secrets.add(cleanup_access["password"])
+        setup_client.restore(
+            cleanup_access,
+            cleanup.original_profiles,
+            arguments.stage_timeout,
+        )
+        cleanup.profiles_may_need_restore = False
+        close_setup_by_restart(
+            serial_evidence,
+            serial,
+            arguments.port,
+            arguments.stage_timeout,
+            cleanup,
+        )
+    except (
+        AcceptanceFailure,
+        KeyboardInterrupt,
+        OSError,
+        subprocess.SubprocessError,
+        urllib.error.URLError,
+    ) as error:
+        print(f"M1 acceptance failed: {error}", file=sys.stderr)
+    finally:
+        cleanup_ok = True
+        for process in reversed(managed_processes[1:]):
+            try:
+                process.stop()
+            except Exception as error:
+                cleanup_ok = False
+                print(f"M1 cleanup failed: {error}", file=sys.stderr)
+        if (
+            serial_evidence is not None
+            and companion is not None
+            and setup_client is not None
+            and cleanup.needs_compensation()
+        ):
+            try:
+                management = companion.ensure_started()
+                if cleanup.trust_may_need_restore:
+                    pair_deck(
+                        management,
+                        serial_evidence,
+                        setup_client,
+                        arguments.hub_address,
+                        arguments.stage_timeout,
+                        cleanup,
+                        secrets,
+                        "cleanup trust compensation",
+                    )
+                    cleanup.trust_may_need_restore = False
+                if cleanup.profiles_may_need_restore:
+                    access = enter_setup_access(
+                        serial_evidence,
+                        cleanup,
+                        "cleanup Profile compensation",
+                    )
+                    secrets.add(access["password"])
+                    setup_client.restore(
+                        access,
+                        cleanup.original_profiles,
+                        arguments.stage_timeout,
+                    )
+                    cleanup.profiles_may_need_restore = False
+                if cleanup.setup_pending:
+                    close_setup_by_restart(
+                        serial_evidence,
+                        serial,
+                        arguments.port,
+                        arguments.stage_timeout,
+                        cleanup,
+                    )
+            except Exception as error:
+                cleanup_ok = False
+                print(f"M1 compensation failed: {error}", file=sys.stderr)
+                try:
+                    serial_evidence.command(b"DECK_RESTART\n")
+                except Exception:
+                    pass
+        if companion is not None:
+            try:
+                companion.stop()
+            except Exception as error:
+                cleanup_ok = False
+                print(f"M1 cleanup failed: {error}", file=sys.stderr)
+        if setup_client is not None:
+            try:
+                setup_client.cleanup_pending(max(45.0, arguments.stage_timeout))
+            except Exception as error:
+                cleanup_ok = False
+                print(f"M1 helper cleanup failed: {error}", file=sys.stderr)
+        if serial_evidence is not None:
+            try:
+                serial_evidence.close()
+            except Exception as error:
+                cleanup_ok = False
+                print(f"M1 serial cleanup failed: {error}", file=sys.stderr)
+        checks["cleanup_restored"] = cleanup_ok and cleanup.restored()
+        try:
+            checks["credentials_absent_from_evidence"] = (
+                all(process.logs_redacted() for process in managed_processes)
+                and secrets.clean()
+                and evidence_directory_is_redacted(arguments.result_dir, secrets.values())
+            )
+        except Exception as error:
+            checks["credentials_absent_from_evidence"] = False
+            print(f"M1 evidence scan failed: {error}", file=sys.stderr)
+        if data_root is not None:
+            try:
+                data_root.cleanup()
+            except Exception as error:
+                checks["cleanup_restored"] = False
+                print(f"M1 temporary-data cleanup failed: {error}", file=sys.stderr)
+        try:
+            summary = build_summary(
+                firmware_commit=observed_firmware_commit,
+                companion_commit=observed_companion_commit,
+                started_at=started_at,
+                ended_at=utc_now(),
+                checks=checks,
+                reconnect_count=reconnect_count,
+                deck_error_count=deck_error_count,
+                companion_error_count=companion_error_count,
+                serial_log=serial_path,
+                source_dirty=dirty,
+                toolchain_environment=toolchain_environment,
+                native_run_evidence=native_run_evidence,
+            )
+        except Exception as error:
+            print(f"M1 summary assembly failed: {error}", file=sys.stderr)
+            summary = {
+                "schema_version": 1,
+                "status": "failed",
+                "failures": ["summary_assembly_failed"],
+                "started_at": started_at,
+                "ended_at": utc_now(),
+            }
+        try:
+            summary_path.write_text(
+                json.dumps(summary, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            summary_written = True
+        except OSError as error:
+            print(f"M1 summary write failed: {error}", file=sys.stderr)
+    print(f"M1 acceptance {summary['status']}: {summary_path}")
+    return 0 if summary_written and summary["status"] == "passed" else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

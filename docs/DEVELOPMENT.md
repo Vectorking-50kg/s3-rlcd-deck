@@ -875,7 +875,7 @@ serial_rx → fixed blocks → serial_router
 V1 使用 ESP32-S3 USB Serial/JTAG 的单 CDC 通道作为目标串口桥：
 
 - 发布固件的目标串口流不与 ESP-IDF console 日志混用；发布配置关闭 ESP-IDF console。
-- 发布固件诊断走 Web/内存诊断环。开发/HIL 构建可临时启用结构化 USB `boot_ok`，仅用于启动验收，并在发布配置中关闭。
+- 发布固件诊断走 Web/内存诊断环。开发/HIL 构建可临时启用结构化 USB `boot_ok` 与无凭据的 `deck_build_identity`，仅用于启动和构建身份验收，并在发布配置中关闭。
 - 目标 UART 不使用 U0TXD；USB console/ROM 输出不会通过 GPIO17 注入目标设备。
 - USB sink 独立任务处理，不能从 UART RX 同步写 USB。
 - USB source 同样使用独立任务读取原始字节；只有 owner task 可把固定队列中的字节写入 UART1。
@@ -1133,6 +1133,16 @@ s3-rlcd-deck/
 - 管理入口与 Device Hub 分离。
 - 一次性码配对、证书指纹固定、WSS 心跳。
 - 多 Profile 数据结构先落地，故障切换可在 M5 完成。
+- 实板验收时控制 Mac 始终保留在普通 LAN；由有线控制、Wi-Fi 加入 Setup AP 的
+  双网口 Linux 客户端访问真实恢复页并透明转发 Device Hub TLS。没有该物理客户端时
+  `recovery_pairing` 必须保持 BLOCKED，USB/Host seam 不得替代。
+- 任何会修改 Companion Profile 的 Pairing 前，控制端必须先通过独立事务取得并保存
+  原 Profile 快照；SSH 返回或客户端网络清理失败不能丢失补偿依据。
+- Linux 客户端在切换 Wi-Fi 前只持久化非秘密 UUID 补偿日志；控制端每次事务后必须用
+  新 SSH 连接执行幂等 cleanup/verify，并以跨进程事务锁等待旧 primary 完全退出。SSH
+  cleanup 还必须留下 cancellation fence，使尚未取得锁的迟到 primary 永久拒绝变更。
+  控制口必须由 NetworkManager 明确识别为 Ethernet。每次请求都重新绑定受验 helper
+  SHA-256。
 
 ### M2：Codex 首页
 

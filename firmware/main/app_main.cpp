@@ -80,13 +80,29 @@ int16_t application_temperature_offset_tenths_c =
 
 #include "driver/usb_serial_jtag.h"
 #include "driver/usb_serial_jtag_vfs.h"
+#include "esp_private/periph_ctrl.h"
+#include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "hal/usb_serial_jtag_ll.h"
 
 namespace {
 
 bool initialize_diagnostic_console_driver()
 {
+    // OpenOCD's flash stub and the application share the USB Serial/JTAG
+    // peripheral. An ESP32-S3 software reset can leave the host holding a
+    // stale CDC endpoint because D+ never indicated a disconnect. Perform a
+    // USB-spec detach before resetting the controller so the host enumerates
+    // a clean diagnostic endpoint without requiring a power cycle.
+    const usb_serial_jtag_pull_override_vals_t detached{};
+    usb_serial_jtag_ll_phy_enable_pull_override(&detached);
+    esp_rom_delay_us(50'000);
+    PERIPH_RCC_ATOMIC() {
+        usb_serial_jtag_ll_reset_register();
+    }
+    usb_serial_jtag_ll_phy_disable_pull_override();
+
     usb_serial_jtag_driver_config_t configuration =
         USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
     if (usb_serial_jtag_driver_install(&configuration) != ESP_OK) {
@@ -249,6 +265,67 @@ ButtonEventMapping map_button_event(deck_button_input_event_t event)
             return {DECK_BUTTON_NONE, DECK_DIAGNOSTIC_BUTTON_NONE};
     }
 }
+
+#ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
+const char *companion_link_state_name(deck_companion_link_state_t state)
+{
+    switch (state) {
+        case DECK_COMPANION_LINK_OFFLINE:
+            return "offline";
+        case DECK_COMPANION_LINK_CONNECTING:
+            return "connecting";
+        case DECK_COMPANION_LINK_ONLINE:
+            return "online";
+        case DECK_COMPANION_LINK_UNPAIRED:
+        default:
+            return "unpaired";
+    }
+}
+
+const char *companion_link_error_name(deck_companion_link_error_t error)
+{
+    switch (error) {
+        case DECK_COMPANION_LINK_ERROR_TRANSPORT:
+            return "transport";
+        case DECK_COMPANION_LINK_ERROR_TLS_PIN_MISMATCH:
+            return "tls_pin_mismatch";
+        case DECK_COMPANION_LINK_ERROR_AUTH_REJECTED:
+            return "auth_rejected";
+        case DECK_COMPANION_LINK_ERROR_PROTOCOL_MAJOR_REJECTED:
+            return "protocol_major_rejected";
+        case DECK_COMPANION_LINK_ERROR_PROTOCOL_INVALID:
+            return "protocol_invalid";
+        case DECK_COMPANION_LINK_ERROR_HEARTBEAT_TIMEOUT:
+            return "heartbeat_timeout";
+        case DECK_COMPANION_LINK_ERROR_INTERNAL:
+            return "internal";
+        case DECK_COMPANION_LINK_ERROR_NONE:
+        default:
+            return "none";
+    }
+}
+
+void emit_companion_link_diagnostics()
+{
+    deck_companion_link_snapshot_t snapshot{};
+    if (application_companion_link == nullptr ||
+        !deck_companion_link_snapshot(application_companion_link, &snapshot)) {
+        return;
+    }
+    const deck_companion_link_diagnostic_info_t info = {
+        companion_link_state_name(snapshot.state),
+        snapshot.has_active_profile,
+        snapshot.profile_generation,
+        snapshot.reconnect_attempts,
+        snapshot.error_count,
+        companion_link_error_name(snapshot.last_error),
+        snapshot.error_generation,
+        snapshot.last_heartbeat_monotonic_ms,
+    };
+    const deck_diagnostic_sink_t sink = {write_stdout, nullptr};
+    (void)deck_companion_link_diagnostics_emit(&info, sink);
+}
+#endif
 
 bool release_display_resources()
 {
@@ -580,6 +657,7 @@ void peripheral_snapshot(void *, const deck_peripheral_snapshot_t *snapshot)
     };
     const deck_diagnostic_sink_t sink = {write_stdout, nullptr};
     (void)deck_peripheral_diagnostics_emit(&info, sink);
+    emit_companion_link_diagnostics();
 #endif
 }
 
@@ -955,6 +1033,54 @@ void handle_diagnostic_control_line(char *line)
         write_stdout(nullptr, identity, sizeof(identity) - 1);
         return;
     }
+    if (std::strcmp(line, "DECK_BUILD_IDENTITY") == 0) {
+        char identity[128];
+        const int size = snprintf(
+            identity,
+            sizeof(identity),
+            "{\"type\":\"deck_build_identity\",\"firmware_commit\":\"%s\"}\n",
+            DECK_FIRMWARE_COMMIT
+        );
+        if (size > 0 && static_cast<size_t>(size) < sizeof(identity)) {
+            write_stdout(nullptr, identity, static_cast<size_t>(size));
+        }
+        return;
+    }
+    if (std::strcmp(line, "DECK_HIL_SETUP_ACCESS") == 0) {
+        char ssid[DECK_M0_SETUP_SSID_CAPACITY]{};
+        char password[DECK_M0_SETUP_PASSWORD_CAPACITY]{};
+        char address[DECK_M0_SETUP_ADDRESS_CAPACITY]{};
+        bool active = false;
+        if (application_model_mutex != nullptr &&
+            xSemaphoreTake(application_model_mutex, portMAX_DELAY) == pdTRUE) {
+            active = application_model.setup_state == DECK_SETUP_ACTIVE;
+            if (active) {
+                std::memcpy(ssid, application_model.setup_ssid, sizeof(ssid));
+                std::memcpy(password, application_model.setup_password, sizeof(password));
+                std::memcpy(address, application_model.setup_address, sizeof(address));
+            }
+            xSemaphoreGive(application_model_mutex);
+        }
+        if (active) {
+            char response[192];
+            const int size = snprintf(
+                response,
+                sizeof(response),
+                "{\"type\":\"hil_setup_access\",\"ssid\":\"%s\","
+                "\"password\":\"%s\",\"address\":\"%s\"}\n",
+                ssid,
+                password,
+                address
+            );
+            if (size > 0 && static_cast<size_t>(size) < sizeof(response)) {
+                write_stdout(nullptr, response, static_cast<size_t>(size));
+            }
+        }
+        std::memset(ssid, 0, sizeof(ssid));
+        std::memset(password, 0, sizeof(password));
+        std::memset(address, 0, sizeof(address));
+        return;
+    }
     if (application_setup == nullptr) {
         return;
     }
@@ -963,6 +1089,10 @@ void handle_diagnostic_control_line(char *line)
         return;
     }
     if (std::strcmp(line, "DECK_RESTART") == 0) {
+        static constexpr char acknowledgement[] =
+            "{\"type\":\"restart_ack\"}\n";
+        write_stdout(nullptr, acknowledgement, sizeof(acknowledgement) - 1);
+        vTaskDelay(pdMS_TO_TICKS(100));
         esp_restart();
         return;
     }

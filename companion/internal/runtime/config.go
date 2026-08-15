@@ -119,12 +119,13 @@ type ManagementLimits struct {
 }
 
 type DeviceHubConfig struct {
-	Address           string
-	AdvertisedAddress string
-	TLSCertificate    *tls.Certificate
-	HeartbeatInterval time.Duration
-	HeartbeatTimeout  time.Duration
-	Limits            DeviceHubLimits
+	Address               string
+	AdvertisedAddress     string
+	TLSCertificate        *tls.Certificate
+	HeartbeatInterval     time.Duration
+	HeartbeatTimeout      time.Duration
+	ServerProtocolVersion int
+	Limits                DeviceHubLimits
 }
 
 type DeviceHubLimits struct {
@@ -197,6 +198,9 @@ func normalizeConfig(config Config) (Config, error) {
 		(config.DeviceHub.HeartbeatTimeout != 0 &&
 			config.DeviceHub.HeartbeatInterval >= config.DeviceHub.HeartbeatTimeout) {
 		return Config{}, errors.New("Device Hub heartbeat timing is invalid")
+	}
+	if config.DeviceHub.ServerProtocolVersion < 0 {
+		return Config{}, errors.New("Device Hub server protocol version is invalid")
 	}
 	config.DeviceHub.Limits = normalizeDeviceHubLimits(config.DeviceHub.Limits)
 	config.Management.Limits = normalizeManagementLimits(config.Management.Limits)

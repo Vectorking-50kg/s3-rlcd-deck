@@ -50,8 +50,11 @@ constexpr char kPage[] =
     "show(await r.json());if(r.ok)setTimeout(load,500)};"
     "pair.onsubmit=async e=>{e.preventDefault();let r=await fetch('/api/companions/pair',"
     "{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:"
-    "new URLSearchParams(new FormData(pair))});state.textContent=JSON.stringify(await "
-    "r.json());pair.code.value='';if(r.ok)setTimeout(load,250)};"
+    "new URLSearchParams(new FormData(pair))});let j=await r.json();state.textContent="
+    "JSON.stringify(j);pair.code.value='';if(r.ok&&/^[0-9a-f]{32}$/.test(j.response_ack))"
+    "fetch('/api/companions/pair/ack',{method:'POST',headers:{'Content-Type':"
+    "'application/x-www-form-urlencoded'},body:new URLSearchParams({response_ack:"
+    "j.response_ack})}).catch(()=>{})};"
     "temp.onsubmit=async e=>{e.preventDefault();let r=await fetch('/api/temperature',"
     "{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},"
     "body:new URLSearchParams(new FormData(temp))});show(await r.json());if(r.ok)"
@@ -73,6 +76,7 @@ constexpr deck_setup_http_route_spec_t kRoutes[] = {
     {DECK_SETUP_HTTP_WIFI_CLEAR_REQUEST, DECK_SETUP_HTTP_POST, "/api/wifi/clear/request"},
     {DECK_SETUP_HTTP_WIFI_CLEAR_CONFIRM, DECK_SETUP_HTTP_POST, "/api/wifi/clear/confirm"},
     {DECK_SETUP_HTTP_COMPANION_PAIR, DECK_SETUP_HTTP_POST, "/api/companions/pair"},
+    {DECK_SETUP_HTTP_COMPANION_PAIR_ACK, DECK_SETUP_HTTP_POST, "/api/companions/pair/ack"},
     {DECK_SETUP_HTTP_COMPANION_SELECT, DECK_SETUP_HTTP_POST, "/api/companions/select"},
     {DECK_SETUP_HTTP_COMPANION_PRIORITY, DECK_SETUP_HTTP_POST, "/api/companions/priority"},
     {DECK_SETUP_HTTP_COMPANION_REVOKE, DECK_SETUP_HTTP_POST, "/api/companions/revoke"},
@@ -276,6 +280,48 @@ deck_setup_http_route_t deck_setup_http_route(const char *method, const char *pa
                    : DECK_SETUP_HTTP_METHOD_NOT_ALLOWED;
     }
     return DECK_SETUP_HTTP_NOT_FOUND;
+}
+
+bool deck_setup_http_extract_ipv4(
+    const uint8_t *address,
+    size_t address_size,
+    uint8_t ipv4[4]
+)
+{
+    if (address == nullptr || ipv4 == nullptr) {
+        return false;
+    }
+    const uint8_t *source = address;
+    if (address_size == 16) {
+        constexpr uint8_t kIpv4MappedPrefix[12] = {
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff,
+        };
+        if (std::memcmp(address, kIpv4MappedPrefix, sizeof(kIpv4MappedPrefix)) != 0) {
+            return false;
+        }
+        source += sizeof(kIpv4MappedPrefix);
+    } else if (address_size != 4) {
+        return false;
+    }
+    std::memcpy(ipv4, source, 4);
+    return true;
+}
+
+bool deck_setup_http_address_is_setup_gateway(
+    const uint8_t *local_address,
+    size_t local_address_size
+)
+{
+    uint8_t local_ipv4[4]{};
+    if (!deck_setup_http_extract_ipv4(
+            local_address,
+            local_address_size,
+            local_ipv4
+        )) {
+        return false;
+    }
+    constexpr uint8_t kSetupGateway[] = {192, 168, 4, 1};
+    return std::memcmp(local_ipv4, kSetupGateway, sizeof(kSetupGateway)) == 0;
 }
 
 bool deck_setup_http_convert_scan_results(
@@ -520,6 +566,31 @@ deck_setup_companion_request_result_t deck_setup_http_parse_companion_pair_reque
         return DECK_SETUP_COMPANION_REQUEST_INVALID_ADDRESS;
     }
     return DECK_SETUP_COMPANION_REQUEST_OK;
+}
+
+bool deck_setup_http_parse_pair_ack_request(
+    const char *body,
+    size_t body_size,
+    uint8_t response_ack[DECK_SETUP_PAIR_ACK_SIZE]
+)
+{
+    constexpr char kPrefix[] = "response_ack=";
+    constexpr size_t kHexSize = 32;
+    if (body == nullptr || response_ack == nullptr ||
+        body_size != sizeof(kPrefix) - 1 + kHexSize ||
+        std::memcmp(body, kPrefix, sizeof(kPrefix) - 1) != 0) {
+        return false;
+    }
+    for (size_t index = 0; index < DECK_SETUP_PAIR_ACK_SIZE; ++index) {
+        const int high = hex_value(body[sizeof(kPrefix) - 1 + index * 2]);
+        const int low = hex_value(body[sizeof(kPrefix) + index * 2]);
+        if (high < 0 || low < 0) {
+            std::memset(response_ack, 0, DECK_SETUP_PAIR_ACK_SIZE);
+            return false;
+        }
+        response_ack[index] = static_cast<uint8_t>((high << 4) | low);
+    }
+    return true;
 }
 
 bool deck_setup_http_parse_companion_profile_request(

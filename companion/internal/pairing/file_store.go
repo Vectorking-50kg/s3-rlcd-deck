@@ -180,6 +180,18 @@ func (store *FileStore) LookupTrust(ctx context.Context, deviceID string) (Store
 	return trust, nil
 }
 
+func (store *FileStore) ListTrusts(ctx context.Context) ([]StoredTrust, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	if store.lock == nil {
+		return nil, errors.New("pairing store is closed")
+	}
+	return sortedTrusts(store.state.Trusts), nil
+}
+
 func (store *FileStore) RevokeTrust(ctx context.Context, deviceID string, now time.Time) error {
 	return store.update(ctx, func(state *fileStoreState) error {
 		if _, found := state.Trusts[deviceID]; !found {

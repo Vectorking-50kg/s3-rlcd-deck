@@ -20,7 +20,7 @@ deck_companion_server_message_result_t deck_companion_link_accept_server_message
             previous_server_monotonic_ms,
             has_previous_server_monotonic,
             heartbeat
-        )) {
+        ) == DECK_DEVICE_HEARTBEAT_VALID) {
         return DECK_COMPANION_SERVER_HEARTBEAT;
     }
     const deck_ai_snapshot_store_update_result_t update =

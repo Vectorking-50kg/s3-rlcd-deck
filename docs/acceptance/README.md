@@ -1,5 +1,9 @@
 # M0 acceptance evidence
 
+M1 Pairing and Device Link acceptance is defined separately in `m1.md` and
+`m1-manifest.json`. Its real-Deck transaction is run by `tools/m1_acceptance.py`; it does not
+replace the M0 duration gates below.
+
 `m0.md` is the version-controlled single source of truth for M0 release acceptance. It is
 generated from `m0-manifest.json` and remains `BLOCKED` until all three evidence records are
 present and independently pass validation:

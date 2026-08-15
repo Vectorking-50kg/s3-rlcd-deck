@@ -1,6 +1,7 @@
 #include "deck_setup_service.h"
 
 #include "deck_setup_command_queue.h"
+#include "deck_setup_response_barrier.h"
 
 #include "deck_setup_http.h"
 #include "deck_setup_confirmation.h"
@@ -35,6 +36,8 @@
 
 namespace {
 
+static_assert(DECK_SETUP_PAIR_ACK_SIZE == DECK_SETUP_RESPONSE_ACK_SIZE);
+
 constexpr EventBits_t kProfilesReadyBit = BIT4;
 constexpr EventBits_t kProfilesFailedBit = BIT5;
 
@@ -47,6 +50,7 @@ constexpr uint32_t kPublisherTaskStackBytes = 4'096;
 constexpr UBaseType_t kPublisherTaskPriority = 1;
 constexpr TickType_t kServicePollTicks = pdMS_TO_TICKS(100);
 constexpr TickType_t kWifiEventTimeoutTicks = pdMS_TO_TICKS(2'000);
+constexpr uint64_t kPairResponseTimeoutMs = 2'000;
 constexpr size_t kErrorStageCapacity = 24;
 constexpr EventBits_t kApStartedBit = BIT0;
 constexpr EventBits_t kApStoppedBit = BIT1;
@@ -161,6 +165,7 @@ struct deck_setup_service {
     std::atomic<bool> suppress_disconnect{false};
     std::atomic<bool> command_overflow{false};
     std::atomic<bool> accepting_commands{false};
+    deck_setup_response_barrier_t *pair_response_barrier;
 };
 
 namespace {
@@ -282,6 +287,32 @@ bool enqueue_command(deck_setup_service_t *service, const Command &command)
     if (service->service_task != nullptr) {
         xTaskNotifyGive(service->service_task);
     }
+    return true;
+}
+
+bool wait_for_pair_response(
+    deck_setup_service_t *service,
+    uint32_t response_generation
+)
+{
+    const uint64_t deadline_ms = monotonic_ms() + kPairResponseTimeoutMs;
+    while (!deck_setup_response_barrier_is_complete(
+        service->pair_response_barrier,
+        response_generation
+    )) {
+        const uint64_t now_ms = monotonic_ms();
+        if (now_ms >= deadline_ms) {
+            return false;
+        }
+        (void)ulTaskNotifyTake(
+            pdTRUE,
+            pdMS_TO_TICKS(static_cast<uint32_t>(deadline_ms - now_ms))
+        );
+    }
+    deck_setup_response_barrier_release(
+        service->pair_response_barrier,
+        response_generation
+    );
     return true;
 }
 
@@ -668,6 +699,11 @@ esp_err_t wifi_clear_confirm_handler(httpd_req_t *request)
     }
 }
 
+bool extract_ipv4_address(
+    const sockaddr_storage &socket_address,
+    uint8_t ipv4[4]
+);
+
 esp_err_t companion_pair_handler(httpd_req_t *request)
 {
     auto *service = static_cast<deck_setup_service_t *>(request->user_ctx);
@@ -709,6 +745,7 @@ esp_err_t companion_pair_handler(httpd_req_t *request)
     const int socket_fd = httpd_req_to_sockfd(request);
     uint16_t hub_port = 0;
     char peer_ip[INET_ADDRSTRLEN]{};
+    uint8_t peer_ipv4[4]{};
     const bool peer_valid =
         socket_fd >= 0 &&
         getpeername(
@@ -716,10 +753,10 @@ esp_err_t companion_pair_handler(httpd_req_t *request)
             reinterpret_cast<sockaddr *>(&peer_address),
             &peer_size
         ) == 0 &&
-        peer_address.ss_family == AF_INET &&
+        extract_ipv4_address(peer_address, peer_ipv4) &&
         inet_ntop(
             AF_INET,
-            &reinterpret_cast<sockaddr_in *>(&peer_address)->sin_addr,
+            peer_ipv4,
             peer_ip,
             sizeof(peer_ip)
         ) != nullptr &&
@@ -742,14 +779,99 @@ esp_err_t companion_pair_handler(httpd_req_t *request)
         httpd_resp_set_status(request, "400 Bad Request");
         return send_json(request, "{\"accepted\":false,\"error\":\"invalid_peer\"}");
     }
-    const bool queued = deck_setup_service_pair_companion(service, &pair_request);
+    Command command{};
+    command.type = CommandType::pair_companion;
+    command.companion_pair = pair_request;
+    uint8_t response_ack[DECK_SETUP_RESPONSE_ACK_SIZE];
+    fill_random(nullptr, response_ack, sizeof(response_ack));
+    uint32_t peer_id = 0;
+    std::memcpy(&peer_id, peer_ipv4, sizeof(peer_id));
+    command.response_generation = deck_setup_response_barrier_issue(
+        service->pair_response_barrier,
+        peer_id,
+        response_ack
+    );
+    const bool queued = command.response_generation != 0 &&
+                        enqueue_command(service, command);
+    if (!queued && command.response_generation != 0) {
+        deck_setup_response_barrier_release(
+            service->pair_response_barrier,
+            command.response_generation
+        );
+    }
     secure_clear(reinterpret_cast<char *>(&pair_request), sizeof(pair_request));
+    secure_clear(
+        reinterpret_cast<char *>(&command.companion_pair),
+        sizeof(command.companion_pair)
+    );
     if (!queued) {
+        secure_clear(reinterpret_cast<char *>(response_ack), sizeof(response_ack));
         httpd_resp_set_status(request, "503 Service Unavailable");
         return send_json(request, "{\"accepted\":false,\"error\":\"busy\"}");
     }
     httpd_resp_set_status(request, "202 Accepted");
-    return send_json(request, "{\"accepted\":true,\"state\":\"queued\"}");
+    char response[96] = "{\"accepted\":true,\"state\":\"queued\",\"response_ack\":\"";
+    constexpr char kHex[] = "0123456789abcdef";
+    size_t response_size = std::strlen(response);
+    for (size_t index = 0; index < sizeof(response_ack); ++index) {
+        response[response_size++] = kHex[response_ack[index] >> 4U];
+        response[response_size++] = kHex[response_ack[index] & 0x0fU];
+    }
+    response[response_size++] = '"';
+    response[response_size++] = '}';
+    response[response_size] = '\0';
+    secure_clear(reinterpret_cast<char *>(response_ack), sizeof(response_ack));
+    const esp_err_t result = send_json(request, response);
+    secure_clear(response, sizeof(response));
+    return result;
+}
+
+esp_err_t companion_pair_ack_handler(httpd_req_t *request)
+{
+    auto *service = static_cast<deck_setup_service_t *>(request->user_ctx);
+    if (!mark_activity(service)) {
+        httpd_resp_set_status(request, "503 Service Unavailable");
+        return send_json(request, "{\"accepted\":false,\"error\":\"setup_inactive\"}");
+    }
+    char body[48];
+    size_t received = 0;
+    uint8_t response_ack[DECK_SETUP_RESPONSE_ACK_SIZE]{};
+    if (!receive_body(request, body, sizeof(body), &received) ||
+        !deck_setup_http_parse_pair_ack_request(body, received, response_ack)) {
+        secure_clear(body, sizeof(body));
+        secure_clear(reinterpret_cast<char *>(response_ack), sizeof(response_ack));
+        httpd_resp_set_status(request, "400 Bad Request");
+        return send_json(request, "{\"accepted\":false,\"error\":\"malformed\"}");
+    }
+    secure_clear(body, sizeof(body));
+    sockaddr_storage peer_address{};
+    socklen_t peer_size = sizeof(peer_address);
+    const int socket_fd = httpd_req_to_sockfd(request);
+    uint8_t peer_ipv4[4]{};
+    if (socket_fd < 0 ||
+        getpeername(socket_fd, reinterpret_cast<sockaddr *>(&peer_address), &peer_size) != 0 ||
+        !extract_ipv4_address(peer_address, peer_ipv4)) {
+        secure_clear(reinterpret_cast<char *>(response_ack), sizeof(response_ack));
+        httpd_resp_set_status(request, "400 Bad Request");
+        return send_json(request, "{\"accepted\":false,\"error\":\"invalid_peer\"}");
+    }
+    uint32_t peer_id = 0;
+    std::memcpy(&peer_id, peer_ipv4, sizeof(peer_id));
+    if (!deck_setup_response_barrier_acknowledge(
+            service->pair_response_barrier,
+            peer_id,
+            response_ack
+        )) {
+        secure_clear(reinterpret_cast<char *>(response_ack), sizeof(response_ack));
+        httpd_resp_set_status(request, "409 Conflict");
+        return send_json(request, "{\"accepted\":false,\"error\":\"not_pending\"}");
+    }
+    secure_clear(reinterpret_cast<char *>(response_ack), sizeof(response_ack));
+    if (service->service_task != nullptr) {
+        xTaskNotifyGive(service->service_task);
+    }
+    httpd_resp_set_status(request, "202 Accepted");
+    return send_json(request, "{\"accepted\":true,\"state\":\"acknowledged\"}");
 }
 
 esp_err_t companion_profile_handler(httpd_req_t *request, bool revoke)
@@ -795,6 +917,25 @@ esp_err_t companion_select_handler(httpd_req_t *request)
 esp_err_t companion_revoke_handler(httpd_req_t *request)
 {
     return companion_profile_handler(request, true);
+}
+
+bool extract_ipv4_address(
+    const sockaddr_storage &socket_address,
+    uint8_t ipv4[4]
+)
+{
+    const uint8_t *address = nullptr;
+    size_t address_size = 0;
+    if (socket_address.ss_family == AF_INET) {
+        const auto *ipv4_address = reinterpret_cast<const sockaddr_in *>(&socket_address);
+        address = reinterpret_cast<const uint8_t *>(&ipv4_address->sin_addr.s_addr);
+        address_size = sizeof(ipv4_address->sin_addr.s_addr);
+    } else if (socket_address.ss_family == AF_INET6) {
+        const auto *ipv6_address = reinterpret_cast<const sockaddr_in6 *>(&socket_address);
+        address = reinterpret_cast<const uint8_t *>(&ipv6_address->sin6_addr);
+        address_size = sizeof(ipv6_address->sin6_addr);
+    }
+    return deck_setup_http_extract_ipv4(address, address_size, ipv4);
 }
 
 esp_err_t companion_priority_handler(httpd_req_t *request)
@@ -844,11 +985,13 @@ esp_err_t accept_ap_session(httpd_handle_t, int socket_fd)
             socket_fd,
             reinterpret_cast<sockaddr *>(&local_address),
             &address_size
-        ) != 0 || local_address.ss_family != AF_INET) {
+        ) != 0) {
         return ESP_FAIL;
     }
-    const auto *ipv4 = reinterpret_cast<const sockaddr_in *>(&local_address);
-    return ipv4->sin_addr.s_addr == inet_addr("192.168.4.1") ? ESP_OK : ESP_FAIL;
+    uint8_t local_ipv4[4]{};
+    return extract_ipv4_address(local_address, local_ipv4) &&
+                   deck_setup_http_address_is_setup_gateway(local_ipv4, sizeof(local_ipv4))
+               ? ESP_OK : ESP_FAIL;
 }
 
 using HttpHandler = esp_err_t (*)(httpd_req_t *);
@@ -872,6 +1015,8 @@ HttpHandler handler_for_route(deck_setup_http_route_t route)
             return wifi_clear_confirm_handler;
         case DECK_SETUP_HTTP_COMPANION_PAIR:
             return companion_pair_handler;
+        case DECK_SETUP_HTTP_COMPANION_PAIR_ACK:
+            return companion_pair_ack_handler;
         case DECK_SETUP_HTTP_COMPANION_SELECT:
             return companion_select_handler;
         case DECK_SETUP_HTTP_COMPANION_PRIORITY:
@@ -1549,6 +1694,18 @@ void service_task(void *task_context)
                         sizeof(command.companion_pair)
                     );
                     if (result == DECK_COMPANION_PAIR_PAIRED) {
+                        const bool response_complete = wait_for_pair_response(
+                            service,
+                            command.response_generation
+                        );
+                        if (!response_complete) {
+                            deck_setup_response_barrier_release(
+                                service->pair_response_barrier,
+                                command.response_generation
+                            );
+                            notify(service, DECK_SETUP_SERVICE_ERROR, "pair_response");
+                            break;
+                        }
                         if (xSemaphoreTake(service->state_mutex, portMAX_DELAY) == pdTRUE) {
                             (void)deck_setup_mode_stop(service->mode);
                             xSemaphoreGive(service->state_mutex);
@@ -1562,6 +1719,10 @@ void service_task(void *task_context)
                         );
                         break;
                     }
+                    deck_setup_response_barrier_release(
+                        service->pair_response_barrier,
+                        command.response_generation
+                    );
                     const bool storage_failure =
                         result == DECK_COMPANION_PAIR_STORAGE_FAILURE;
                     notify(
@@ -1681,6 +1842,7 @@ void release_unstarted(deck_setup_service_t *service)
     if (service->commands != nullptr) {
         deck_setup_command_queue_destroy(service->commands);
     }
+    deck_setup_response_barrier_destroy(service->pair_response_barrier);
     if (service->notifications != nullptr) {
         vQueueDelete(service->notifications);
     }
@@ -1717,6 +1879,9 @@ deck_setup_service_t *deck_setup_service_start(
     // A BOOT request means "enter now" rather than "enter N times". Coalesce
     // repeated notifications while the service task is busy with a scan or restart.
     service->commands = deck_setup_command_queue_create();
+    service->pair_response_barrier = deck_setup_response_barrier_create(
+        DECK_SETUP_COMMAND_QUEUE_CAPACITY
+    );
     // State publication is latest-only: a slow external callback must not leave
     // stale credentials or ACTIVE state queued ahead of the terminal state.
     service->notifications = xQueueCreate(1, sizeof(ServiceNotification));
@@ -1736,7 +1901,8 @@ deck_setup_service_t *deck_setup_service_start(
         &confirmation_options
     );
     if (service->state_mutex == nullptr || service->network_mutex == nullptr ||
-        service->commands == nullptr || service->notifications == nullptr ||
+        service->commands == nullptr || service->pair_response_barrier == nullptr ||
+        service->notifications == nullptr ||
         service->wifi_events == nullptr || service->mode == nullptr ||
         service->clear_confirmation == nullptr) {
         release_unstarted(service);
@@ -1832,38 +1998,6 @@ bool deck_setup_service_submit_temperature_offset(
     command.type = CommandType::submit_temperature_offset;
     command.temperature_offset_tenths_c = temperature_offset_tenths_c;
     return enqueue_command(service, command);
-}
-
-bool deck_setup_service_pair_companion(
-    deck_setup_service_t *service,
-    const deck_companion_pair_request_t *request
-)
-{
-    if (service == nullptr || request == nullptr ||
-        strnlen(request->hub_address, sizeof(request->hub_address)) >=
-            sizeof(request->hub_address) ||
-        strnlen(request->code, sizeof(request->code)) >= sizeof(request->code) ||
-        !service->accepting_commands.load(std::memory_order_acquire)) {
-        return false;
-    }
-    deck_setup_snapshot_t setup{};
-    if (xSemaphoreTake(service->state_mutex, portMAX_DELAY) != pdTRUE) {
-        return false;
-    }
-    const bool setup_active = snapshot_locked(service, &setup) && setup.active;
-    xSemaphoreGive(service->state_mutex);
-    if (!setup_active) {
-        return false;
-    }
-    Command command{};
-    command.type = CommandType::pair_companion;
-    command.companion_pair = *request;
-    const bool queued = enqueue_command(service, command);
-    secure_clear(
-        reinterpret_cast<char *>(&command.companion_pair),
-        sizeof(command.companion_pair)
-    );
-    return queued;
 }
 
 namespace {

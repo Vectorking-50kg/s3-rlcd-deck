@@ -90,6 +90,15 @@ func (store *MemoryStore) LookupTrust(_ context.Context, deviceID string) (Store
 	return trust, nil
 }
 
+func (store *MemoryStore) ListTrusts(ctx context.Context) ([]StoredTrust, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	return sortedTrusts(store.trusts), nil
+}
+
 func (store *MemoryStore) RevokeTrust(_ context.Context, deviceID string, _ time.Time) error {
 	store.mu.Lock()
 	defer store.mu.Unlock()

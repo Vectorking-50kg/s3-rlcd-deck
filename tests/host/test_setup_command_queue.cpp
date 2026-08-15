@@ -26,6 +26,7 @@ deck_setup_command_t companion_command(size_t index)
     }
     command.temperature_offset_tenths_c = static_cast<int16_t>(index);
     command.companion_priority = static_cast<int32_t>(index) - 400;
+    command.response_generation = static_cast<uint32_t>(index + 1);
     return command;
 }
 
@@ -54,6 +55,7 @@ void concurrent_setup_producers_use_the_production_bounded_queue()
                 assert(command.companion_priority >= -400);
                 assert(command.companion_priority < 400);
             }
+            assert(command.response_generation != 0);
             deck_setup_command_clear(&command);
             ++consumed;
         }
@@ -95,6 +97,7 @@ void full_queue_fails_closed_without_overwriting_secrets()
         deck_setup_command_t command{};
         assert(deck_setup_command_queue_try_receive(queue, &command));
         assert(command.temperature_offset_tenths_c == static_cast<int16_t>(index));
+        assert(command.response_generation == index + 1);
         deck_setup_command_clear(&command);
     }
     deck_setup_command_queue_destroy(queue);

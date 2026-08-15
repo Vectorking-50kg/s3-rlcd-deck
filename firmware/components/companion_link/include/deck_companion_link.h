@@ -21,6 +21,17 @@ typedef enum {
     DECK_COMPANION_LINK_ONLINE,
 } deck_companion_link_state_t;
 
+typedef enum {
+    DECK_COMPANION_LINK_ERROR_NONE = 0,
+    DECK_COMPANION_LINK_ERROR_TRANSPORT,
+    DECK_COMPANION_LINK_ERROR_TLS_PIN_MISMATCH,
+    DECK_COMPANION_LINK_ERROR_AUTH_REJECTED,
+    DECK_COMPANION_LINK_ERROR_PROTOCOL_MAJOR_REJECTED,
+    DECK_COMPANION_LINK_ERROR_PROTOCOL_INVALID,
+    DECK_COMPANION_LINK_ERROR_HEARTBEAT_TIMEOUT,
+    DECK_COMPANION_LINK_ERROR_INTERNAL,
+} deck_companion_link_error_t;
+
 typedef struct {
     deck_companion_link_state_t state;
     bool has_active_profile;
@@ -30,6 +41,8 @@ typedef struct {
     uint32_t profile_generation;
     uint32_t reconnect_attempts;
     uint32_t error_count;
+    deck_companion_link_error_t last_error;
+    uint32_t error_generation;
     uint64_t last_heartbeat_monotonic_ms;
     bool has_trusted_utc;
     uint64_t trusted_utc_ms;

@@ -33,6 +33,7 @@ fi
 
 build_directory="$repository_root/build/$variant"
 defaults="sdkconfig.defaults;sdkconfig.defaults.$variant"
+firmware_commit="$(git -C "$repository_root" rev-parse HEAD)"
 
 # Generated sdkconfig files are disposable. Recreate them from the committed defaults on
 # every invocation so a variant cannot retain values from an older baseline.
@@ -42,6 +43,7 @@ exec idf.py \
     -C "$repository_root/firmware" \
     -B "$build_directory" \
     -DIDF_TARGET=esp32s3 \
+    -DDECK_FIRMWARE_COMMIT="$firmware_commit" \
     -DSDKCONFIG="$build_directory/sdkconfig" \
     -DSDKCONFIG_DEFAULTS="$defaults" \
     "$@"
