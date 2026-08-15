@@ -1,16 +1,26 @@
 package runtime
 
 import (
+	"context"
+	"errors"
 	"net"
-	"sort"
+	"net/netip"
 	"strconv"
 	"strings"
 )
 
-type advertisedIPv4Candidate struct {
-	name  string
-	flags net.Flags
-	ip    net.IP
+var reservedAdvertisedIPv4Prefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("127.0.0.0/8"),
+	netip.MustParsePrefix("169.254.0.0/16"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("192.88.99.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("224.0.0.0/4"),
+	netip.MustParsePrefix("240.0.0.0/4"),
 }
 
 func validAdvertisedDeviceHubAddress(address string) bool {
@@ -44,91 +54,94 @@ func resolveDeviceHubAdvertisedAddress(boundAddress string, configured string, r
 	return net.JoinHostPort(routeIP.String(), port)
 }
 
-func usableAdvertisedIPv4(ip net.IP) bool {
-	ipv4 := ip.To4()
-	return ipv4 != nil && !ipv4.IsUnspecified() && !ipv4.IsLoopback() &&
-		!ipv4.IsMulticast() && !ipv4.IsLinkLocalUnicast()
-}
-
-func preferredAdvertisedIPv4() net.IP {
-	interfaces, err := net.Interfaces()
+func liveDeviceHubAdvertisedAddress(ctx context.Context, boundAddress string, configured string) string {
+	if configured != "" {
+		return resolveDeviceHubAdvertisedAddress(boundAddress, configured, nil)
+	}
+	host, _, err := net.SplitHostPort(boundAddress)
 	if err != nil {
-		return nil
+		return ""
 	}
-	candidates := make([]advertisedIPv4Candidate, 0, len(interfaces))
-	for _, networkInterface := range interfaces {
-		addresses, addressErr := networkInterface.Addrs()
-		if addressErr != nil {
-			continue
-		}
-		for _, address := range addresses {
-			var ip net.IP
-			switch value := address.(type) {
-			case *net.IPNet:
-				ip = value.IP
-			case *net.IPAddr:
-				ip = value.IP
-			}
-			if ip != nil {
-				candidates = append(candidates, advertisedIPv4Candidate{
-					name: networkInterface.Name, flags: networkInterface.Flags, ip: ip,
-				})
-			}
-		}
+	boundIP := net.ParseIP(host)
+	if usableAdvertisedIPv4(boundIP) {
+		return resolveDeviceHubAdvertisedAddress(boundAddress, "", nil)
 	}
-	return chooseAdvertisedIPv4(candidates)
+	if boundIP == nil || !boundIP.IsUnspecified() {
+		return ""
+	}
+	routeIP, err := defaultRouteIPv4(ctx)
+	if err != nil {
+		return ""
+	}
+	return resolveDeviceHubAdvertisedAddress(boundAddress, "", routeIP)
 }
 
-func chooseAdvertisedIPv4(candidates []advertisedIPv4Candidate) net.IP {
-	type rankedCandidate struct {
-		score int
-		name  string
-		ip    net.IP
+func usableAdvertisedIPv4(ip net.IP) bool {
+	address, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return false
 	}
-	ranked := make([]rankedCandidate, 0, len(candidates))
-	for _, candidate := range candidates {
-		if candidate.flags&net.FlagUp == 0 || candidate.flags&(net.FlagLoopback|net.FlagPointToPoint) != 0 ||
-			!usableAdvertisedIPv4(candidate.ip) || benchmarkIPv4(candidate.ip) {
-			continue
-		}
-		name := strings.ToLower(candidate.name)
-		if strings.HasPrefix(name, "utun") || strings.HasPrefix(name, "tun") ||
-			strings.HasPrefix(name, "tap") || strings.HasPrefix(name, "docker") ||
-			strings.HasPrefix(name, "veth") || strings.HasPrefix(name, "br-") ||
-			strings.HasPrefix(name, "bridge") || strings.HasPrefix(name, "tailscale") ||
-			strings.HasPrefix(name, "awdl") || strings.HasPrefix(name, "llw") {
-			continue
-		}
-		score := 10
-		if candidate.ip.IsPrivate() {
-			score += 100
-		}
-		if name == "en0" || strings.HasPrefix(name, "eth") || strings.HasPrefix(name, "enp") ||
-			strings.HasPrefix(name, "eno") || strings.HasPrefix(name, "ens") ||
-			strings.HasPrefix(name, "wlan") || strings.HasPrefix(name, "wlp") ||
-			strings.Contains(name, "ethernet") || strings.Contains(name, "wi-fi") ||
-			strings.Contains(name, "wifi") {
-			score += 200
-		}
-		ipv4 := append(net.IP(nil), candidate.ip.To4()...)
-		ranked = append(ranked, rankedCandidate{score: score, name: name, ip: ipv4})
+	address = address.Unmap()
+	if !address.Is4() || !address.IsGlobalUnicast() {
+		return false
 	}
-	if len(ranked) == 0 {
-		return nil
+	for _, prefix := range reservedAdvertisedIPv4Prefixes {
+		if prefix.Contains(address) {
+			return false
+		}
 	}
-	sort.Slice(ranked, func(left, right int) bool {
-		if ranked[left].score != ranked[right].score {
-			return ranked[left].score > ranked[right].score
-		}
-		if ranked[left].name != ranked[right].name {
-			return ranked[left].name < ranked[right].name
-		}
-		return ranked[left].ip.String() < ranked[right].ip.String()
-	})
-	return ranked[0].ip
+	return true
 }
 
-func benchmarkIPv4(ip net.IP) bool {
-	ipv4 := ip.To4()
-	return ipv4 != nil && ipv4[0] == 198 && (ipv4[1] == 18 || ipv4[1] == 19)
+func defaultRouteIPv4(ctx context.Context) (net.IP, error) {
+	networkInterface, err := platformDefaultRouteInterface(ctx)
+	if err != nil || networkInterface == nil {
+		return nil, errors.New("default route is unavailable")
+	}
+	if networkInterface.Flags&net.FlagUp == 0 ||
+		networkInterface.Flags&net.FlagBroadcast == 0 ||
+		networkInterface.Flags&(net.FlagLoopback|net.FlagPointToPoint) != 0 ||
+		len(networkInterface.HardwareAddr) < 6 {
+		return nil, errors.New("default route is not a physical LAN interface")
+	}
+	addresses, err := networkInterface.Addrs()
+	if err != nil {
+		return nil, err
+	}
+	var selected net.IP
+	for _, address := range addresses {
+		var ip net.IP
+		switch value := address.(type) {
+		case *net.IPNet:
+			ip = value.IP
+		case *net.IPAddr:
+			ip = value.IP
+		}
+		if !usableAdvertisedIPv4(ip) {
+			continue
+		}
+		if selected != nil && !selected.Equal(ip) {
+			return nil, errors.New("default route has ambiguous IPv4 addresses")
+		}
+		selected = append(net.IP(nil), ip.To4()...)
+	}
+	if selected == nil {
+		return nil, errors.New("default route has no usable IPv4 address")
+	}
+	return selected, nil
+}
+
+func parseDefaultRouteInterface(output string) (string, bool) {
+	var selected string
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || fields[0] != "interface:" {
+			continue
+		}
+		if selected != "" && selected != fields[1] {
+			return "", false
+		}
+		selected = fields[1]
+	}
+	return selected, selected != ""
 }

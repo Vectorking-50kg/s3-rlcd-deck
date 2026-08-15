@@ -3,7 +3,7 @@
 const state = {
   csrf: "", bootstrap: null, console: null, providers: [], templates: [], providerStates: [], history: [],
   editing: "", backup: null, page: "overview", providerFilter: "all", deckIndex: 0,
-  authenticated: false, refreshTimer: null,
+  authenticated: false, refreshTimer: null, authEpoch: 0, authController: new AbortController(),
   sync: {
     console: { lastSuccess: "", error: "" },
     providers: { lastSuccess: "", error: "" },
@@ -41,6 +41,7 @@ const domainConfig = {
 const errorMessages = new Map([
   ["forbidden", "请求来源未通过安全检查。"], ["not found", "请求的功能不存在。"],
   ["pairing code unavailable", "暂时无法生成配对码。"], ["Provider history unavailable", "用量历史当前不可用。"],
+  ["Device Hub advertised address unavailable", "无法确认当前默认局域网路由；请配置 --device-hub-advertised-address IP:port 后重试。"],
   ["invalid Provider history query", "历史记录筛选条件无效。"], ["invalid Provider history request", "历史记录请求无效。"],
   ["Provider history settings unavailable", "无法保存历史记录设置。"], ["malformed Provider history settings", "历史记录设置格式无效。"],
   ["Provider management unavailable", "Provider 管理当前不可用。"], ["malformed Provider request", "Provider 配置格式无效。"],
@@ -114,8 +115,10 @@ async function request(path, options = {}) {
   }
   let response;
   try {
-    response = await fetch(path, { cache: "no-store", credentials: "same-origin", ...options, method, headers });
-  } catch (_) {
+    response = await fetch(path, { cache: "no-store", credentials: "same-origin", ...options, method, headers,
+      signal: options.signal || state.authController.signal });
+  } catch (error) {
+    if (error?.name === "AbortError") throw error;
     throw new Error("无法连接 Companion，请检查本机服务后重试。");
   }
   if (!response.ok) {
@@ -124,6 +127,20 @@ async function request(path, options = {}) {
     throw new Error(translatedError(detail, response.status));
   }
   return response;
+}
+
+function rotateAuthScope() {
+  state.authController.abort();
+  state.authController = new AbortController();
+  state.authEpoch += 1;
+}
+
+function authenticatedOperation() {
+  return { epoch: state.authEpoch, signal: state.authController.signal };
+}
+
+function operationIsCurrent(operation) {
+  return state.authenticated && !operation.signal.aborted && operation.epoch === state.authEpoch;
 }
 
 function bytesBase64(value) {
@@ -223,6 +240,10 @@ function openMobileNavigation() {
 }
 
 function navigate(page, updateHash = true) {
+  if (page === "provider-editor" && !providerDataWritable()) {
+    page = "providers";
+    if (state.sync.providers.error) providerConfigurationIsFresh(true);
+  }
   const config = pageConfig[page] || pageConfig.overview;
   page = pageConfig[page] ? page : "overview";
   state.page = page;
@@ -278,6 +299,7 @@ function scrubSensitiveState() {
 }
 
 function showLogin(detail = "", isError = false) {
+  rotateAuthScope();
   state.authenticated = false;
   state.csrf = "";
   if (state.refreshTimer) window.clearInterval(state.refreshTimer);
@@ -291,6 +313,7 @@ function showLogin(detail = "", isError = false) {
 }
 
 async function authenticate(csrf) {
+  rotateAuthScope();
   state.csrf = csrf;
   state.authenticated = true;
   $("#login-view").hidden = true;
@@ -355,12 +378,14 @@ function renderConsole() {
   setText("#runtime-version", runtime.version || state.bootstrap?.version || "Companion");
   setPill($("#companion-badge"), stale ? "Companion 数据已过期" : `Companion ${runtimeLabel(runtime.state)}`,
     stale ? "warning" : statusClass(runtime.state));
-  setPill($("#deck-badge"), `Deck ${runtime.connected_decks ?? 0}`, runtime.connected_decks > 0 ? "success" : "neutral");
-  setText("#metric-decks", runtime.connected_decks ?? 0);
-  setText("#metric-providers", providers.length ? `${healthy}/${providers.length}` : "0");
-  setText("#metric-provider-detail", providers.length ? `${providers.length - healthy} 个需要关注` : "尚无规范化快照");
-  setText("#metric-sessions", sessions.length);
-  setText("#metric-history", runtime.history_available ? (runtime.history_enabled ? "已开启" : "已关闭") : "不可用");
+  setPill($("#deck-badge"), stale ? "Deck 状态已过期" : `Deck ${runtime.connected_decks ?? 0}`,
+    stale ? "warning" : runtime.connected_decks > 0 ? "success" : "neutral");
+  setText("#metric-decks", stale ? "—" : runtime.connected_decks ?? 0);
+  setText("#metric-providers", stale ? "—" : providers.length ? `${healthy}/${providers.length}` : "0");
+  setText("#metric-provider-detail", stale ? "Provider 状态已过期" :
+    providers.length ? `${providers.length - healthy} 个需要关注` : "尚无规范化快照");
+  setText("#metric-sessions", stale ? "—" : sessions.length);
+  setText("#metric-history", stale ? "已过期" : runtime.history_available ? (runtime.history_enabled ? "已开启" : "已关闭") : "不可用");
   $("#lan-warning").hidden = !runtime.lan_management_enabled;
   setText("#lan-warning-text", runtime.security_warning ? "当前监听入口不只限于本机，请确认网络可信。" : "请确认只在可信网络中使用。");
   setText("#context-health", stale ? "运行状态已过期" : runtimeReady ? "系统运行正常" : `系统${runtimeLabel(runtime.state)}`);
@@ -410,7 +435,9 @@ function renderOverviewSessions(sessions) {
       copy.append(element("strong", "", session.display_name || "未命名会话"),
         element("small", "", `${formatRelative(session.last_activity_at)} · ${formatTokens(session.turn_tokens)} Token`));
       const pill = element("span");
-      setPill(pill, sessionStateLabel(session.state), session.state === "failed" ? "danger" : session.state === "running" ? "success" : "neutral");
+      const stale = Boolean(state.sync.console.error);
+      setPill(pill, stale ? "已过期" : sessionStateLabel(session.state),
+        stale ? "warning" : session.state === "failed" ? "danger" : session.state === "running" ? "success" : "neutral");
       row.append(element("span", "summary-avatar", initials(session.display_name || "会话")), copy, pill);
       target.append(row);
     });
@@ -430,7 +457,7 @@ function renderSessions(sessions) {
   sessions.forEach((session) => {
     const row = element("tr");
     const context = session.context_used_basis_points == null ? "—" : `${(session.context_used_basis_points / 100).toFixed(0)}%`;
-    [session.display_name || "未命名会话", sessionStateLabel(session.state), confidenceLabel(session.confidence),
+    [session.display_name || "未命名会话", state.sync.console.error ? "已过期" : sessionStateLabel(session.state), confidenceLabel(session.confidence),
       formatDuration(session.duration_seconds), formatTokens(session.turn_tokens), context, sourceLabel(session.source)]
       .forEach((value) => row.append(element("td", "", value)));
     target.append(row);
@@ -438,40 +465,72 @@ function renderSessions(sessions) {
 }
 
 function renderRuntimeSurfaces(runtime, providers) {
+  const stale = Boolean(state.sync.console.error);
   const label = runtimeLabel(runtime.state);
   const exposure = runtime.lan_management_enabled ? "局域网" : "仅本机";
   const healthy = providers.filter((provider) => provider.status === "ok").length;
-  setText("#devices-count", runtime.connected_decks ?? 0);
-  setPill($("#devices-count-pill"), `${runtime.connected_decks ?? 0} 个在线`, runtime.connected_decks > 0 ? "success" : "neutral");
+  setText("#devices-count", stale ? "—" : runtime.connected_decks ?? 0);
+  setPill($("#devices-count-pill"), stale ? "状态已过期" : `${runtime.connected_decks ?? 0} 个在线`,
+    stale ? "warning" : runtime.connected_decks > 0 ? "success" : "neutral");
   setText("#management-address", runtime.management_address);
   setText("#device-hub-address", runtime.device_hub_address);
-  setText("#network-runtime-state", label);
-  setText("#network-decks", runtime.connected_decks ?? 0);
+  setText("#network-runtime-state", stale ? "已过期" : label);
+  setText("#network-decks", stale ? "—" : runtime.connected_decks ?? 0);
   setPill($("#network-exposure"), exposure, runtime.lan_management_enabled ? "warning" : "success");
-  setText("#system-runtime", label);
+  setText("#system-runtime", stale ? "已过期" : label);
   setText("#system-version", runtime.version);
   setText("#system-exposure", exposure);
   setText("#system-history", runtime.history_available ? (runtime.history_enabled ? "已开启" : "已关闭") : "不可用");
   const healthyText = state.sync.console.error ? "已过期" :
     runtime.state === "ready" && healthy === providers.length ? "正常" : "需关注";
   setPill($("#diagnostics-health"), healthyText, healthyText === "正常" ? "success" : "warning");
-  setText("#diagnostics-runtime", label);
-  setText("#diagnostics-providers", providers.length ? `${healthy}/${providers.length} 正常` : "尚无快照");
-  setText("#diagnostics-device-link", `${runtime.connected_decks ?? 0} 个 Deck 已连接`);
-  setText("#diagnostics-error", runtime.last_error ? "运行时报告了错误（详细信息仅保留在本机日志）" : "无");
-  setText("#tray-runtime", `Companion ${label}`);
-  setText("#tray-decks", `Deck ${runtime.connected_decks ?? 0}`);
+  setText("#diagnostics-runtime", stale ? "已过期" : label);
+  setText("#diagnostics-providers", stale ? `${providers.length} 条最后有效数据` :
+    providers.length ? `${healthy}/${providers.length} 正常` : "尚无快照");
+  setText("#diagnostics-device-link", stale ? "连接状态已过期" : `${runtime.connected_decks ?? 0} 个 Deck 已连接`);
+  setText("#diagnostics-error", stale ? "运行诊断已过期" :
+    runtime.last_error ? "运行时报告了错误（详细信息仅保留在本机日志）" : "无");
+  setText("#tray-runtime", stale ? "Companion 状态已过期" : `Companion ${label}`);
+  setText("#tray-decks", stale ? "Deck —" : `Deck ${runtime.connected_decks ?? 0}`);
   setText("#tray-clock", formatTime(new Date().toISOString(), false));
 }
 
 function updateCapabilityControls() {
   const capabilities = state.console?.capabilities || {};
   $$('[data-action="pair-deck"], #pair-deck').forEach((button) => { button.disabled = !capabilities.pairing; });
-  $("#new-provider").disabled = !capabilities.provider_management;
+  $("#new-provider").disabled = !providerDataWritable();
   $("#history-enabled").disabled = !capabilities.history;
   $("#save-history").disabled = !capabilities.history;
   $("#export-backup").disabled = !capabilities.backup;
   $("#preview-backup").disabled = !capabilities.backup;
+  updateProviderEditorControls();
+}
+
+function providerDataWritable() {
+  return Boolean(state.console?.capabilities?.provider_management) &&
+    Boolean(state.sync.providers.lastSuccess) && !state.sync.providers.error;
+}
+
+function providerConfigurationIsFresh(report = false) {
+  if (providerDataWritable()) return true;
+  if (report) {
+    const detail = state.sync.providers.error ? "Provider 配置已过期；请先刷新并确认最新配置。" :
+      "Provider 配置尚未就绪；请等待加载完成后重试。";
+    message(detail);
+    toast("操作已阻止", detail, true);
+  }
+  return false;
+}
+
+function updateProviderEditorControls() {
+  const available = providerDataWritable();
+  $$('[data-page="provider-editor"]').forEach((button) => { button.disabled = !available; });
+  const save = document.querySelector('[type="submit"][form="provider-form"]');
+  if (save) save.disabled = !available;
+  $("#test-provider").disabled = !available || !state.editing;
+  for (const control of $("#provider-form").elements) {
+    control.disabled = !available || (control.id === "provider-id" && Boolean(state.editing));
+  }
 }
 
 async function loadProviders() {
@@ -497,13 +556,20 @@ async function loadProviders() {
     resourceFeedback("providers");
     renderProviders();
     renderTemplates();
+    updateCapabilityControls();
   } catch (error) {
     state.sync.providers.error = error.message;
     const lastSuccess = state.sync.providers.lastSuccess;
     resourceFeedback("providers", lastSuccess ?
       `无法刷新 Provider；保留 ${formatTime(lastSuccess, false)} 的最后有效配置。` :
       "Provider 配置当前不可用，请重试。", true);
-    if (!lastSuccess) $("#provider-list").replaceChildren(emptyState("Provider 当前不可用", "请检查 Companion 后重试。"));
+    if (lastSuccess) {
+      renderProviders();
+      renderTemplates();
+    } else {
+      $("#provider-list").replaceChildren(emptyState("Provider 当前不可用", "请检查 Companion 后重试。"));
+    }
+    updateCapabilityControls();
   }
 }
 function providerRuntime(id) { return state.providerStates.find((provider) => provider.provider_id === id); }
@@ -516,6 +582,7 @@ function quotaSummary(provider) {
 }
 
 function renderProviders() {
+  const stale = Boolean(state.sync.providers.error);
   const target = $("#provider-list");
   target.replaceChildren();
   const visible = state.providers.filter((provider) => state.providerFilter === "all" ||
@@ -535,18 +602,19 @@ function renderProviders() {
     identity.append(element("h3", "", provider.display_name),
       element("p", "", `${provider.id} · 每 ${provider.refresh_minutes} 分钟${provider.experimental ? " · 实验性" : ""}`));
     const pill = element("span");
-    setPill(pill, providerStatusLabel(status), statusClass(status));
+    setPill(pill, stale ? "已过期" : providerStatusLabel(status), stale ? "warning" : statusClass(status));
     header.append(identity, pill);
     const metric = element("div", "provider-card-metric");
     metric.append(element("strong", "", runtime?.balance ? formatMoney(runtime.balance) : quotaSummary(runtime)),
-      element("span", "", runtime ? `${confidenceLabel(runtime.confidence)} · ${formatRelative(runtime.updated_at)}` : "等待首次采集"));
+      element("span", "", stale ? `最后有效 ${formatTime(state.sync.providers.lastSuccess, false)}` :
+        runtime ? `${confidenceLabel(runtime.confidence)} · ${formatRelative(runtime.updated_at)}` : "等待首次采集"));
     const actions = element("div", "provider-card-actions");
     [["上移", () => moveProvider(index, -1), index === 0], ["下移", () => moveProvider(index, 1), index === state.providers.length - 1],
       ["测试", () => testProvider(provider.id), false], ["编辑", () => openEditor(provider), false],
       ["删除", () => deleteProvider(provider), false, "danger"]].forEach(([label, action, disabled, kind]) => {
       const button = element("button", `button small${kind ? ` ${kind}` : ""}`, label);
       button.type = "button";
-      button.disabled = disabled;
+      button.disabled = disabled || stale;
       button.addEventListener("click", action);
       actions.append(button);
     });
@@ -563,6 +631,7 @@ function renderTemplates() {
   state.templates.forEach((template) => {
     const button = element("button", "template-chip", template.display_name);
     button.type = "button";
+    button.disabled = Boolean(state.sync.providers.error);
     button.addEventListener("click", () => openEditor(template));
     target.append(button);
   });
@@ -601,6 +670,7 @@ function renderHeaderRows(headers, suggestDefault) {
 }
 
 function openEditor(provider = null, shouldNavigate = true) {
+  if (!providerConfigurationIsFresh(true)) return;
   const saved = provider && state.providers.some((item) => item.id === provider.id);
   state.editing = saved ? provider.id : "";
   const value = provider || { request: { method: "GET", headers: [] }, mapping: {}, refresh_minutes: 5 };
@@ -623,8 +693,8 @@ function openEditor(provider = null, shouldNavigate = true) {
   $("#map-divisor").value = value.mapping?.balance_divisor || 1;
   $("#provider-body").value = value.request?.body ? JSON.stringify(value.request.body, null, 2) : "";
   $("#provider-experimental").checked = Boolean(value.experimental);
-  $("#test-provider").disabled = !saved;
   $("#test-preview-card").hidden = true;
+  updateProviderEditorControls();
   if (shouldNavigate) navigate("provider-editor");
 }
 
@@ -656,6 +726,7 @@ function definitionFromForm() {
 
 async function saveProvider(event) {
   event.preventDefault();
+  if (!providerConfigurationIsFresh(true)) return;
   try {
     const definition = definitionFromForm();
     const current = state.providers.find((provider) => provider.id === state.editing);
@@ -683,6 +754,7 @@ async function saveProvider(event) {
 }
 
 async function moveProvider(index, delta) {
+  if (!providerConfigurationIsFresh(true)) return;
   const ordered = state.providers.map((provider) => provider.id);
   [ordered[index], ordered[index + delta]] = [ordered[index + delta], ordered[index]];
   try {
@@ -693,9 +765,10 @@ async function moveProvider(index, delta) {
 }
 
 async function deleteProvider(provider) {
+  if (!providerConfigurationIsFresh(true)) return;
   const confirmed = await showDialog({ eyebrow: "不可撤销操作", title: `删除 ${provider.display_name}？`,
     paragraphs: ["将删除 Provider 定义及其凭据库引用。历史记录不会自动删除。"], confirmText: "确认删除", danger: true });
-  if (!confirmed) return;
+  if (!confirmed || !providerConfigurationIsFresh(true)) return;
   try {
     await request(`/api/v1/providers/${encodeURIComponent(provider.id)}`, { method: "DELETE" });
     toast("Provider 已删除", `${provider.display_name} 已从采集顺序中移除。`);
@@ -704,6 +777,7 @@ async function deleteProvider(provider) {
 }
 
 async function testProvider(id) {
+  if (!providerConfigurationIsFresh(true)) return;
   message("正在执行受限测试请求……", false, true);
   try {
     const result = await (await request(`/api/v1/providers/${encodeURIComponent(id)}/test`, { method: "POST", body: "{}" })).json();
@@ -842,7 +916,7 @@ function renderDeckPreview() {
   state.deckIndex %= providers.length;
   const provider = providers[state.deckIndex];
   const status = element("div", "rlcd-status");
-  status.append(element("span", "", "S3 RLCD"), element("span", "", `Deck ${state.console.runtime?.connected_decks ?? 0}`),
+  status.append(element("span", "", "S3 RLCD"), element("span", "", state.sync.console.error ? "Deck —" : `Deck ${state.console.runtime?.connected_decks ?? 0}`),
     element("span", "", state.sync.console.error ? "已过期" : providerStatusLabel(provider.status)),
     element("span", "", formatTime(provider.updated_at, false)));
   const body = element("div", "rlcd-body");
@@ -881,26 +955,30 @@ function renderDeckPreview() {
 }
 
 async function issuePairingCode() {
+  const operation = authenticatedOperation();
   try {
-    const advertisedAddress = state.console?.runtime?.device_hub_advertised_address;
-    if (!advertisedAddress) {
-      throw new Error("Device Hub 尚无可达公告地址；请先配置 --device-hub-advertised-address IP:port。");
-    }
-    const issued = await (await request("/api/v1/pairing/codes", { method: "POST", body: "{}" })).json();
+    const response = await request("/api/v1/pairing/codes", { method: "POST", body: "{}", signal: operation.signal });
+    const issued = await response.json();
+    if (!operationIsCurrent(operation)) return;
+    const advertisedAddress = issued.device_hub_address;
+    if (!advertisedAddress) throw new Error("Device Hub 尚无可达公告地址；请配置明确的局域网地址后重试。");
     const body = element("div");
     body.append(element("p", "", "在 Deck 的 Setup 页面输入以下一次性配对码："), element("div", "pairing-code", issued.code),
       element("p", "muted", `Device Hub：${advertisedAddress}`),
       element("p", "muted", `有效期至：${formatTime(issued.expires_at)}`));
     await showDialog({ eyebrow: "Deck Pairing", title: "一次性配对码", body, confirmText: "完成", informational: true });
-  } catch (error) { toast("无法生成配对码", error.message, true); }
+  } catch (error) { if (operationIsCurrent(operation)) toast("无法生成配对码", error.message, true); }
 }
 
 async function exportBackup() {
+  const operation = authenticatedOperation();
   const passphrase = $("#export-passphrase").value;
   if (!passphrase) { toast("需要备份口令", "请先输入用于加密归档的强口令。", true); return; }
   try {
-    const response = await request("/api/v1/backups/export", { method: "POST", body: JSON.stringify({ passphrase }) });
-    const url = URL.createObjectURL(await response.blob());
+    const response = await request("/api/v1/backups/export", { method: "POST", body: JSON.stringify({ passphrase }), signal: operation.signal });
+    const archive = await response.blob();
+    if (!operationIsCurrent(operation)) return;
+    const url = URL.createObjectURL(archive);
     const link = element("a");
     link.href = url;
     link.download = "s3-rlcd-deck-backup.age";
@@ -908,7 +986,7 @@ async function exportBackup() {
     URL.revokeObjectURL(url);
     $("#export-passphrase").value = "";
     toast("备份已生成", "加密归档已交给浏览器下载。请将口令分开保存。");
-  } catch (error) { toast("无法生成备份", error.message, true); }
+  } catch (error) { if (operationIsCurrent(operation)) toast("无法生成备份", error.message, true); }
 }
 
 async function backupPayload() {
@@ -953,17 +1031,26 @@ function renderBackupConflicts(preview) {
 
 async function previewBackup() {
   resetBackupPreview("正在验证加密归档……");
+  const operation = authenticatedOperation();
   try {
     const payload = await backupPayload();
-    const preview = await (await request("/api/v1/backups/preview", { method: "POST", body: JSON.stringify(payload) })).json();
+    if (!operationIsCurrent(operation)) return;
+    const response = await request("/api/v1/backups/preview", { method: "POST", body: JSON.stringify(payload), signal: operation.signal });
+    const preview = await response.json();
+    if (!operationIsCurrent(operation)) return;
     state.backup = { ...payload, preview_id: preview.preview_id, decisions: {} };
     renderBackupConflicts(preview);
     $("#backup-preview").textContent = JSON.stringify(preview, null, 2);
-  } catch (error) { resetBackupPreview("预览失败。请检查归档和口令。"); toast("无法预览备份", error.message, true); }
+  } catch (error) {
+    if (!operationIsCurrent(operation)) return;
+    resetBackupPreview("预览失败。请检查归档和口令。");
+    toast("无法预览备份", error.message, true);
+  }
 }
 
 async function applyBackup() {
   if (!state.backup) return;
+  const operation = authenticatedOperation();
   const replace = state.backup.mode === "replace";
   const confirmed = await showDialog({ eyebrow: replace ? "完整替换 · 破坏性操作" : "事务导入",
     title: replace ? "替换当前可迁移配置？" : "应用已预览的备份？",
@@ -972,16 +1059,20 @@ async function applyBackup() {
       "请先导出当前配置作为恢复点。导入失败会保持当前配置；导入成功后可重新导入该恢复点撤销。",
     ] : ["Companion 将按当前模式和逐项决定写入可恢复配置。Pairing 信任、历史和 Web 会话不会导入。"],
     confirmText: replace ? "确认替换当前配置" : "确认导入", danger: replace });
-  if (!confirmed) return;
+  if (!confirmed || !operationIsCurrent(operation) || !state.backup) return;
   try {
-    const result = await (await request("/api/v1/backups/import", { method: "POST", body: JSON.stringify(state.backup) })).json();
+    const response = await request("/api/v1/backups/import", {
+      method: "POST", body: JSON.stringify(state.backup), signal: operation.signal,
+    });
+    const result = await response.json();
+    if (!operationIsCurrent(operation)) return;
     state.backup = null;
     $("#import-passphrase").value = "";
     $("#apply-backup").disabled = true;
     $("#backup-conflicts").replaceChildren();
     toast("导入完成", result.restart_required ? "需要重启 Companion 才能应用全部设置。" : "配置已完成事务写入。");
     await Promise.all([loadProviders(), loadConsole(true)]);
-  } catch (error) { toast("无法导入备份", error.message, true); }
+  } catch (error) { if (operationIsCurrent(operation)) toast("无法导入备份", error.message, true); }
 }
 
 function showDialog({ eyebrow, title, paragraphs = [], body = null, confirmText = "确认", danger = false, informational = false }) {
@@ -1019,9 +1110,13 @@ async function login(event) {
 }
 
 async function logout() {
-  try { await request("/api/v1/logout", { method: "POST", body: "{}" }); }
-  catch (_) { /* 浏览器侧会话仍会立即丢弃。 */ }
+  const csrf = state.csrf;
   showLogin("已退出本机控制台。");
+  try {
+    await fetch("/api/v1/logout", { method: "POST", cache: "no-store", credentials: "same-origin",
+      headers: { "Content-Type": "application/json", "Origin": location.origin, "X-CSRF-Token": csrf }, body: "{}" });
+  }
+  catch (_) { /* 浏览器侧会话仍会立即丢弃。 */ }
 }
 
 async function resumeSession() {

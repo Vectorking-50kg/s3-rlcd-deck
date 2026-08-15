@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/aisnapshot"
@@ -27,11 +28,11 @@ type consoleCapabilities struct {
 	Diagnostics        bool `json:"diagnostics"`
 }
 
-func (application *Runtime) handleConsoleView(response http.ResponseWriter, _ *http.Request) {
-	writeManagementJSON(response, application.consoleView())
+func (application *Runtime) handleConsoleView(response http.ResponseWriter, request *http.Request) {
+	writeManagementJSON(response, application.consoleView(request.Context()))
 }
 
-func (application *Runtime) consoleView() consoleViewResponse {
+func (application *Runtime) consoleView(ctx context.Context) consoleViewResponse {
 	providers := make([]aisnapshot.Provider, 0, 10)
 	sessions := make([]aisnapshot.Session, 0, 16)
 	if update, exists := application.CodexUpdate(); exists {
@@ -49,6 +50,7 @@ func (application *Runtime) consoleView() consoleViewResponse {
 		sessions = []aisnapshot.Session{}
 	}
 	status := application.Status()
+	status.DeviceHubAdvertisedAddress = application.deviceHubAdvertisedAddress(ctx)
 	return consoleViewResponse{
 		Runtime:   status,
 		Providers: providers,

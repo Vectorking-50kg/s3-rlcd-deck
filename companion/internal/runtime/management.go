@@ -159,12 +159,20 @@ func secureManagementResponses(next http.Handler) http.Handler {
 }
 
 func (application *Runtime) handleIssuePairingCode(response http.ResponseWriter, request *http.Request) {
+	advertisedAddress := application.deviceHubAdvertisedAddress(request.Context())
+	if advertisedAddress == "" {
+		http.Error(response, "Device Hub advertised address unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	issued, err := application.pairing.Issue(request.Context())
 	if err != nil {
 		http.Error(response, "pairing code unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	writeManagementJSON(response, issued)
+	writeManagementJSON(response, struct {
+		pairing.IssuedCode
+		DeviceHubAddress string `json:"device_hub_address"`
+	}{IssuedCode: issued, DeviceHubAddress: advertisedAddress})
 }
 
 func (application *Runtime) handleRotateDeviceToken(response http.ResponseWriter, request *http.Request) {

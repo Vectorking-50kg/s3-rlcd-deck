@@ -75,6 +75,7 @@ type Runtime struct {
 	backup                  BackupService
 	configuration           ConfigurationOwner
 	deviceProfileUpdates    chan configmodel.DeviceProfile
+	advertisedAddress       func(context.Context, string, string) string
 
 	mu                  sync.RWMutex
 	snapshotMu          sync.Mutex
@@ -180,6 +181,7 @@ func New(config Config) (*Runtime, error) {
 		history:              normalized.History,
 		backup:               normalized.Backup,
 		configuration:        normalized.Configuration,
+		advertisedAddress:    liveDeviceHubAdvertisedAddress,
 		deviceProfileUpdates: deviceProfileUpdates,
 		structuredProviders:  make(map[string]aisnapshot.Provider),
 		status:               status,
@@ -221,6 +223,17 @@ func (application *Runtime) Status() Status {
 		status.HistoryEnabled = status.HistoryAvailable && application.history.Enabled()
 	}
 	return status
+}
+
+func (application *Runtime) deviceHubAdvertisedAddress(ctx context.Context) string {
+	application.mu.RLock()
+	boundAddress := application.status.DeviceHubAddress
+	resolver := application.advertisedAddress
+	application.mu.RUnlock()
+	if resolver == nil {
+		return ""
+	}
+	return resolver(ctx, boundAddress, application.config.DeviceHub.AdvertisedAddress)
 }
 
 // CodexUpdate returns the latest normalized, independently owned adapter DTO.
@@ -738,7 +751,7 @@ func (application *Runtime) setState(state State, managementAddress string, devi
 	deviceHubAdvertisedAddress := resolveDeviceHubAdvertisedAddress(
 		deviceHubAddress,
 		application.config.DeviceHub.AdvertisedAddress,
-		preferredAdvertisedIPv4(),
+		nil,
 	)
 	application.mu.Lock()
 	defer application.mu.Unlock()
