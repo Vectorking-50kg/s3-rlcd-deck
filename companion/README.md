@@ -76,6 +76,29 @@ Companion restart. Runtime composes Codex, Cursor, and structured states into on
 `snapshot.ai`; Device Hub coalesces only the latest document per authenticated Deck through that
 connection's sole WebSocket writer.
 
+### Management Web UI
+
+The embedded UI implements the selected Scheme C instrument-panel design as an offline,
+Chinese-first application. Its login surface and five stable domains provide 17 UI views: overview;
+Provider list/editor, history, and Codex sessions; serial terminal/presets; Deck inventory,
+network trust, Setup recovery, and RLCD preview; plus system settings, updates, backup,
+diagnostics, and tray guidance. At widths below 920 px the domain dock and context navigation
+become one mobile drawer without changing the task hierarchy.
+
+`GET /api/v1/console` is the narrow read-only ViewModel seam for overview, session, device,
+network, Deck-preview, system, and diagnostics surfaces. It exposes only `Status`, normalized
+AI Snapshot Provider/Session DTOs, and capability booleans; credentials, raw responses, prompts,
+paths, and serial bodies cannot be represented. A tray-created HttpOnly session can obtain a
+fresh CSRF token through same-origin `POST /api/v1/session/refresh`; rotation does not extend the
+eight-hour session lifetime and invalidates the previous CSRF token.
+
+Provider management, history, pairing, and backup controls call their existing authenticated
+APIs. Serial Web TX, signed OTA, and diagnostic-bundle interfaces are not present on the current
+mainline, so those formal views explicitly say that the module is not connected and never invent
+connections, versions, progress, or success states. All destructive operations use a scoped
+confirmation dialog, unknown metrics render as unavailable rather than zero, and the UI includes
+visible focus states, reduced-motion handling, and responsive table containment.
+
 Provider credentials and raw private content must never be sent to a Deck.
 
 Provider credentials are owned by `internal/secretstore`. Its public seam accepts only an opaque

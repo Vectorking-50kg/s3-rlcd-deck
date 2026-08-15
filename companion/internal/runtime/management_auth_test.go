@@ -114,13 +114,15 @@ func TestManagementAllowsOnlyBootstrapAndLoginBeforeAuthentication(t *testing.T)
 			t.Errorf("GET %s = %d, want 200", path, response.StatusCode)
 		}
 	}
-	response, err := http.Get(baseURL + "/api/v1/status")
-	if err != nil {
-		t.Fatalf("GET unauthenticated status: %v", err)
-	}
-	response.Body.Close()
-	if response.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("GET unauthenticated status = %d, want 401", response.StatusCode)
+	for _, path := range []string{"/api/v1/status", "/api/v1/console"} {
+		response, err := http.Get(baseURL + path)
+		if err != nil {
+			t.Fatalf("GET unauthenticated %s: %v", path, err)
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("GET unauthenticated %s = %d, want 401", path, response.StatusCode)
+		}
 	}
 
 	cancel()
