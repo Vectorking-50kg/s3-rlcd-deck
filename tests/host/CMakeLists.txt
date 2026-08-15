@@ -34,6 +34,13 @@ deck_add_host_test(
     INCLUDE_DIRS ../../firmware/components/health/include
 )
 deck_add_host_test(
+    test_diagnostic_ring
+    SOURCES
+        test_diagnostic_ring.cpp
+        ../../firmware/components/health/deck_diagnostic_ring.cpp
+    INCLUDE_DIRS ../../firmware/components/health/include
+)
+deck_add_host_test(
     test_display_service
     SOURCES
         test_display_service.cpp

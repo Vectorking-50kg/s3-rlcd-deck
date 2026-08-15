@@ -23,6 +23,8 @@ const (
 	MessageOTAOffer             = "ota.offer"
 	MessageOTAChunk             = "ota.chunk"
 	MessageOTAResult            = "ota.result"
+	MessageDiagnosticsRequest   = "diagnostics.request"
+	MessageDiagnosticsSnapshot  = "diagnostics.snapshot"
 )
 
 var safeVersion = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z.+_-]{0,31}$`)
@@ -124,6 +126,28 @@ type OTAResult struct {
 	ImageLength     uint32 `json:"image_length"`
 }
 
+type DiagnosticsRequest struct {
+	Type            string `json:"type"`
+	ProtocolVersion int    `json:"protocol_version"`
+	RequestID       uint64 `json:"request_id"`
+}
+
+type DiagnosticEvent struct {
+	MonotonicMS uint64 `json:"monotonic_ms"`
+	Level       string `json:"level"`
+	Component   string `json:"component"`
+	Code        string `json:"code"`
+	Value       uint32 `json:"value"`
+}
+
+type DiagnosticsSnapshot struct {
+	Type            string            `json:"type"`
+	ProtocolVersion int               `json:"protocol_version"`
+	RequestID       uint64            `json:"request_id"`
+	Dropped         uint32            `json:"dropped"`
+	Events          []DiagnosticEvent `json:"events"`
+}
+
 func parseDeviceHello(message []byte, authenticatedDeviceID string) (DeviceHello, error) {
 	envelope, err := protocol.ParseEnvelope(message)
 	if err != nil || envelope.Type != MessageDeviceHello {
@@ -142,7 +166,7 @@ func parseDeviceHello(message []byte, authenticatedDeviceID string) (DeviceHello
 	seen := make(map[string]struct{}, len(hello.Capabilities))
 	for _, capability := range hello.Capabilities {
 		switch capability {
-		case "display", "serial", "ota":
+		case "display", "serial", "ota", "diagnostics":
 		default:
 			return DeviceHello{}, errors.New("unsupported device capability")
 		}
@@ -259,4 +283,52 @@ func parseOTAResult(message []byte) (OTAResult, error) {
 		return OTAResult{}, errors.New("invalid ota.result")
 	}
 	return result, nil
+}
+
+func parseDiagnosticsSnapshot(message []byte) (DiagnosticsSnapshot, error) {
+	envelope, err := protocol.ParseEnvelope(message)
+	if err != nil || envelope.Type != MessageDiagnosticsSnapshot {
+		return DiagnosticsSnapshot{}, errors.New("message is not diagnostics.snapshot")
+	}
+	var snapshot DiagnosticsSnapshot
+	if err = protocol.DecodeStrictDocument(message, &snapshot); err != nil {
+		return DiagnosticsSnapshot{}, err
+	}
+	if snapshot.ProtocolVersion != ProtocolVersion || snapshot.RequestID == 0 ||
+		len(snapshot.Events) > 64 {
+		return DiagnosticsSnapshot{}, errors.New("invalid diagnostics.snapshot")
+	}
+	var previous uint64
+	for index, event := range snapshot.Events {
+		if !validDiagnosticLevel(event.Level) || !validDiagnosticComponent(event.Component) ||
+			!validDiagnosticCode(event.Code) || (index != 0 && event.MonotonicMS < previous) {
+			return DiagnosticsSnapshot{}, errors.New("invalid diagnostics.snapshot event")
+		}
+		previous = event.MonotonicMS
+	}
+	return snapshot, nil
+}
+
+func validDiagnosticLevel(value string) bool {
+	return value == "info" || value == "warning" || value == "error"
+}
+
+func validDiagnosticComponent(value string) bool {
+	switch value {
+	case "system", "display", "wifi", "setup", "sensor", "device_link", "serial", "ota":
+		return true
+	default:
+		return false
+	}
+}
+
+func validDiagnosticCode(value string) bool {
+	switch value {
+	case "boot", "ready", "unavailable", "connected", "disconnected", "storage_error",
+		"protocol_error", "timeout", "owner_changed", "update_started", "update_failed",
+		"rollback", "queue_overflow":
+		return true
+	default:
+		return false
+	}
 }

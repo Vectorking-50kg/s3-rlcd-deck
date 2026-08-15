@@ -8,6 +8,7 @@
 #include "deck_companion_transport_authority.h"
 #include "deck_companion_pairing_esp.h"
 #include "deck_device_protocol.h"
+#include "deck_diagnostic_ring.h"
 #include "deck_ota_protocol.h"
 #include "deck_ota_service.h"
 #include "deck_serial_frame.h"
@@ -184,6 +185,7 @@ struct deck_companion_link {
     deck_serial_frame_order_t accepted_web_order{};
     uint64_t pending_serial_revoke_epoch = 0;
     bool serial_transport_fenced = false;
+    deck_diagnostic_snapshot_t diagnostic_snapshot{};
 };
 
 namespace {
@@ -202,10 +204,19 @@ void update_state(deck_companion_link_t *link, deck_companion_link_state_t state
 
 void increment_error(deck_companion_link_t *link)
 {
+    uint32_t count = 0;
     const std::lock_guard<std::mutex> lock(link->mutex);
     if (link->snapshot.error_count != UINT32_MAX) {
         ++link->snapshot.error_count;
     }
+    count = link->snapshot.error_count;
+    (void)deck_diagnostic_ring_record(
+        monotonic_ms(),
+        DECK_DIAGNOSTIC_LEVEL_ERROR,
+        DECK_DIAGNOSTIC_COMPONENT_DEVICE_LINK,
+        DECK_DIAGNOSTIC_CODE_PROTOCOL_ERROR,
+        count
+    );
 }
 
 bool state_is_online(const deck_companion_link_t *link)
@@ -612,7 +623,7 @@ bool send_hello(deck_companion_link_t *link)
     const int size = std::snprintf(
         message,
         sizeof(message),
-        "{\"type\":\"device.hello\",\"protocol_version\":1,\"device_id\":\"%s\",\"firmware_version\":\"%s\",\"board\":\"%s\",\"capabilities\":[\"display\",\"ota\",\"serial\"],\"serial_state\":\"%s\",\"serial_session_id\":%llu}",
+        "{\"type\":\"device.hello\",\"protocol_version\":1,\"device_id\":\"%s\",\"firmware_version\":\"%s\",\"board\":\"%s\",\"capabilities\":[\"diagnostics\",\"display\",\"ota\",\"serial\"],\"serial_state\":\"%s\",\"serial_session_id\":%llu}",
         link->device_id,
         link->firmware_version,
         kBoard,
@@ -936,6 +947,35 @@ bool handle_serial_control(
     }
 }
 
+bool handle_diagnostics_request(
+    deck_companion_link_t *link,
+    const char *message,
+    size_t message_size,
+    bool *handled
+)
+{
+    *handled = false;
+    deck_device_diagnostics_request_t request{};
+    if (!deck_device_protocol_parse_diagnostics_request(
+            message,
+            message_size,
+            &request
+        )) {
+        return true;
+    }
+    *handled = true;
+    deck_diagnostic_ring_snapshot(&link->diagnostic_snapshot);
+    size_t size = 0;
+    return deck_diagnostic_snapshot_format(
+               &link->diagnostic_snapshot,
+               request.request_id,
+               link->frame.get(),
+               kMaximumMessageBytes + 1U,
+               &size
+           ) &&
+           send_text(link, link->frame.get(), size);
+}
+
 bool handle_serial_binary(
     deck_companion_link_t *link,
     const uint8_t *document,
@@ -1216,6 +1256,15 @@ bool accept_heartbeat(
         link->snapshot.reconnect_attempts = 0;
         link->snapshot.last_heartbeat_monotonic_ms = now;
     }
+    if (first_valid_heartbeat) {
+        (void)deck_diagnostic_ring_record(
+            now,
+            DECK_DIAGNOSTIC_LEVEL_INFO,
+            DECK_DIAGNOSTIC_COMPONENT_DEVICE_LINK,
+            DECK_DIAGNOSTIC_CODE_CONNECTED,
+            0
+        );
+    }
     return true;
 }
 
@@ -1284,6 +1333,18 @@ bool accept_data(deck_companion_link_t *link, const TransportEvent &event)
         secure_clear(link->frame.get(), message_size + 1);
         deck_companion_link_frame_reset(&link->frame_assembler);
         return false;
+    }
+    bool diagnostics_handled = false;
+    const bool diagnostics_accepted = handle_diagnostics_request(
+        link,
+        link->frame.get(),
+        message_size,
+        &diagnostics_handled
+    );
+    if (diagnostics_handled) {
+        secure_clear(link->frame.get(), kMaximumMessageBytes + 1U);
+        deck_companion_link_frame_reset(&link->frame_assembler);
+        return diagnostics_accepted;
     }
     bool serial_control_handled = false;
     const bool serial_control_accepted = handle_serial_control(

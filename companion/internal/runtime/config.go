@@ -14,6 +14,7 @@ import (
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/codexobserver"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/configmodel"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/cursorprovider"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/diagnostics"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/history"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/structuredprovider"
@@ -32,6 +33,7 @@ var (
 
 type Config struct {
 	Version              string
+	Commit               string
 	Management           ManagementConfig
 	DeviceHub            DeviceHubConfig
 	Pairing              *pairing.Service
@@ -43,6 +45,7 @@ type Config struct {
 	History              *history.Store
 	Backup               BackupService
 	Configuration        ConfigurationOwner
+	Diagnostics          *diagnostics.Service
 }
 
 type BackupService interface {
@@ -142,6 +145,9 @@ type DeviceHubLimits struct {
 func normalizeConfig(config Config) (Config, error) {
 	if config.Version == "" {
 		return Config{}, errors.New("companion version is required")
+	}
+	if config.Commit == "" {
+		config.Commit = "unknown"
 	}
 	if config.Management.Address == "" {
 		config.Management.Address = defaultManagementAddress

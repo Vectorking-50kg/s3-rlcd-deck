@@ -130,6 +130,28 @@ _Avoid_: Serial history, captured command, macro execution
 The external 3.3 V TTL UART device connected to the Deck for monitoring or controlled transmission.
 _Avoid_: Client device, downstream board
 
+**Diagnostic Event**:
+A fixed-schema, privacy-safe operational fact selected from bounded level, module, code, numeric,
+and hashed-identifier fields. It cannot represent arbitrary text, paths, credentials, Provider raw
+data, prompts, tool arguments, or serial bodies.
+_Avoid_: Log message, debug string
+
+**Diagnostic Log Segment**:
+One owner-only JSONL file written by the Companion's sole diagnostic worker. Its hourly active
+segment is atomically replaced; after rotation the sealed segment is immutable and removed only by
+the time/size retention policy.
+_Avoid_: Log file, trace dump
+
+**Deck Diagnostic Ring**:
+The Deck's fixed 64-event release-safe memory ring of enum and numeric Diagnostic Events. It is
+volatile and can be read only through an authenticated Device Link request.
+_Avoid_: Device log, serial console
+
+**Diagnostic Bundle**:
+A bounded, locally generated ZIP containing only fixed-path redacted documents plus a manifest with
+the size and SHA-256 of every included document. It is never uploaded automatically.
+_Avoid_: Support dump, log archive
+
 **Verified State**:
 Session state reported through an official source that directly owns or observes the relevant session.
 

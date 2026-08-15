@@ -51,9 +51,33 @@ type Service struct {
 	secrets      serviceSecretStore
 	changed      chan struct{}
 	newCollector func(Config) (managedCollector, error)
+	diagnostic   DiagnosticSink
 
 	mutex   sync.Mutex
 	running bool
+}
+
+// SetDiagnosticSink connects the service's fixed, already-redacted Provider
+// diagnostic projection before collector supervision starts. Raw requests,
+// responses, URLs, and credentials remain unreachable from this sink.
+func (service *Service) SetDiagnosticSink(sink DiagnosticSink) error {
+	if service == nil {
+		return ErrInvalidConfig
+	}
+	service.mutex.Lock()
+	defer service.mutex.Unlock()
+	if service.running {
+		return ErrAlreadyRunning
+	}
+	service.diagnostic = sink
+	return nil
+}
+
+func (service *Service) collectorConfig(definition Definition) Config {
+	service.mutex.Lock()
+	diagnostic := service.diagnostic
+	service.mutex.Unlock()
+	return Config{Definition: definition, Secrets: service.secrets, Diagnostic: diagnostic}
 }
 
 type managedCollector interface {
@@ -235,7 +259,7 @@ func (service *Service) Test(ctx context.Context, providerID string) (Preview, e
 		if definition.ID != providerID {
 			continue
 		}
-		collector, createErr := service.newCollector(Config{Definition: definition, Secrets: service.secrets})
+		collector, createErr := service.newCollector(service.collectorConfig(definition))
 		if createErr != nil {
 			return Preview{}, createErr
 		}
@@ -272,7 +296,7 @@ func (service *Service) Run(ctx context.Context, publish StatePublisher) error {
 	var collectors sync.WaitGroup
 
 	start := func(parent context.Context, definition Definition) error {
-		collector, err := service.newCollector(Config{Definition: definition, Secrets: service.secrets})
+		collector, err := service.newCollector(service.collectorConfig(definition))
 		if err != nil {
 			return err
 		}

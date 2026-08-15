@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -108,6 +109,20 @@ func validHello() []byte {
 	return message
 }
 
+func diagnosticsHello() []byte {
+	message, _ := json.Marshal(DeviceHello{
+		Type:            MessageDeviceHello,
+		ProtocolVersion: ProtocolVersion,
+		DeviceID:        testDeviceID,
+		FirmwareVersion: "0.2.0-dev",
+		Board:           BoardESP32S3RLCD42,
+		Capabilities:    []string{"display", "diagnostics"},
+		SerialState:     "disarmed",
+		SerialSessionID: 0,
+	})
+	return message
+}
+
 func activeHello(sessionID uint64) []byte {
 	message, _ := json.Marshal(DeviceHello{
 		Type: MessageDeviceHello, ProtocolVersion: ProtocolVersion,
@@ -180,6 +195,79 @@ func TestHubAuthenticatesThenRequiresDeviceHelloBeforeHeartbeat(t *testing.T) {
 	if heartbeat.Type != MessageHeartbeat || heartbeat.ProtocolVersion != ProtocolVersion ||
 		heartbeat.UTC == "" || heartbeat.RXQueueCapacity == 0 || heartbeat.TXQueueCapacity == 0 {
 		t.Fatalf("heartbeat = %#v", heartbeat)
+	}
+}
+
+func TestHubRequestsAndRetainsOnlyMatchingDeckDiagnosticRing(t *testing.T) {
+	hub, _, server := newTestHub(t)
+	connection, _, err := dialTestDeck(t, server, testDeviceID, testDeviceToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.CloseNow()
+	if err = connection.Write(context.Background(), websocket.MessageText, diagnosticsHello()); err != nil {
+		t.Fatal(err)
+	}
+	_ = readControlType(t, connection, MessageHeartbeat)
+	requestDocument := readControlType(t, connection, MessageDiagnosticsRequest)
+	var request DiagnosticsRequest
+	if err = json.Unmarshal(requestDocument, &request); err != nil || request.RequestID == 0 {
+		t.Fatalf("diagnostics request = %#v, %v", request, err)
+	}
+	snapshot := DiagnosticsSnapshot{
+		Type: MessageDiagnosticsSnapshot, ProtocolVersion: ProtocolVersion,
+		RequestID: request.RequestID, Dropped: 3,
+		Events: []DiagnosticEvent{{
+			MonotonicMS: 42, Level: "warning", Component: "wifi", Code: "unavailable", Value: 7,
+		}},
+	}
+	document, _ := json.Marshal(snapshot)
+	if err = connection.Write(context.Background(), websocket.MessageText, document); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for len(hub.DiagnosticRings()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	rings := hub.DiagnosticRings()
+	if len(rings) != 1 || rings[0].DeviceID != testDeviceID ||
+		rings[0].Snapshot.Dropped != 3 || len(rings[0].Snapshot.Events) != 1 ||
+		rings[0].Snapshot.Events[0].Code != "unavailable" {
+		t.Fatalf("diagnostic rings = %#v", rings)
+	}
+	// Returned slices are owned by the caller and cannot mutate Hub state.
+	rings[0].Snapshot.Events[0].Code = "boot"
+	if hub.DiagnosticRings()[0].Snapshot.Events[0].Code != "unavailable" {
+		t.Fatal("diagnostic ring ownership escaped")
+	}
+}
+
+func TestHubBoundsDeckDiagnosticRingCacheByMostRecentDevice(t *testing.T) {
+	hub, err := New(Config{Authenticator: &testAuthenticator{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hub.Close()
+	for index := 0; index < maximumDiagnosticRings+1; index++ {
+		deviceID := fmt.Sprintf("deck-%02d", index)
+		connection := &websocket.Conn{}
+		hub.sessions[deviceID] = connection
+		hub.diagnosticExpected[connection] = uint64(index + 1)
+		if !hub.acceptDiagnostics(connection, deviceID, DiagnosticsSnapshot{
+			Type: MessageDiagnosticsSnapshot, ProtocolVersion: ProtocolVersion,
+			RequestID: uint64(index + 1),
+		}) {
+			t.Fatalf("cache rejected device %d", index)
+		}
+	}
+	rings := hub.DiagnosticRings()
+	if len(rings) != maximumDiagnosticRings {
+		t.Fatalf("cached rings = %d, want %d", len(rings), maximumDiagnosticRings)
+	}
+	for _, ring := range rings {
+		if ring.DeviceID == "deck-00" {
+			t.Fatal("oldest diagnostic ring was not evicted")
+		}
 	}
 }
 

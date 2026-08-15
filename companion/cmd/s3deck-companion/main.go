@@ -21,6 +21,7 @@ import (
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/desktop"
 	desktopassets "github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/desktop/assets"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/deviceidentity"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/diagnostics"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/history"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/managementtoken"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
@@ -182,6 +183,19 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		stderr,
 	)
 	defer closeProviderDefinitions()
+	diagnosticService, diagnosticErr := diagnostics.Open(diagnostics.Config{
+		Directory: filepath.Join(resolvedDataDirectory, "diagnostics"),
+	})
+	if diagnosticErr != nil {
+		fmt.Fprintln(stderr, "redacted diagnostics are unavailable")
+		diagnosticService = nil
+	} else {
+		defer func() {
+			closeContext, cancelClose := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = diagnosticService.Close(closeContext)
+			cancelClose()
+		}()
+	}
 	if configurationOwner != nil {
 		webSettings := restorableConfiguration.WebSettings
 		if explicitFlags["management-address"] {
@@ -262,6 +276,7 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	config := companionruntime.Config{
 		Version:             version,
+		Commit:              commit,
 		CodexCollector:      codexCollector,
 		CodexObserver:       codexObserver,
 		CursorCollector:     cursorCollector,
@@ -269,6 +284,7 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		History:             providerHistory,
 		Backup:              backupService,
 		Configuration:       configurationOwner,
+		Diagnostics:         diagnosticService,
 		Management: companionruntime.ManagementConfig{
 			Address:       *managementAddress,
 			AllowLAN:      *allowLANManagement,
