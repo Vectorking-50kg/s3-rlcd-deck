@@ -79,6 +79,13 @@ deck_add_host_test(
     INCLUDE_DIRS ../../firmware/components/serial_service/include
 )
 deck_add_host_test(
+    test_serial_router
+    SOURCES
+        test_serial_router.cpp
+        ../../firmware/components/serial_service/deck_serial_router.cpp
+    INCLUDE_DIRS ../../firmware/components/serial_service/include
+)
+deck_add_host_test(
     test_pcf85063
     SOURCES
         test_pcf85063.cpp

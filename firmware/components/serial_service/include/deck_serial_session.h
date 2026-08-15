@@ -24,12 +24,13 @@ typedef enum {
     DECK_SERIAL_COMMAND_STALE_SESSION,
     DECK_SERIAL_COMMAND_STALE_REQUEST,
     DECK_SERIAL_COMMAND_UART_INSTALL_FAILED,
+    DECK_SERIAL_COMMAND_UART_UNINSTALL_FAILED,
     DECK_SERIAL_COMMAND_INVALID,
 } deck_serial_command_code_t;
 
 typedef struct {
-    bool (*install_uart)(void *context);
-    void (*uninstall_uart)(void *context);
+    bool (*install_uart)(void *context, uint64_t session_id);
+    bool (*uninstall_uart)(void *context);
     void (*set_tx_high_impedance)(void *context);
     void (*clear_usb_tx)(void *context);
     void (*clear_web_tx)(void *context);
@@ -70,7 +71,8 @@ typedef struct {
 deck_serial_session_t *deck_serial_session_create(
     const deck_serial_session_config_t *config
 );
-void deck_serial_session_destroy(deck_serial_session_t *session);
+/* False keeps the complete owner intact so bounded UART shutdown can retry. */
+bool deck_serial_session_destroy(deck_serial_session_t *session);
 
 bool deck_serial_session_enter(
     deck_serial_session_t *session,

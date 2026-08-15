@@ -1,10 +1,14 @@
 #include "deck_serial_service.h"
+#include "deck_serial_router.h"
 
+#include <algorithm>
 #include <atomic>
+#include <cstring>
 #include <new>
 
 #include "driver/gpio.h"
 #include "driver/uart.h"
+#include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -19,13 +23,40 @@ constexpr gpio_num_t kTargetRx = GPIO_NUM_44;
 constexpr gpio_num_t kTargetTx = GPIO_NUM_17;
 constexpr int kTargetRxBufferBytes = 2'048;
 constexpr int kTargetTxBufferBytes = 2'048;
+constexpr size_t kUartEventQueueDepth = 20;
+constexpr size_t kInputBlockCount = 16;
+constexpr size_t kInputQueueDepth = kInputBlockCount;
+constexpr size_t kUsbSinkBytes = 16U * 1024U;
+constexpr size_t kWssSinkBytes = 16U * 1024U;
+constexpr size_t kStatsSinkBytes = DECK_SERIAL_ROUTER_BLOCK_BYTES;
 constexpr size_t kCommandQueueDepth = 16;
 constexpr uint32_t kOwnerTaskStackBytes = 4'096;
+constexpr uint32_t kRxTaskStackBytes = 3'584;
+constexpr uint32_t kRouterTaskStackBytes = 3'584;
 constexpr UBaseType_t kOwnerTaskPriority = 4;
+constexpr UBaseType_t kRxTaskPriority = 7;
+constexpr UBaseType_t kRouterTaskPriority = 6;
 constexpr TickType_t kOwnerPollTicks = pdMS_TO_TICKS(100);
+constexpr TickType_t kDataPollTicks = pdMS_TO_TICKS(20);
 constexpr TickType_t kLifecycleTimeoutTicks = pdMS_TO_TICKS(2'000);
 constexpr EventBits_t kReadyBit = BIT0;
 constexpr EventBits_t kStoppedBit = BIT1;
+constexpr EventBits_t kRxReadyBit = BIT0;
+constexpr EventBits_t kRouterReadyBit = BIT1;
+constexpr EventBits_t kRxStoppedBit = BIT2;
+constexpr EventBits_t kRouterStoppedBit = BIT3;
+constexpr EventBits_t kDataStartBit = BIT4;
+
+#ifdef CONFIG_DECK_SERIAL_HISTORY_KIB
+constexpr size_t kHistoryBytes =
+    static_cast<size_t>(CONFIG_DECK_SERIAL_HISTORY_KIB) * 1024U;
+#else
+constexpr size_t kHistoryBytes = DECK_SERIAL_HISTORY_DEFAULT_BYTES;
+#endif
+
+static_assert(kHistoryBytes >= DECK_SERIAL_HISTORY_MIN_BYTES);
+static_assert(kHistoryBytes <= DECK_SERIAL_HISTORY_MAX_BYTES);
+static_assert(kHistoryBytes % DECK_SERIAL_ROUTER_BLOCK_BYTES == 0);
 
 enum class CommandKind : uint8_t {
     enter,
@@ -61,8 +92,368 @@ bool set_target_tx_high_impedance(void *)
     return gpio_config(&config) == ESP_OK;
 }
 
-bool install_target_uart(void *)
+bool install_target_uart(void *context, uint64_t session_id);
+bool uninstall_target_uart(void *context);
+void clear_usb_tx(void *context);
+void clear_web_tx(void *context);
+
+}  // namespace
+
+struct SerialDataPath {
+    deck_serial_router_t *router;
+    QueueHandle_t uart_events;
+    QueueHandle_t free_blocks;
+    QueueHandle_t filled_blocks;
+    EventGroupHandle_t lifecycle;
+    TaskHandle_t rx_task;
+    TaskHandle_t router_task;
+    deck_serial_input_block_t *input_blocks;
+    std::atomic<bool> stop_requested;
+};
+
+struct deck_serial_service {
+    QueueHandle_t commands;
+    SemaphoreHandle_t snapshot_mutex;
+    EventGroupHandle_t lifecycle;
+    TaskHandle_t owner_task;
+    deck_serial_session_t *session;
+    deck_serial_service_event_fn callback;
+    void *callback_context;
+    deck_serial_session_snapshot_t latest_snapshot;
+    deck_serial_router_stats_t published_router_stats;
+    bool has_published_router_stats;
+    std::atomic<bool> stop_requested;
+    std::atomic<uint64_t> control_epoch;
+    SemaphoreHandle_t router_mutex;
+    SerialDataPath data_path;
+};
+
+namespace {
+
+void *router_allocate(void *, size_t size, bool external_memory)
 {
+    const uint32_t capabilities =
+        MALLOC_CAP_8BIT |
+        (external_memory ? MALLOC_CAP_SPIRAM : MALLOC_CAP_INTERNAL);
+    return heap_caps_calloc(1, size, capabilities);
+}
+
+void router_deallocate(void *, void *memory)
+{
+    heap_caps_free(memory);
+}
+
+void note_uart_error(
+    deck_serial_service_t *service,
+    deck_serial_uart_error_t error
+)
+{
+    if (service->data_path.router != nullptr) {
+        deck_serial_router_note_uart_error(service->data_path.router, error);
+    }
+}
+
+void return_input_block(
+    deck_serial_service_t *service,
+    deck_serial_input_block_t *block
+)
+{
+    if (block == nullptr) {
+        return;
+    }
+    block->length = 0;
+    block->monotonic_ms = 0;
+    std::memset(block->bytes, 0, sizeof(block->bytes));
+    if (xQueueSend(service->data_path.free_blocks, &block, 0) != pdTRUE) {
+        note_uart_error(service, DECK_SERIAL_UART_ROUTER_STARVED);
+    }
+}
+
+void drain_unrouted_uart_bytes(
+    deck_serial_service_t *service,
+    size_t remaining
+)
+{
+    uint8_t discarded[DECK_SERIAL_ROUTER_BLOCK_BYTES]{};
+    while (remaining != 0 &&
+           !service->data_path.stop_requested.load(std::memory_order_acquire)) {
+        const size_t requested = std::min(remaining, sizeof(discarded));
+        const int received = uart_read_bytes(
+            kTargetUart,
+            discarded,
+            static_cast<uint32_t>(requested),
+            0
+        );
+        if (received <= 0) {
+            break;
+        }
+        remaining -= static_cast<size_t>(received);
+    }
+    std::memset(discarded, 0, sizeof(discarded));
+    note_uart_error(service, DECK_SERIAL_UART_ROUTER_STARVED);
+}
+
+void receive_uart_data(deck_serial_service_t *service, size_t remaining)
+{
+    while (remaining != 0 &&
+           !service->data_path.stop_requested.load(std::memory_order_acquire)) {
+        deck_serial_input_block_t *block = nullptr;
+        if (xQueueReceive(service->data_path.free_blocks, &block, 0) != pdTRUE) {
+            drain_unrouted_uart_bytes(service, remaining);
+            return;
+        }
+        const size_t requested =
+            std::min(remaining, sizeof(block->bytes));
+        const int received = uart_read_bytes(
+            kTargetUart,
+            block->bytes,
+            static_cast<uint32_t>(requested),
+            0
+        );
+        if (received <= 0) {
+            return_input_block(service, block);
+            return;
+        }
+        block->length = static_cast<uint16_t>(received);
+        block->monotonic_ms = monotonic_ms();
+        remaining -= static_cast<size_t>(received);
+        if (xQueueSend(service->data_path.filled_blocks, &block, 0) != pdTRUE) {
+            note_uart_error(service, DECK_SERIAL_UART_ROUTER_STARVED);
+            return_input_block(service, block);
+        }
+    }
+}
+
+void uart_rx_task(void *context)
+{
+    auto *service = static_cast<deck_serial_service_t *>(context);
+    xEventGroupSetBits(service->data_path.lifecycle, kRxReadyBit);
+    while (!service->data_path.stop_requested.load(std::memory_order_acquire) &&
+           (xEventGroupWaitBits(
+                service->data_path.lifecycle,
+                kDataStartBit,
+                pdFALSE,
+                pdTRUE,
+                kDataPollTicks
+            ) & kDataStartBit) == 0) {
+    }
+    while (!service->data_path.stop_requested.load(std::memory_order_acquire)) {
+        uart_event_t event{};
+        if (xQueueReceive(
+                service->data_path.uart_events,
+                &event,
+                kDataPollTicks
+            ) != pdTRUE) {
+            continue;
+        }
+        switch (event.type) {
+            case UART_DATA:
+                receive_uart_data(service, event.size);
+                break;
+            case UART_FIFO_OVF:
+                note_uart_error(service, DECK_SERIAL_UART_FIFO_OVERFLOW);
+                (void)uart_flush_input(kTargetUart);
+                (void)xQueueReset(service->data_path.uart_events);
+                break;
+            case UART_BUFFER_FULL:
+                note_uart_error(service, DECK_SERIAL_UART_DRIVER_BUFFER_FULL);
+                (void)uart_flush_input(kTargetUart);
+                (void)xQueueReset(service->data_path.uart_events);
+                break;
+            default:
+                break;
+        }
+    }
+    xEventGroupSetBits(service->data_path.lifecycle, kRxStoppedBit);
+    vTaskSuspend(nullptr);
+}
+
+void router_task(void *context)
+{
+    auto *service = static_cast<deck_serial_service_t *>(context);
+    xEventGroupSetBits(service->data_path.lifecycle, kRouterReadyBit);
+    while (!service->data_path.stop_requested.load(std::memory_order_acquire) &&
+           (xEventGroupWaitBits(
+                service->data_path.lifecycle,
+                kDataStartBit,
+                pdFALSE,
+                pdTRUE,
+                kDataPollTicks
+            ) & kDataStartBit) == 0) {
+    }
+    while (!service->data_path.stop_requested.load(std::memory_order_acquire)) {
+        deck_serial_input_block_t *block = nullptr;
+        if (xQueueReceive(
+                service->data_path.filled_blocks,
+                &block,
+                kDataPollTicks
+            ) != pdTRUE) {
+            continue;
+        }
+        if (!deck_serial_router_submit(service->data_path.router, block, nullptr)) {
+            note_uart_error(service, DECK_SERIAL_UART_ROUTER_STARVED);
+        }
+        return_input_block(service, block);
+    }
+    xEventGroupSetBits(service->data_path.lifecycle, kRouterStoppedBit);
+    vTaskSuspend(nullptr);
+}
+
+void release_data_path_allocations(deck_serial_service_t *service)
+{
+    SerialDataPath &path = service->data_path;
+    if (path.router != nullptr) {
+        deck_serial_router_destroy(path.router);
+        path.router = nullptr;
+    }
+    if (path.free_blocks != nullptr) {
+        vQueueDelete(path.free_blocks);
+        path.free_blocks = nullptr;
+    }
+    if (path.filled_blocks != nullptr) {
+        vQueueDelete(path.filled_blocks);
+        path.filled_blocks = nullptr;
+    }
+    if (path.lifecycle != nullptr) {
+        vEventGroupDelete(path.lifecycle);
+        path.lifecycle = nullptr;
+    }
+    if (path.input_blocks != nullptr) {
+        std::memset(
+            path.input_blocks,
+            0,
+            kInputBlockCount * sizeof(deck_serial_input_block_t)
+        );
+        heap_caps_free(path.input_blocks);
+        path.input_blocks = nullptr;
+    }
+    path.uart_events = nullptr;
+    path.stop_requested.store(false, std::memory_order_release);
+}
+
+bool stop_data_path_tasks(deck_serial_service_t *service)
+{
+    SerialDataPath &path = service->data_path;
+    path.stop_requested.store(true, std::memory_order_release);
+    EventBits_t required = 0;
+    if (path.rx_task != nullptr) {
+        required |= kRxStoppedBit;
+    }
+    if (path.router_task != nullptr) {
+        required |= kRouterStoppedBit;
+    }
+    if (required != 0) {
+        const EventBits_t stopped = xEventGroupWaitBits(
+            path.lifecycle,
+            required,
+            pdFALSE,
+            pdTRUE,
+            kLifecycleTimeoutTicks
+        );
+        if ((stopped & required) != required) {
+            return false;
+        }
+    }
+    if (path.rx_task != nullptr) {
+        vTaskDelete(path.rx_task);
+        path.rx_task = nullptr;
+    }
+    if (path.router_task != nullptr) {
+        vTaskDelete(path.router_task);
+        path.router_task = nullptr;
+    }
+    return true;
+}
+
+bool register_data_sinks(deck_serial_router_t *router)
+{
+    const deck_serial_sink_config_t sinks[] = {
+        {DECK_SERIAL_SINK_USB, kUsbSinkBytes, false},
+        {DECK_SERIAL_SINK_WSS, kWssSinkBytes, false},
+        {DECK_SERIAL_SINK_HISTORY, kHistoryBytes, true},
+        {DECK_SERIAL_SINK_STATS, kStatsSinkBytes, false},
+    };
+    for (const deck_serial_sink_config_t &sink : sinks) {
+        if (!deck_serial_router_register_sink(router, &sink)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool prepare_data_path(deck_serial_service_t *service, uint64_t session_id)
+{
+    SerialDataPath &path = service->data_path;
+    if (path.router != nullptr || path.uart_events != nullptr ||
+        path.rx_task != nullptr || path.router_task != nullptr) {
+        return false;
+    }
+    path.stop_requested.store(false, std::memory_order_release);
+    path.lifecycle = xEventGroupCreate();
+    path.free_blocks = xQueueCreate(kInputQueueDepth, sizeof(void *));
+    path.filled_blocks = xQueueCreate(kInputQueueDepth, sizeof(void *));
+    path.input_blocks = static_cast<deck_serial_input_block_t *>(heap_caps_calloc(
+        kInputBlockCount,
+        sizeof(deck_serial_input_block_t),
+        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT
+    ));
+    const deck_serial_router_config_t router_config = {
+        session_id,
+        kHistoryBytes,
+        0,
+        {router_allocate, router_deallocate, nullptr},
+    };
+    path.router = deck_serial_router_create(&router_config);
+    if (path.lifecycle == nullptr || path.free_blocks == nullptr ||
+        path.filled_blocks == nullptr || path.input_blocks == nullptr ||
+        path.router == nullptr || !register_data_sinks(path.router)) {
+        release_data_path_allocations(service);
+        return false;
+    }
+    for (size_t index = 0; index < kInputBlockCount; ++index) {
+        deck_serial_input_block_t *block = &path.input_blocks[index];
+        if (xQueueSend(path.free_blocks, &block, 0) != pdTRUE) {
+            release_data_path_allocations(service);
+            return false;
+        }
+    }
+    return true;
+}
+
+void abort_data_path_start(deck_serial_service_t *service)
+{
+    SerialDataPath &path = service->data_path;
+    path.stop_requested.store(true, std::memory_order_release);
+    (void)stop_data_path_tasks(service);
+    // The start bit was never published, so any task that missed the bounded
+    // join cannot have entered UART/Router work or acquired Router state.
+    if (path.rx_task != nullptr) {
+        vTaskDelete(path.rx_task);
+        path.rx_task = nullptr;
+    }
+    if (path.router_task != nullptr) {
+        vTaskDelete(path.router_task);
+        path.router_task = nullptr;
+    }
+    if (uart_is_driver_installed(kTargetUart) &&
+        uart_driver_delete(kTargetUart) != ESP_OK) {
+        (void)set_target_tx_high_impedance(nullptr);
+        return;
+    }
+    path.uart_events = nullptr;
+    release_data_path_allocations(service);
+    (void)set_target_tx_high_impedance(nullptr);
+}
+
+bool install_target_uart_locked(
+    deck_serial_service_t *service,
+    uint64_t session_id
+)
+{
+    if (!prepare_data_path(service, session_id)) {
+        return false;
+    }
+    SerialDataPath &path = service->data_path;
     const uart_config_t config = {
         .baud_rate = 115'200,
         .data_bits = UART_DATA_8_BITS,
@@ -77,56 +468,94 @@ bool install_target_uart(void *)
             kTargetUart,
             kTargetRxBufferBytes,
             kTargetTxBufferBytes,
-            0,
-            nullptr,
+            kUartEventQueueDepth,
+            &path.uart_events,
             0
-        ) != ESP_OK) {
-        return false;
-    }
-    if (uart_param_config(kTargetUart, &config) != ESP_OK ||
+        ) != ESP_OK ||
+        uart_param_config(kTargetUart, &config) != ESP_OK ||
         uart_set_pin(
             kTargetUart,
             kTargetTx,
             kTargetRx,
             UART_PIN_NO_CHANGE,
             UART_PIN_NO_CHANGE
-        ) != ESP_OK) {
-        (void)uart_driver_delete(kTargetUart);
-        (void)set_target_tx_high_impedance(nullptr);
+        ) != ESP_OK ||
+        xTaskCreatePinnedToCore(
+            router_task,
+            "serial_router",
+            kRouterTaskStackBytes,
+            service,
+            kRouterTaskPriority,
+            &path.router_task,
+            1
+        ) != pdPASS ||
+        xTaskCreatePinnedToCore(
+            uart_rx_task,
+            "serial_rx",
+            kRxTaskStackBytes,
+            service,
+            kRxTaskPriority,
+            &path.rx_task,
+            1
+        ) != pdPASS) {
+        abort_data_path_start(service);
         return false;
     }
+    const EventBits_t ready = xEventGroupWaitBits(
+        path.lifecycle,
+        kRxReadyBit | kRouterReadyBit,
+        pdFALSE,
+        pdTRUE,
+        kLifecycleTimeoutTicks
+    );
+    if ((ready & (kRxReadyBit | kRouterReadyBit)) !=
+        (kRxReadyBit | kRouterReadyBit)) {
+        abort_data_path_start(service);
+        return false;
+    }
+    xEventGroupSetBits(path.lifecycle, kDataStartBit);
     return true;
 }
 
-void uninstall_target_uart(void *)
+bool install_target_uart(void *context, uint64_t session_id)
 {
-    if (uart_is_driver_installed(kTargetUart)) {
-        (void)uart_driver_delete(kTargetUart);
+    auto *service = static_cast<deck_serial_service_t *>(context);
+    if (service == nullptr ||
+        xSemaphoreTake(service->router_mutex, kLifecycleTimeoutTicks) != pdTRUE) {
+        return false;
     }
+    const bool installed = install_target_uart_locked(service, session_id);
+    xSemaphoreGive(service->router_mutex);
+    return installed;
 }
 
-// #46 supplies the bounded USB/Web queues. Keeping these owner callbacks in
-// place makes queue invalidation part of the state transition, not a caller
-// convention, while this slice has no payload queue to retain.
+bool uninstall_target_uart(void *context)
+{
+    auto *service = static_cast<deck_serial_service_t *>(context);
+    if (service == nullptr) {
+        return false;
+    }
+    SerialDataPath &path = service->data_path;
+    if (!stop_data_path_tasks(service)) {
+        return false;
+    }
+    if (uart_is_driver_installed(kTargetUart) &&
+        uart_driver_delete(kTargetUart) != ESP_OK) {
+        return false;
+    }
+    path.uart_events = nullptr;
+    if (xSemaphoreTake(service->router_mutex, kLifecycleTimeoutTicks) != pdTRUE) {
+        return false;
+    }
+    release_data_path_allocations(service);
+    xSemaphoreGive(service->router_mutex);
+    return set_target_tx_high_impedance(nullptr);
+}
+
+// These callbacks belong to future USB/Web -> target source queues. Router
+// sinks carry target RX output and must survive TX-owner transitions.
 void clear_usb_tx(void *) {}
 void clear_web_tx(void *) {}
-
-}  // namespace
-
-struct deck_serial_service {
-    QueueHandle_t commands;
-    SemaphoreHandle_t snapshot_mutex;
-    EventGroupHandle_t lifecycle;
-    TaskHandle_t owner_task;
-    deck_serial_session_t *session;
-    deck_serial_service_event_fn callback;
-    void *callback_context;
-    deck_serial_session_snapshot_t latest_snapshot;
-    std::atomic<bool> stop_requested;
-    std::atomic<uint64_t> control_epoch;
-};
-
-namespace {
 
 void publish(
     deck_serial_service_t *service,
@@ -141,6 +570,25 @@ void publish(
     if (result != nullptr) {
         event.command_result = *result;
     }
+    // A transient Router owner lock timeout must not clear a previously
+    // published data-loss alert. Successful observation of a missing Router
+    // (normal session exit) is what clears the current-session counters.
+    event.has_router_stats = service->has_published_router_stats;
+    event.router_stats = service->published_router_stats;
+    if (xSemaphoreTake(service->router_mutex, kOwnerPollTicks) == pdTRUE) {
+        if (service->data_path.router == nullptr) {
+            event.has_router_stats = false;
+            event.router_stats = {};
+        } else {
+            event.has_router_stats = deck_serial_router_stats(
+                service->data_path.router,
+                &event.router_stats
+            );
+        }
+        xSemaphoreGive(service->router_mutex);
+    }
+    service->published_router_stats = event.router_stats;
+    service->has_published_router_stats = event.has_router_stats;
     if (xSemaphoreTake(service->snapshot_mutex, portMAX_DELAY) == pdTRUE) {
         service->latest_snapshot = event.snapshot;
         xSemaphoreGive(service->snapshot_mutex);
@@ -148,6 +596,24 @@ void publish(
     if (service->callback != nullptr) {
         service->callback(service->callback_context, &event);
     }
+}
+
+bool router_alert_changed(deck_serial_service_t *service)
+{
+    deck_serial_router_stats_t current{};
+    bool has_current = false;
+    if (xSemaphoreTake(service->router_mutex, kOwnerPollTicks) == pdTRUE) {
+        has_current =
+            service->data_path.router != nullptr &&
+            deck_serial_router_stats(service->data_path.router, &current);
+        xSemaphoreGive(service->router_mutex);
+    }
+    return has_current != service->has_published_router_stats ||
+           (has_current &&
+            (current.uart_fifo_overflows !=
+                 service->published_router_stats.uart_fifo_overflows ||
+             current.uart_driver_buffer_full !=
+                 service->published_router_stats.uart_driver_buffer_full));
 }
 
 bool snapshot_changed(
@@ -232,7 +698,7 @@ void owner_task(void *context)
          [](void *adapter_context) {
              (void)set_target_tx_high_impedance(adapter_context);
          },
-         clear_usb_tx, clear_web_tx, nullptr},
+         clear_usb_tx, clear_web_tx, service},
         DECK_SERIAL_DEFAULT_WEB_LEASE_MS,
     };
     service->session = deck_serial_session_create(&config);
@@ -248,10 +714,14 @@ void owner_task(void *context)
         if (xQueueReceive(service->commands, &command, kOwnerPollTicks) == pdTRUE) {
             process_command(service, command);
             if (command.kind == CommandKind::stop) {
-                deck_serial_session_destroy(service->session);
-                service->session = nullptr;
-                xEventGroupSetBits(service->lifecycle, kStoppedBit);
-                vTaskSuspend(nullptr);
+                deck_serial_session_snapshot_t state{};
+                if (deck_serial_session_snapshot(service->session, &state) &&
+                    !state.uart_installed &&
+                    deck_serial_session_destroy(service->session)) {
+                    service->session = nullptr;
+                    xEventGroupSetBits(service->lifecycle, kStoppedBit);
+                    vTaskSuspend(nullptr);
+                }
             }
         } else {
             deck_serial_session_snapshot_t before{};
@@ -259,7 +729,7 @@ void owner_task(void *context)
             (void)deck_serial_session_snapshot(service->session, &before);
             deck_serial_session_tick(service->session, monotonic_ms());
             (void)deck_serial_session_snapshot(service->session, &after);
-            if (snapshot_changed(before, after)) {
+            if (snapshot_changed(before, after) || router_alert_changed(service)) {
                 publish(service, nullptr);
             }
         }
@@ -305,14 +775,18 @@ void release_unstarted(deck_serial_service_t *service)
         vTaskDelete(service->owner_task);
     }
     if (service->session != nullptr) {
-        deck_serial_session_destroy(service->session);
-        service->session = nullptr;
+        if (deck_serial_session_destroy(service->session)) {
+            service->session = nullptr;
+        }
     }
     if (service->commands != nullptr) {
         vQueueDelete(service->commands);
     }
     if (service->snapshot_mutex != nullptr) {
         vSemaphoreDelete(service->snapshot_mutex);
+    }
+    if (service->router_mutex != nullptr) {
+        vSemaphoreDelete(service->router_mutex);
     }
     if (service->lifecycle != nullptr) {
         vEventGroupDelete(service->lifecycle);
@@ -339,11 +813,12 @@ deck_serial_service_t *deck_serial_service_start(
     service->callback_context = callback_context;
     service->commands = xQueueCreate(kCommandQueueDepth, sizeof(Command));
     service->snapshot_mutex = xSemaphoreCreateMutex();
+    service->router_mutex = xSemaphoreCreateMutex();
     service->lifecycle = xEventGroupCreate();
     service->stop_requested.store(false, std::memory_order_release);
     service->control_epoch.store(0, std::memory_order_release);
     if (service->commands == nullptr || service->snapshot_mutex == nullptr ||
-        service->lifecycle == nullptr ||
+        service->router_mutex == nullptr || service->lifecycle == nullptr ||
         xTaskCreatePinnedToCore(
             owner_task,
             "serial_owner",
@@ -380,22 +855,28 @@ bool deck_serial_service_stop(deck_serial_service_t *service)
     if (service == nullptr) {
         return true;
     }
-    bool expected = false;
-    if (service->stop_requested.compare_exchange_strong(
+    const EventBits_t already_stopped = xEventGroupGetBits(service->lifecycle);
+    if ((already_stopped & kStoppedBit) == 0) {
+        bool expected = false;
+        const bool first_request = service->stop_requested.compare_exchange_strong(
             expected,
             true,
             std::memory_order_acq_rel
-        )) {
-        const uint64_t control_epoch = advance_control_epoch(service);
+        );
+        const uint64_t control_epoch =
+            first_request ? advance_control_epoch(service)
+                          : service->control_epoch.load(std::memory_order_acquire);
         const Command command{
             CommandKind::stop, false, 0, 0, 0, control_epoch
         };
         if (xQueueSendToFront(
-                service->commands,
-                &command,
-                kOwnerPollTicks
+            service->commands,
+            &command,
+            kOwnerPollTicks
             ) != pdTRUE) {
-            service->stop_requested.store(false, std::memory_order_release);
+            if (first_request) {
+                service->stop_requested.store(false, std::memory_order_release);
+            }
             return false;
         }
     }
@@ -413,6 +894,7 @@ bool deck_serial_service_stop(deck_serial_service_t *service)
     service->owner_task = nullptr;
     vQueueDelete(service->commands);
     vSemaphoreDelete(service->snapshot_mutex);
+    vSemaphoreDelete(service->router_mutex);
     vEventGroupDelete(service->lifecycle);
     delete service;
     return true;
@@ -485,4 +967,78 @@ bool deck_serial_service_snapshot(
     *snapshot = service->latest_snapshot;
     xSemaphoreGive(service->snapshot_mutex);
     return true;
+}
+
+deck_serial_router_copy_result_t deck_serial_service_take(
+    deck_serial_service_t *service,
+    deck_serial_sink_id_t sink,
+    deck_serial_routed_block_t *block
+)
+{
+    if (service == nullptr || block == nullptr ||
+        xSemaphoreTake(service->router_mutex, kOwnerPollTicks) != pdTRUE) {
+        return DECK_SERIAL_ROUTER_COPY_INVALID;
+    }
+    const deck_serial_router_copy_result_t result =
+        service->data_path.router == nullptr
+            ? DECK_SERIAL_ROUTER_COPY_INVALID
+            : deck_serial_router_take(service->data_path.router, sink, block);
+    xSemaphoreGive(service->router_mutex);
+    return result;
+}
+
+deck_serial_router_copy_result_t deck_serial_service_copy_history_after(
+    deck_serial_service_t *service,
+    uint64_t after_sequence,
+    deck_serial_routed_block_t *block
+)
+{
+    if (service == nullptr || block == nullptr ||
+        xSemaphoreTake(service->router_mutex, kOwnerPollTicks) != pdTRUE) {
+        return DECK_SERIAL_ROUTER_COPY_INVALID;
+    }
+    const deck_serial_router_copy_result_t result =
+        service->data_path.router == nullptr
+            ? DECK_SERIAL_ROUTER_COPY_INVALID
+            : deck_serial_router_copy_after(
+                  service->data_path.router,
+                  DECK_SERIAL_SINK_HISTORY,
+                  after_sequence,
+                  block
+              );
+    xSemaphoreGive(service->router_mutex);
+    return result;
+}
+
+bool deck_serial_service_sink_stats(
+    deck_serial_service_t *service,
+    deck_serial_sink_id_t sink,
+    deck_serial_sink_stats_t *stats
+)
+{
+    if (service == nullptr || stats == nullptr ||
+        xSemaphoreTake(service->router_mutex, kOwnerPollTicks) != pdTRUE) {
+        return false;
+    }
+    const bool result =
+        service->data_path.router != nullptr &&
+        deck_serial_router_sink_stats(service->data_path.router, sink, stats);
+    xSemaphoreGive(service->router_mutex);
+    return result;
+}
+
+bool deck_serial_service_router_stats(
+    deck_serial_service_t *service,
+    deck_serial_router_stats_t *stats
+)
+{
+    if (service == nullptr || stats == nullptr ||
+        xSemaphoreTake(service->router_mutex, kOwnerPollTicks) != pdTRUE) {
+        return false;
+    }
+    const bool result =
+        service->data_path.router != nullptr &&
+        deck_serial_router_stats(service->data_path.router, stats);
+    xSemaphoreGive(service->router_mutex);
+    return result;
 }

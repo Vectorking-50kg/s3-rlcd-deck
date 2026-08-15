@@ -121,8 +121,19 @@ bool serial_equal(
            left.owner_generation == right.owner_generation &&
            left.usb_tx_rejected == right.usb_tx_rejected &&
            left.uart_install_failures == right.uart_install_failures &&
+           left.uart_fifo_overflows == right.uart_fifo_overflows &&
+           left.uart_driver_buffer_full == right.uart_driver_buffer_full &&
            left.uart_install_failed == right.uart_install_failed &&
            left.uart_installed == right.uart_installed;
+}
+
+void format_uart_error_count(uint64_t count, char output[8])
+{
+    if (count > 999'999U) {
+        memcpy(output, "999999+", 8);
+        return;
+    }
+    (void)snprintf(output, 8, "%" PRIu64, count);
 }
 
 const char *serial_footer(const deck_serial_view_model_t &serial)
@@ -169,20 +180,30 @@ bool format_serial_page(
     if (!serial_page_visible(serial) || buffer == nullptr || buffer_size == 0) {
         return false;
     }
+    char fifo_overflows[8]{};
+    char driver_buffer_full[8]{};
+    format_uart_error_count(serial.uart_fifo_overflows, fifo_overflows);
+    format_uart_error_count(serial.uart_driver_buffer_full, driver_buffer_full);
+    const bool uart_data_lost = serial.uart_fifo_overflows != 0 ||
+                                serial.uart_driver_buffer_full != 0;
     const int size = snprintf(
         buffer,
         buffer_size,
         "SERIAL          %s\n"
+        "%s F%s B%s\n"
         "--------------------------------\n"
         "115200  8N1  UART %s\n"
         "SESSION #%" PRIu64 "\n"
         "OWNER GEN %" PRIu64 "\n"
         "USB REJECTED %" PRIu64 " B\n"
         "UART INSTALL ERR %" PRIu32 "\n"
-        "ROUTER / BRIDGE PENDING\n"
+        "ROUTER ACTIVE / STATS LATEST\n"
         "--------------------------------\n"
         "KEY: Stats    BOOT: Exit",
         serial_owner_name(serial.state),
+        uart_data_lost ? "!! UART RX LOSS" : "UART RX OK",
+        fifo_overflows,
+        driver_buffer_full,
         serial.uart_installed ? "OK" : "FAULT",
         serial.session_id,
         serial.owner_generation,

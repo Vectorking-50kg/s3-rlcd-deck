@@ -61,6 +61,8 @@ typedef struct {
     uint64_t owner_generation;
     uint64_t usb_tx_rejected;
     uint32_t uart_install_failures;
+    uint64_t uart_fifo_overflows;
+    uint64_t uart_driver_buffer_full;
     bool uart_install_failed;
     bool uart_installed;
 } deck_serial_view_model_t;

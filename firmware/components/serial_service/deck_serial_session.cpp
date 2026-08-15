@@ -85,21 +85,26 @@ void expire_web_lease(deck_serial_session_t *session, uint64_t now_ms)
     }
 }
 
-void disarm(deck_serial_session_t *session)
+bool disarm(deck_serial_session_t *session)
 {
     const bool installed = session->uart_installed;
+    const bool state_changed = session->state != DECK_SERIAL_DISARMED;
     session->state = DECK_SERIAL_DISARMED;
     clear_web_lease(session);
     session->hardware.clear_usb_tx(session->hardware.context);
     session->hardware.clear_web_tx(session->hardware.context);
+    bool uninstalled = true;
     if (installed) {
-        session->hardware.uninstall_uart(session->hardware.context);
+        uninstalled = session->hardware.uninstall_uart(session->hardware.context);
     }
-    session->uart_installed = false;
+    session->uart_installed = installed && !uninstalled;
     session->hardware.set_tx_high_impedance(session->hardware.context);
-    session->owner_generation = increment_nonzero(session->owner_generation);
+    if (state_changed) {
+        session->owner_generation = increment_nonzero(session->owner_generation);
+    }
     session->has_last_request = false;
     session->last_request_id = 0;
+    return uninstalled;
 }
 
 }  // namespace
@@ -123,17 +128,20 @@ deck_serial_session_t *deck_serial_session_create(
     return session;
 }
 
-void deck_serial_session_destroy(deck_serial_session_t *session)
+bool deck_serial_session_destroy(deck_serial_session_t *session)
 {
     if (session == nullptr) {
-        return;
+        return true;
     }
     if (session->state != DECK_SERIAL_DISARMED || session->uart_installed) {
-        disarm(session);
+        if (!disarm(session)) {
+            return false;
+        }
     } else {
         session->hardware.set_tx_high_impedance(session->hardware.context);
     }
     delete session;
+    return true;
 }
 
 bool deck_serial_session_enter(
@@ -155,10 +163,28 @@ bool deck_serial_session_enter(
         fill_result(session, DECK_SERIAL_COMMAND_NO_CHANGE, 0, result);
         return true;
     }
-    if (!session->hardware.install_uart(session->hardware.context)) {
+    if (session->uart_installed) {
+        if (!session->hardware.uninstall_uart(session->hardware.context)) {
+            session->hardware.set_tx_high_impedance(session->hardware.context);
+            fill_result(
+                session,
+                DECK_SERIAL_COMMAND_UART_UNINSTALL_FAILED,
+                0,
+                result
+            );
+            return true;
+        }
+        session->uart_installed = false;
+    }
+    const uint64_t next_session_id = increment_nonzero(session->session_id);
+    if (!session->hardware.install_uart(
+            session->hardware.context,
+            next_session_id
+        )) {
         session->hardware.clear_usb_tx(session->hardware.context);
         session->hardware.clear_web_tx(session->hardware.context);
-        session->hardware.uninstall_uart(session->hardware.context);
+        session->uart_installed =
+            !session->hardware.uninstall_uart(session->hardware.context);
         session->hardware.set_tx_high_impedance(session->hardware.context);
         if (session->uart_install_failures != std::numeric_limits<uint32_t>::max()) {
             ++session->uart_install_failures;
@@ -169,7 +195,7 @@ bool deck_serial_session_enter(
     }
     session->uart_install_failed = false;
     session->uart_installed = true;
-    session->session_id = increment_nonzero(session->session_id);
+    session->session_id = next_session_id;
     session->owner_generation = increment_nonzero(session->owner_generation);
     session->state = DECK_SERIAL_USB_TX;
     session->usb_tx_rejected = 0;
@@ -198,8 +224,23 @@ bool deck_serial_session_exit(
         fill_result(session, DECK_SERIAL_COMMAND_NO_CHANGE, 0, result);
         return true;
     }
-    disarm(session);
-    fill_result(session, DECK_SERIAL_COMMAND_APPLIED, 0, result);
+    const bool state_changed = session->state != DECK_SERIAL_DISARMED;
+    if (!disarm(session)) {
+        fill_result(
+            session,
+            DECK_SERIAL_COMMAND_UART_UNINSTALL_FAILED,
+            0,
+            result
+        );
+        return true;
+    }
+    fill_result(
+        session,
+        state_changed ? DECK_SERIAL_COMMAND_APPLIED
+                      : DECK_SERIAL_COMMAND_NO_CHANGE,
+        0,
+        result
+    );
     return true;
 }
 
