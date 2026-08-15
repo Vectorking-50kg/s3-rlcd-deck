@@ -16,6 +16,7 @@ func TestEmbeddedConsoleContainsCompleteChineseSchemeCWorkflows(t *testing.T) {
 			"Deck 清单", "网络与信任", "系统设置", "固件更新", "诊断", "托盘 / 菜单",
 			"provider-form", "management-token", "provider-headers", "map-reset-format",
 			"backup-mode", "backup-conflicts", "providers_only", "replace", "merge",
+			`role="alert"`, "console-alert", "providers-alert", "history-alert", "toast-alert-region",
 		},
 		"/app.js": {
 			"/api/v1/session/refresh", "/api/v1/console", "/api/v1/providers", "/api/v1/providers/order", "/test",
@@ -23,6 +24,8 @@ func TestEmbeddedConsoleContainsCompleteChineseSchemeCWorkflows(t *testing.T) {
 			"/api/v1/pairing/codes", "renderDeckPreview", "showDialog", "visibilitychange",
 			"textContent", "TextEncoder", "reset_format", "keep_existing",
 			"keep_current", "use_backup", "resetBackupPreview", "#import-file",
+			"scrubSensitiveState", "device_hub_advertised_address", "TX 未启用",
+			"state.sync.console.lastSuccess", "保留最后有效数据", "确认替换当前配置",
 		},
 		"/app.css": {"focus-visible", "prefers-reduced-motion", "@media (max-width: 700px)", "@media (max-width: 410px)"},
 	} {

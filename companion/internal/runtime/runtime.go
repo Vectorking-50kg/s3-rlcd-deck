@@ -40,16 +40,17 @@ const (
 )
 
 type Status struct {
-	State                State  `json:"state"`
-	Version              string `json:"version"`
-	ManagementAddress    string `json:"management_address"`
-	DeviceHubAddress     string `json:"device_hub_address"`
-	ConnectedDecks       int    `json:"connected_decks"`
-	LANManagementEnabled bool   `json:"lan_management_enabled"`
-	SecurityWarning      string `json:"security_warning,omitempty"`
-	LastError            string `json:"last_error,omitempty"`
-	HistoryAvailable     bool   `json:"history_available"`
-	HistoryEnabled       bool   `json:"history_enabled"`
+	State                      State  `json:"state"`
+	Version                    string `json:"version"`
+	ManagementAddress          string `json:"management_address"`
+	DeviceHubAddress           string `json:"device_hub_address"`
+	DeviceHubAdvertisedAddress string `json:"device_hub_advertised_address,omitempty"`
+	ConnectedDecks             int    `json:"connected_decks"`
+	LANManagementEnabled       bool   `json:"lan_management_enabled"`
+	SecurityWarning            string `json:"security_warning,omitempty"`
+	LastError                  string `json:"last_error,omitempty"`
+	HistoryAvailable           bool   `json:"history_available"`
+	HistoryEnabled             bool   `json:"history_enabled"`
 }
 
 type Runtime struct {
@@ -93,11 +94,12 @@ func New(config Config) (*Runtime, error) {
 		return nil, err
 	}
 	status := Status{
-		State:                StateNew,
-		Version:              normalized.Version,
-		ManagementAddress:    normalized.Management.Address,
-		DeviceHubAddress:     normalized.DeviceHub.Address,
-		LANManagementEnabled: normalized.Management.AllowLAN,
+		State:                      StateNew,
+		Version:                    normalized.Version,
+		ManagementAddress:          normalized.Management.Address,
+		DeviceHubAddress:           normalized.DeviceHub.Address,
+		DeviceHubAdvertisedAddress: normalized.DeviceHub.AdvertisedAddress,
+		LANManagementEnabled:       normalized.Management.AllowLAN,
 	}
 	if normalized.Management.AllowLAN {
 		status.SecurityWarning = "management Web is exposed beyond loopback"
@@ -733,9 +735,15 @@ func shutdownServers(ctx context.Context, servers ...*http.Server) error {
 }
 
 func (application *Runtime) setState(state State, managementAddress string, deviceHubAddress string) {
+	deviceHubAdvertisedAddress := resolveDeviceHubAdvertisedAddress(
+		deviceHubAddress,
+		application.config.DeviceHub.AdvertisedAddress,
+		preferredAdvertisedIPv4(),
+	)
 	application.mu.Lock()
 	defer application.mu.Unlock()
 	application.status.State = state
 	application.status.ManagementAddress = managementAddress
 	application.status.DeviceHubAddress = deviceHubAddress
+	application.status.DeviceHubAdvertisedAddress = deviceHubAdvertisedAddress
 }

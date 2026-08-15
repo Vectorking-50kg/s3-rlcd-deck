@@ -61,6 +61,11 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		"0.0.0.0:7780",
 		"independent address for Deck device traffic",
 	)
+	deviceHubAdvertisedAddress := flags.String(
+		"device-hub-advertised-address",
+		"",
+		"routable IP:port advertised to Decks (default: infer the default-route IP and listener port)",
+	)
 	allowLANManagement := flags.Bool(
 		"allow-lan-management",
 		false,
@@ -267,8 +272,9 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			AdminToken:    managementTokenValue,
 		},
 		DeviceHub: companionruntime.DeviceHubConfig{
-			Address:        *deviceHubAddress,
-			TLSCertificate: &tlsCertificate,
+			Address:           *deviceHubAddress,
+			AdvertisedAddress: *deviceHubAdvertisedAddress,
+			TLSCertificate:    &tlsCertificate,
 		},
 		Pairing: pairingService,
 	}

@@ -112,6 +112,7 @@ type ManagementLimits struct {
 
 type DeviceHubConfig struct {
 	Address           string
+	AdvertisedAddress string
 	TLSCertificate    *tls.Certificate
 	HeartbeatInterval time.Duration
 	HeartbeatTimeout  time.Duration
@@ -176,6 +177,10 @@ func normalizeConfig(config Config) (Config, error) {
 	}
 	if !deviceHubIP.IsLoopback() && !hasTLSCertificate {
 		return Config{}, ErrDeviceHubTLSRequired
+	}
+	if config.DeviceHub.AdvertisedAddress != "" &&
+		!validAdvertisedDeviceHubAddress(config.DeviceHub.AdvertisedAddress) {
+		return Config{}, errors.New("Device Hub advertised address must be a routable IP address and non-zero port")
 	}
 	if config.DeviceHub.HeartbeatInterval < 0 || config.DeviceHub.HeartbeatTimeout < 0 ||
 		(config.DeviceHub.HeartbeatTimeout != 0 &&

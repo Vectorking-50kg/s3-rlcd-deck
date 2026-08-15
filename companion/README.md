@@ -9,6 +9,9 @@ The current M1 runtime provides:
   connection count, Open Console, Start/Stop, and Quit actions;
 - a loopback-only management listener at `127.0.0.1:7777` by default;
 - an independently authenticated TLS Device Hub listener at `0.0.0.0:7780` by default;
+- a separately reported routable Device Hub endpoint, inferred from the default-route IPv4 address
+  and listener port or pinned with `--device-hub-advertised-address IP:port`; wildcard and loopback
+  listener addresses are never shown to users as Pairing endpoints;
 - management login sessions with strict Origin/CSRF checks on writes;
 - bounded Device Hub headers, bodies, timeouts, concurrency, and per-IP request rate;
 - short-lived, one-time Pairing codes and revocable per-device trust;

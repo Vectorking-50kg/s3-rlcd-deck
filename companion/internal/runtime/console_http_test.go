@@ -13,6 +13,7 @@ import (
 
 func TestConsoleViewIsAuthenticatedStableAndPrivacySafe(t *testing.T) {
 	config := testConfig()
+	config.DeviceHub.AdvertisedAddress = "192.168.50.8:7780"
 	application, err := companionruntime.New(config)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -51,8 +52,10 @@ func TestConsoleViewIsAuthenticatedStableAndPrivacySafe(t *testing.T) {
 	}
 	var document struct {
 		Runtime struct {
-			State   string `json:"state"`
-			Version string `json:"version"`
+			State                      string `json:"state"`
+			Version                    string `json:"version"`
+			DeviceHubAddress           string `json:"device_hub_address"`
+			DeviceHubAdvertisedAddress string `json:"device_hub_advertised_address"`
 		} `json:"runtime"`
 		Providers    []json.RawMessage `json:"providers"`
 		Sessions     []json.RawMessage `json:"sessions"`
@@ -65,6 +68,8 @@ func TestConsoleViewIsAuthenticatedStableAndPrivacySafe(t *testing.T) {
 		t.Fatalf("decode console response: %v", err)
 	}
 	if document.Runtime.State != "ready" || document.Runtime.Version != config.Version ||
+		document.Runtime.DeviceHubAddress == document.Runtime.DeviceHubAdvertisedAddress ||
+		document.Runtime.DeviceHubAdvertisedAddress != "192.168.50.8:7780" ||
 		document.Providers == nil || document.Sessions == nil || !document.Capabilities.Pairing ||
 		!document.Capabilities.Serial {
 		t.Fatalf("console ViewModel = %#v", document)

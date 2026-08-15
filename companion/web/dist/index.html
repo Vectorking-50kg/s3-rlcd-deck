@@ -44,7 +44,7 @@
           <div class="eyebrow">本机管理</div><h2 id="login-title">解锁 Companion</h2><p id="login-description" class="muted">通常可从托盘选择“打开控制台”，自动获得一次性访问权限。</p>
           <div id="session-resume" class="callout" role="status"><svg class="icon" aria-hidden="true"><use href="#i-clock"></use></svg><div><strong>正在检查本机会话</strong><span>如果托盘已授权，将自动打开控制台。</span></div></div>
           <label class="field" for="management-token"><span>管理 Token</span><input id="management-token" name="token" type="password" autocomplete="current-password" required><small>绝不要在这里输入设备 Token 或 Provider Token。</small></label>
-          <button class="button primary full-width" type="submit">使用 Token 解锁</button><p id="login-message" class="form-message" role="status"></p>
+          <button class="button primary full-width" type="submit">使用 Token 解锁</button><p id="login-message" class="form-message" role="status" aria-live="polite" hidden></p><p id="login-alert" class="form-message error" role="alert" hidden></p>
           <div class="callout compact"><svg class="icon" aria-hidden="true"><use href="#i-shield"></use></svg><div><strong>默认仅允许本机回环访问</strong><span>管理 Token 与设备 Token 使用独立权限。</span></div></div>
         </form>
       </div>
@@ -79,7 +79,10 @@
         <header class="topbar"><button id="mobile-menu" class="icon-button mobile-menu" type="button" aria-label="打开导航" aria-expanded="false"><svg class="icon"><use href="#i-menu"></use></svg></button><div class="breadcrumbs" aria-label="面包屑"><span>仪表</span><svg class="icon icon-sm"><use href="#i-chevron"></use></svg><span id="breadcrumb-domain">首页</span><svg class="icon icon-sm"><use href="#i-chevron"></use></svg><strong id="breadcrumb-page">概览</strong></div><div class="topbar-status"><span id="companion-badge" class="status-pill neutral">Companion 连接中</span><span id="deck-badge" class="status-pill neutral">Deck —</span><button id="refresh-console" class="icon-button" type="button" aria-label="刷新控制台"><svg class="icon"><use href="#i-refresh"></use></svg></button><span class="avatar" aria-label="当前用户">本机</span></div></header>
 
         <main id="main-content" class="content" tabindex="-1">
-          <p id="global-message" class="global-message" role="status" aria-live="polite"></p>
+          <p id="global-message" class="global-message" role="status" aria-live="polite" hidden></p>
+          <p id="global-alert" class="global-message" role="alert" hidden></p>
+          <p id="console-status" class="resource-message" role="status" aria-live="polite" hidden></p>
+          <p id="console-alert" class="resource-message error" role="alert" hidden></p>
 
           <section class="page" data-page-view="overview">
             <div class="page-heading"><div><div class="eyebrow">运行总览</div><h1>概览</h1><p>快速确认 Companion、Deck、Provider 和最近会话是否健康；异常项提供明确的下一步。</p></div><div class="page-actions"><button class="button" type="button" data-action="refresh"><svg class="icon"><use href="#i-refresh"></use></svg>刷新快照</button><button class="button primary" type="button" data-page="providers">管理 Provider<svg class="icon"><use href="#i-chevron"></use></svg></button></div></div>
@@ -91,6 +94,7 @@
 
           <section class="page" data-page-view="providers" hidden>
             <div class="page-heading"><div><div class="eyebrow">数据采集</div><h1>AI Provider</h1><p>配置展示顺序和轮询频率；单个 Provider 失败不会影响其他模块。</p></div><div class="page-actions"><button id="new-provider" class="button primary" type="button"><svg class="icon"><use href="#i-plus"></use></svg>添加 Provider</button></div></div>
+            <p id="providers-status" class="resource-message" role="status" aria-live="polite" hidden></p><p id="providers-alert" class="resource-message error" role="alert" hidden></p>
             <div class="callout"><svg class="icon icon-lg"><use href="#i-shield"></use></svg><div><strong>凭据由操作系统凭据库保存</strong><span>浏览器只提交一次密钥值，之后仅能看到“已配置”状态。</span></div></div>
             <div class="filter-row section-block" aria-label="Provider 筛选"><button class="chip active" type="button" data-provider-filter="all">全部</button><button class="chip" type="button" data-provider-filter="ok">正常</button><button class="chip" type="button" data-provider-filter="degraded">降级</button><button class="chip" type="button" data-provider-filter="unavailable">不可用</button></div><div id="provider-list" class="provider-grid" aria-live="polite"></div>
           </section>
@@ -105,6 +109,7 @@
 
           <section class="page" data-page-view="history" hidden>
             <div class="page-heading"><div><div class="eyebrow">本机历史</div><h1>用量历史</h1><p>只保存规范化小时级快照，不保存 Prompt、回复、Provider 原始响应或串口正文。</p></div><div class="page-actions"><a class="button" href="/api/v1/history/export.csv" download><svg class="icon"><use href="#i-download"></use></svg>导出 CSV</a><button id="clear-history" class="button danger" type="button">清空历史…</button></div></div>
+            <p id="history-status" class="resource-message" role="status" aria-live="polite" hidden></p><p id="history-alert" class="resource-message error" role="alert" hidden></p>
             <section class="metric-grid"><article class="metric-card"><span>记录数</span><strong id="history-count">—</strong><small>当前筛选范围</small></article><article class="metric-card"><span>Provider</span><strong id="history-provider-count">—</strong><small>具有历史记录的数据源</small></article><article class="metric-card"><span>Token 总量</span><strong id="history-token-total">—</strong><small>只聚合已知 Token</small></article><article class="metric-card"><span>保留策略</span><strong id="history-retention">90 天</strong><small>UTC 小时级记录</small></article></section>
             <div class="surface-card toolbar section-block"><label class="check-row inline"><input id="history-enabled" type="checkbox"><span><strong>保存用量历史</strong><small>更改只影响后续快照</small></span></label><button id="save-history" class="button small" type="button">保存设置</button><div class="toolbar-spacer"></div><label class="field compact"><span>Provider</span><select id="history-provider"><option value="">全部 Provider</option></select></label><button id="refresh-history" class="button small" type="button"><svg class="icon"><use href="#i-refresh"></use></svg>刷新</button></div><div class="table-wrap section-block"><table><thead><tr><th>观测时间</th><th>Provider</th><th>状态</th><th>余额</th><th>Token</th><th>错误码</th></tr></thead><tbody id="history-table"></tbody></table></div>
           </section>
@@ -138,6 +143,7 @@
 
     <dialog id="app-dialog" class="app-dialog" aria-labelledby="dialog-title"><form method="dialog"><div class="dialog-header"><div><div id="dialog-eyebrow" class="eyebrow">确认操作</div><h2 id="dialog-title">确认</h2></div><button class="icon-button" value="cancel" aria-label="关闭对话框"><svg class="icon"><use href="#i-close"></use></svg></button></div><div id="dialog-body" class="dialog-body"></div><div class="dialog-footer"><button id="dialog-cancel" class="button" value="cancel">取消</button><button id="dialog-confirm" class="button primary" value="confirm">确认</button></div></form></dialog>
     <div id="toast-region" class="toast-region" role="status" aria-live="polite"></div>
+    <div id="toast-alert-region" class="toast-region" role="alert"></div>
     <script src="/app.js?v=scheme-c-1" defer></script>
   </body>
 </html>
