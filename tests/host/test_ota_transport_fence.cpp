@@ -1,6 +1,8 @@
 #include "deck_ota_transport_fence.h"
 
+#include <atomic>
 #include <cassert>
+#include <thread>
 
 namespace {
 
@@ -41,11 +43,40 @@ void commit_that_linearizes_first_may_finish_before_abort_cleanup()
     fence.end_transaction();
 }
 
+void begin_transaction_and_abort_are_one_atomic_epoch_state_race()
+{
+    for (unsigned iteration = 0; iteration < 10'000; ++iteration) {
+        DeckOtaTransportFence fence;
+        const uint32_t old_epoch = fence.capture_epoch();
+        std::atomic<bool> start{false};
+        std::thread begin([&]() {
+            while (!start.load(std::memory_order_acquire)) {
+            }
+            (void)fence.begin_transaction(old_epoch);
+        });
+        std::thread abort([&]() {
+            while (!start.load(std::memory_order_acquire)) {
+            }
+            fence.begin_abort();
+        });
+        start.store(true, std::memory_order_release);
+        begin.join();
+        abort.join();
+
+        assert(!fence.accepts(old_epoch));
+        assert(!fence.try_begin_commit());
+        fence.finish_abort();
+        assert(fence.begin_transaction(fence.capture_epoch()));
+        fence.end_transaction();
+    }
+}
+
 }  // namespace
 
 int main()
 {
     abort_rejects_queued_commands_and_not_yet_committing_transaction();
     commit_that_linearizes_first_may_finish_before_abort_cleanup();
+    begin_transaction_and_abort_are_one_atomic_epoch_state_race();
     return 0;
 }

@@ -2,7 +2,7 @@
 
 uint32_t DeckOtaTransportFence::capture_epoch() const
 {
-    return epoch_.load(std::memory_order_acquire);
+    return epoch_of(word_.load(std::memory_order_acquire));
 }
 
 bool DeckOtaTransportFence::accepts(uint32_t command_epoch) const
@@ -12,13 +12,13 @@ bool DeckOtaTransportFence::accepts(uint32_t command_epoch) const
 
 bool DeckOtaTransportFence::begin_transaction(uint32_t command_epoch)
 {
-    if (!accepts(command_epoch)) {
+    uint32_t current = word_.load(std::memory_order_acquire);
+    if (epoch_of(current) != command_epoch || state_of(current) != State::idle) {
         return false;
     }
-    State expected = State::idle;
-    return state_.compare_exchange_strong(
-        expected,
-        State::active,
+    return word_.compare_exchange_strong(
+        current,
+        encode(command_epoch, State::active),
         std::memory_order_acq_rel,
         std::memory_order_acquire
     );
@@ -26,10 +26,13 @@ bool DeckOtaTransportFence::begin_transaction(uint32_t command_epoch)
 
 bool DeckOtaTransportFence::try_begin_commit()
 {
-    State expected = State::active;
-    return state_.compare_exchange_strong(
-        expected,
-        State::committing,
+    uint32_t current = word_.load(std::memory_order_acquire);
+    if (state_of(current) != State::active) {
+        return false;
+    }
+    return word_.compare_exchange_strong(
+        current,
+        encode(epoch_of(current), State::committing),
         std::memory_order_acq_rel,
         std::memory_order_acquire
     );
@@ -37,41 +40,62 @@ bool DeckOtaTransportFence::try_begin_commit()
 
 void DeckOtaTransportFence::finish_commit()
 {
-    State expected = State::committing;
-    (void)state_.compare_exchange_strong(
-        expected,
-        State::idle,
-        std::memory_order_acq_rel,
-        std::memory_order_acquire
-    );
-}
-
-void DeckOtaTransportFence::begin_abort()
-{
-    State state = state_.load(std::memory_order_acquire);
-    while (state != State::committing && state != State::aborting &&
-           !state_.compare_exchange_weak(
-               state,
-               State::aborting,
+    uint32_t current = word_.load(std::memory_order_acquire);
+    while (state_of(current) == State::committing &&
+           !word_.compare_exchange_weak(
+               current,
+               encode(epoch_of(current), State::idle),
                std::memory_order_acq_rel,
                std::memory_order_acquire
            )) {
     }
-    (void)epoch_.fetch_add(1, std::memory_order_acq_rel);
+}
+
+void DeckOtaTransportFence::begin_abort()
+{
+    uint32_t current = word_.load(std::memory_order_acquire);
+    while (true) {
+        const State current_state = state_of(current);
+        const State next_state = current_state == State::committing
+                                     ? State::committing
+                                     : State::aborting;
+        const uint32_t current_epoch = epoch_of(current);
+        const uint32_t next_epoch = current_epoch == kMaximumEpoch
+                                        ? 1U
+                                        : current_epoch + 1U;
+        if (word_.compare_exchange_weak(
+                current,
+                encode(next_epoch, next_state),
+               std::memory_order_acq_rel,
+               std::memory_order_acquire
+            )) {
+            return;
+        }
+    }
 }
 
 void DeckOtaTransportFence::finish_abort()
 {
-    state_.store(State::idle, std::memory_order_release);
+    uint32_t current = word_.load(std::memory_order_acquire);
+    while (state_of(current) != State::idle &&
+           !word_.compare_exchange_weak(
+               current,
+               encode(epoch_of(current), State::idle),
+               std::memory_order_acq_rel,
+               std::memory_order_acquire
+           )) {
+    }
 }
 
 void DeckOtaTransportFence::end_transaction()
 {
-    State expected = State::active;
-    (void)state_.compare_exchange_strong(
-        expected,
-        State::idle,
-        std::memory_order_acq_rel,
-        std::memory_order_acquire
-    );
+    uint32_t current = word_.load(std::memory_order_acquire);
+    while (state_of(current) == State::active &&
+           !word_.compare_exchange_weak(
+               current,
+               encode(epoch_of(current), State::idle),
+               std::memory_order_acq_rel,
+               std::memory_order_acquire
+           )) {
+    }
 }

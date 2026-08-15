@@ -32,6 +32,24 @@ public:
 private:
     enum class State : uint8_t { idle, active, committing, aborting };
 
-    std::atomic<uint32_t> epoch_{1};
-    std::atomic<State> state_{State::idle};
+    static constexpr uint32_t kStateBits = 2;
+    static constexpr uint32_t kStateMask = (1U << kStateBits) - 1U;
+    static constexpr uint32_t kMaximumEpoch = UINT32_MAX >> kStateBits;
+
+    static constexpr uint32_t encode(uint32_t epoch, State state)
+    {
+        return (epoch << kStateBits) | static_cast<uint32_t>(state);
+    }
+    static constexpr uint32_t epoch_of(uint32_t word)
+    {
+        return word >> kStateBits;
+    }
+    static constexpr State state_of(uint32_t word)
+    {
+        return static_cast<State>(word & kStateMask);
+    }
+
+    // Epoch and state share one CAS word so begin_transaction cannot validate
+    // an old epoch and later acquire a freshly-idle state from another epoch.
+    std::atomic<uint32_t> word_{encode(1, State::idle)};
 };
