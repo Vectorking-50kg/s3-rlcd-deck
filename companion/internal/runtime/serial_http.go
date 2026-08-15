@@ -183,23 +183,28 @@ func (application *Runtime) handleSerialObserve(response http.ResponseWriter, re
 		http.Error(response, "Serial observer unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	defer application.serialHub.Ring().CloseObserver(observerID)
 	connection, err := websocket.Accept(response, request, &websocket.AcceptOptions{
 		Subprotocols: []string{serialObserverSubprotocol},
 	})
 	if err != nil {
+		application.serialHub.Ring().CloseObserver(observerID)
 		return
 	}
-	defer connection.CloseNow()
 	if connection.Subprotocol() != serialObserverSubprotocol {
 		_ = connection.Close(websocket.StatusPolicyViolation, "unsupported Serial observer")
+		application.serialHub.Ring().CloseObserver(observerID)
 		return
 	}
 	if !application.serialObservers.register(connection) {
 		_ = connection.Close(websocket.StatusGoingAway, "Companion is stopping")
+		application.serialHub.Ring().CloseObserver(observerID)
 		return
 	}
-	defer application.serialObservers.unregister(connection)
+	defer func() {
+		_ = connection.CloseNow()
+		application.serialHub.Ring().CloseObserver(observerID)
+		application.serialObservers.unregister(connection)
+	}()
 	connection.SetReadLimit(4 << 10)
 	clientID, err := randomWebToken()
 	if err != nil {
