@@ -14,6 +14,7 @@ import re
 import shutil
 import stat
 import subprocess
+import tempfile
 import zipfile
 
 
@@ -269,21 +270,33 @@ def main() -> int:
     repository = args.repository_root.resolve(strict=True)
     companion = repository / "companion"
     notices_path = companion / "notices" / "licenses"
-    output = args.output_root
-    output.mkdir(parents=True, exist_ok=True)
+    output = args.output_root.absolute()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if output.is_symlink() or output.exists() and not output.is_dir():
+        raise SystemExit("release output must be an ordinary directory path")
+    if output.exists() and any(output.iterdir()):
+        raise SystemExit("release output must be empty to prevent stale unhashed artifacts")
+    if output.exists():
+        output.rmdir()
+    staging = Path(tempfile.mkdtemp(prefix=".companion-packages-", dir=output.parent))
     created = dt.datetime.fromtimestamp(args.source_date_epoch, dt.UTC).isoformat().replace("+00:00", "Z")
-    notices = combined_notices(notices_path)
-    sbom = make_sbom(companion, notices_path, args.version, args.commit, created)
-    reproduce = reproducibility(args.version, args.commit, args.source_date_epoch)
-    archives = [
-        package_target(
-            args.artifact_root, output, target, binary, args.version, args.commit,
-            args.source_date_epoch, notices, sbom, reproduce,
-        )
-        for target, binary in TARGETS
-    ]
-    sums = "".join(f"{sha256(path)}  {path.name}\n" for path in sorted(archives))
-    write(output / "SHA256SUMS", sums.encode())
+    try:
+        notices = combined_notices(notices_path)
+        sbom = make_sbom(companion, notices_path, args.version, args.commit, created)
+        reproduce = reproducibility(args.version, args.commit, args.source_date_epoch)
+        archives = [
+            package_target(
+                args.artifact_root, staging, target, binary, args.version, args.commit,
+                args.source_date_epoch, notices, sbom, reproduce,
+            )
+            for target, binary in TARGETS
+        ]
+        sums = "".join(f"{sha256(path)}  {path.name}\n" for path in sorted(archives))
+        write(staging / "SHA256SUMS", sums.encode())
+        os.replace(staging, output)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
     return 0
 
 

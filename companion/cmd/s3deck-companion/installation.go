@@ -70,24 +70,44 @@ func runInstallationCommand(
 		// Hold both fences through activation. A new login process recognizes the
 		// maintenance fence and waits; an unrelated running process makes this
 		// command fail without being killed.
-		maintenance, err = installation.AcquireMaintenance(config.DataDirectory)
-		if err == nil {
-			instance, err = desktop.AcquireSingleInstance(config.DataDirectory)
-		}
+		maintenance, instance, err = acquireInstallationFences(config.DataDirectory)
 		if err != nil {
-			if maintenance != nil {
-				_ = maintenance.Close()
-			}
 			fmt.Fprintln(stderr, "quit the running Companion before changing its installation")
 			return 2
 		}
-		defer maintenance.Close()
-		defer instance.Close()
 	}
-	manager, err := installation.Open(installation.Config{
+	defer func() {
+		if instance != nil {
+			_ = instance.Close()
+		}
+		if maintenance != nil {
+			_ = maintenance.Close()
+		}
+	}()
+	managerConfig := installation.Config{
 		RootDirectory: root, DataDirectory: config.DataDirectory,
-	})
+	}
+	var manager *installation.Manager
+	if config.Install {
+		manager, err = installation.Open(managerConfig)
+	} else {
+		manager, err = installation.OpenWithoutRecovery(managerConfig)
+		if errors.Is(err, installation.ErrRecoveryRequired) {
+			// Recovery may restore the live database and configuration. Escalate
+			// to both fences only for an actual interrupted transaction; normal
+			// status and login-startup changes remain usable while the app runs.
+			maintenance, instance, err = acquireInstallationFences(config.DataDirectory)
+			if err == nil {
+				manager, err = installation.Open(managerConfig)
+			}
+		}
+	}
 	if err != nil {
+		if errors.Is(err, desktop.ErrAlreadyRunning) ||
+			errors.Is(err, installation.ErrRecoveryRequired) {
+			fmt.Fprintln(stderr, "quit the running Companion before recovering its installation")
+			return 2
+		}
 		fmt.Fprintln(stderr, "cannot open the per-user installation")
 		return 2
 	}
@@ -149,6 +169,23 @@ func runInstallationCommand(
 		}
 	}
 	return 0
+}
+
+func acquireInstallationFences(dataDirectory string) (
+	*installation.Maintenance,
+	*desktop.SingleInstance,
+	error,
+) {
+	maintenance, err := installation.AcquireMaintenance(dataDirectory)
+	if err != nil {
+		return nil, nil, err
+	}
+	instance, err := desktop.AcquireSingleInstance(dataDirectory)
+	if err != nil {
+		_ = maintenance.Close()
+		return nil, nil, err
+	}
+	return maintenance, instance, nil
 }
 
 func exactlyOneLifecycleCommand(config installationCommandConfig) bool {

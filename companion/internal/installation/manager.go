@@ -42,6 +42,17 @@ type Manager struct {
 }
 
 func Open(config Config) (*Manager, error) {
+	return openManager(config, true)
+}
+
+// OpenWithoutRecovery opens a stable installation for status and startup
+// registration changes that are safe while the Companion is running. It
+// refuses an interrupted transaction instead of restoring live data.
+func OpenWithoutRecovery(config Config) (*Manager, error) {
+	return openManager(config, false)
+}
+
+func openManager(config Config, recoverInterrupted bool) (*Manager, error) {
 	root, err := filepath.Abs(filepath.Clean(config.RootDirectory))
 	if err != nil || root == "" || config.RootDirectory == "" {
 		return nil, ErrInvalid
@@ -68,23 +79,49 @@ func Open(config Config) (*Manager, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: acquire installation lock", ErrUnavailable)
 	}
+	platform := config.platform
+	if platform == nil {
+		platform = newPlatformAdapter(root)
+	}
 	manager := &Manager{
 		root: root, dataDirectory: dataDirectory, now: config.Now,
-		platform: newPlatformAdapter(root), lock: lock, migrate: migrateData,
+		platform: platform, lock: lock, migrate: migrateData,
 		availableBytes: config.AvailableBytes,
 	}
 	if manager.platform == nil {
 		_ = lock.Close()
 		return nil, ErrUnavailable
 	}
-	recoveryContext, cancelRecovery := context.WithTimeout(context.Background(), 30*time.Second)
-	err = manager.recover(recoveryContext)
-	cancelRecovery()
+	if !recoverInterrupted {
+		var required bool
+		required, err = manager.recoveryRequired()
+		if err == nil && required {
+			err = ErrRecoveryRequired
+		}
+	} else {
+		recoveryContext, cancelRecovery := context.WithTimeout(context.Background(), 30*time.Second)
+		err = manager.recover(recoveryContext)
+		cancelRecovery()
+	}
 	if err != nil {
 		_ = lock.Close()
 		return nil, err
 	}
 	return manager, nil
+}
+
+func (manager *Manager) recoveryRequired() (bool, error) {
+	_, err := os.Lstat(manager.journalPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("%w: inspect installation journal", ErrUnavailable)
+	}
+	// Any object at the journal path requires fenced recovery. Open() will
+	// validate its type, permissions, schema, and contents after that fence is
+	// held; this read-only probe must never mutate live data.
+	return true, nil
 }
 
 func (manager *Manager) Close() error {
@@ -315,7 +352,7 @@ func (manager *Manager) statusFromState(
 
 func (manager *Manager) recover(ctx context.Context) error {
 	document, err := protectedfile.Read(manager.journalPath(), 64<<10)
-	if errors.Is(err, os.ErrNotExist) || err == nil && len(document) == 0 {
+	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {

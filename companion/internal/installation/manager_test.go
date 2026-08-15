@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -177,6 +178,105 @@ func TestInterruptedTransactionJournalRecoversBeforeNextOperation(t *testing.T) 
 	}
 	if _, err = os.Lstat(manager.journalPath()); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("journal remained after successful recovery")
+	}
+}
+
+func TestKilledInstallationTransactionRecoversOnNextFencedOpen(t *testing.T) {
+	if os.Getenv("S3DECK_INSTALLATION_KILL_HELPER") == "1" {
+		root := os.Getenv("S3DECK_INSTALLATION_KILL_ROOT")
+		data := os.Getenv("S3DECK_INSTALLATION_KILL_DATA")
+		ready := os.Getenv("S3DECK_INSTALLATION_KILL_READY")
+		manager, err := Open(Config{
+			RootDirectory: root, DataDirectory: data, platform: &fakePlatform{},
+			Now: func() time.Time { return time.Date(2026, 8, 15, 8, 0, 0, 0, time.UTC) },
+		})
+		if err != nil {
+			os.Exit(21)
+		}
+		dataPath := filepath.Join(manager.dataDirectory, "pairing.json")
+		if _, err = protectedfile.Replace(dataPath, []byte("prior trust")); err != nil {
+			os.Exit(22)
+		}
+		manager.migrate = func(context.Context, string) error {
+			if _, writeErr := protectedfile.Replace(dataPath, []byte("partial trust")); writeErr != nil {
+				os.Exit(23)
+			}
+			if writeErr := os.WriteFile(ready, []byte("ready"), 0o600); writeErr != nil {
+				os.Exit(24)
+			}
+			// The parent terminates us without deferred cleanup, modeling a
+			// kill inside the real Apply transaction after the snapshot and
+			// journal are durable but migration is incomplete.
+			for {
+				time.Sleep(time.Hour)
+			}
+		}
+		executable, err := os.Executable()
+		if err != nil {
+			os.Exit(25)
+		}
+		_, _ = manager.Apply(context.Background(), Request{
+			SourceExecutable: executable, Version: "2.0.0", Commit: "abcdef012345",
+			DeviceHubAddress: "127.0.0.1:7780",
+		})
+		os.Exit(26)
+	}
+
+	directory := t.TempDir()
+	root := filepath.Join(directory, "安装 根")
+	data := filepath.Join(directory, "用户 数据")
+	ready := filepath.Join(directory, "ready")
+	command := exec.Command(os.Args[0], "-test.run=^TestKilledInstallationTransactionRecoversOnNextFencedOpen$")
+	command.Env = append(os.Environ(),
+		"S3DECK_INSTALLATION_KILL_HELPER=1",
+		"S3DECK_INSTALLATION_KILL_ROOT="+root,
+		"S3DECK_INSTALLATION_KILL_DATA="+data,
+		"S3DECK_INSTALLATION_KILL_READY="+ready,
+	)
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Lstat(ready); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			_ = command.Process.Kill()
+			_ = command.Wait()
+			t.Fatal("kill helper did not durably reach the interrupted transaction")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := command.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Wait(); err == nil {
+		t.Fatal("kill helper exited normally")
+	}
+
+	if manager, err := OpenWithoutRecovery(Config{
+		RootDirectory: root, DataDirectory: data, platform: &fakePlatform{},
+	}); !errors.Is(err, ErrRecoveryRequired) || manager != nil {
+		t.Fatalf("unfenced open after kill = %#v, %v", manager, err)
+	}
+	contents, err := protectedfile.Read(filepath.Join(data, "pairing.json"), 1024)
+	if err != nil || string(contents) != "partial trust" {
+		t.Fatalf("unfenced probe mutated live data: %q, %v", contents, err)
+	}
+	manager, err := Open(Config{
+		RootDirectory: root, DataDirectory: data, platform: &fakePlatform{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	contents, err = protectedfile.Read(filepath.Join(data, "pairing.json"), 1024)
+	if err != nil || string(contents) != "prior trust" {
+		t.Fatalf("fenced recovery after kill = %q, %v", contents, err)
+	}
+	if _, err = os.Lstat(filepath.Join(root, journalFileName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("journal remained after killed-process recovery: %v", err)
 	}
 }
 

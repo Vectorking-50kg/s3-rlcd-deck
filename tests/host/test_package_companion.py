@@ -53,6 +53,23 @@ class CompanionPackageContractTest(unittest.TestCase):
             sums = (outputs[0] / "SHA256SUMS").read_text()
             for archive in first_archives:
                 self.assertIn(hashlib.sha256(archive.read_bytes()).hexdigest(), sums)
+            self.assertEqual(
+                {archive.name for archive in first_archives},
+                {line.split("  ", 1)[1] for line in sums.splitlines()},
+            )
+
+            stale_attempt = subprocess.run([
+                "python3", str(PACKAGER),
+                "--repository-root", str(REPOSITORY),
+                "--artifact-root", str(artifacts),
+                "--output-root", str(outputs[0]),
+                "--version", "2.0.0-test",
+                "--commit", "abcdef012345",
+                "--source-date-epoch", "1786838400",
+            ], capture_output=True, text=True, timeout=60)
+            self.assertNotEqual(0, stale_attempt.returncode)
+            self.assertIn("must be empty", stale_attempt.stderr)
+            self.assertEqual(3, len(list(outputs[0].glob("*.zip"))))
 
             with zipfile.ZipFile(next(path for path in first_archives if "windows" in path.name)) as archive:
                 names = set(archive.namelist())

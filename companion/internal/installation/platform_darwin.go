@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/protectedfile"
 )
@@ -21,7 +22,9 @@ type darwinAdapter struct {
 	label        string
 	plistPath    string
 	templatePath string
+	domain       string
 	service      string
+	run          func(context.Context, string, ...string) ([]byte, error)
 }
 
 func newPlatformAdapter(root string) platformAdapter {
@@ -31,7 +34,8 @@ func newPlatformAdapter(root string) platformAdapter {
 	return &darwinAdapter{
 		label: label, plistPath: filepath.Join(home, "Library", "LaunchAgents", label+".plist"),
 		templatePath: filepath.Join(root, "launchagent.plist"),
-		service:      domain + "/" + label,
+		domain:       domain, service: domain + "/" + label,
+		run: runPlatformCommand,
 	}
 }
 
@@ -57,7 +61,7 @@ func (adapter *darwinAdapter) Configure(ctx context.Context, spec launchSpec) er
 	if err != nil {
 		return err
 	}
-	_, _ = runPlatformCommand(ctx, "/bin/launchctl", "bootout", adapter.service)
+	_, _ = adapter.command(ctx, "/bin/launchctl", "bootout", adapter.service)
 	if err = os.Remove(adapter.plistPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -68,7 +72,6 @@ func (adapter *darwinAdapter) Configure(ctx context.Context, spec launchSpec) er
 }
 
 func (adapter *darwinAdapter) SetEnabled(ctx context.Context, enabled bool) error {
-	_ = ctx
 	if enabled {
 		document, err := protectedfile.Read(adapter.templatePath, 64<<10)
 		if err != nil {
@@ -78,7 +81,14 @@ func (adapter *darwinAdapter) SetEnabled(ctx context.Context, enabled bool) erro
 		if _, err = protectedfile.ReplaceFile(adapter.plistPath, document); err != nil {
 			return err
 		}
+		if _, err = adapter.command(ctx, "/bin/launchctl", "enable", adapter.service); err != nil {
+			_ = os.Remove(adapter.plistPath)
+			return err
+		}
 		return nil
+	}
+	if _, err := adapter.command(ctx, "/bin/launchctl", "disable", adapter.service); err != nil {
+		return err
 	}
 	if err := os.Remove(adapter.plistPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -87,7 +97,7 @@ func (adapter *darwinAdapter) SetEnabled(ctx context.Context, enabled bool) erro
 }
 
 func (adapter *darwinAdapter) Remove(ctx context.Context) error {
-	_, _ = runPlatformCommand(ctx, "/bin/launchctl", "bootout", adapter.service)
+	_, _ = adapter.command(ctx, "/bin/launchctl", "bootout", adapter.service)
 	if err := os.Remove(adapter.plistPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -98,7 +108,6 @@ func (adapter *darwinAdapter) Remove(ctx context.Context) error {
 }
 
 func (adapter *darwinAdapter) Status(ctx context.Context) (platformStatus, error) {
-	_ = ctx
 	templateExists, err := ordinaryRegularFile(adapter.templatePath)
 	if err != nil {
 		return platformStatus{}, err
@@ -128,7 +137,51 @@ func (adapter *darwinAdapter) Status(ctx context.Context) (platformStatus, error
 			return platformStatus{}, ErrPlatform
 		}
 	}
-	return platformStatus{Installed: true, Enabled: liveExists}, nil
+	disabledDocument, err := adapter.command(
+		ctx, "/bin/launchctl", "print-disabled", adapter.domain,
+	)
+	if err != nil {
+		return platformStatus{}, ErrPlatform
+	}
+	disabled, err := launchAgentDisabled(disabledDocument, adapter.label)
+	if err != nil {
+		return platformStatus{}, err
+	}
+	return platformStatus{Installed: true, Enabled: liveExists && !disabled}, nil
+}
+
+func (adapter *darwinAdapter) command(
+	ctx context.Context,
+	name string,
+	arguments ...string,
+) ([]byte, error) {
+	if adapter.run == nil {
+		return runPlatformCommand(ctx, name, arguments...)
+	}
+	return adapter.run(ctx, name, arguments...)
+}
+
+func launchAgentDisabled(document []byte, label string) (bool, error) {
+	needle := `"` + label + `"`
+	for _, line := range strings.Split(string(document), "\n") {
+		if !strings.Contains(line, needle) {
+			continue
+		}
+		parts := strings.SplitN(line, "=>", 2)
+		if len(parts) != 2 {
+			return false, ErrPlatform
+		}
+		switch strings.TrimSpace(strings.TrimSuffix(parts[1], ";")) {
+		case "true", "disabled":
+			return true, nil
+		case "false", "enabled":
+			return false, nil
+		default:
+			return false, ErrPlatform
+		}
+	}
+	// launchd defaults an unlisted per-user service to enabled.
+	return false, nil
 }
 
 func ordinaryRegularFile(path string) (bool, error) {

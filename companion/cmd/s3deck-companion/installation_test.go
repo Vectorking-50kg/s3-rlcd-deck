@@ -1,6 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -63,5 +67,36 @@ func TestDeviceHubOverrideBelongsOnlyToInstall(t *testing.T) {
 		},
 	}) {
 		t.Fatal("status accepted an unrelated Device Hub listener")
+	}
+}
+
+func TestInterruptedRecoveryNeverMutatesARunningCompanion(t *testing.T) {
+	directory := t.TempDir()
+	root := filepath.Join(directory, "installation")
+	data := filepath.Join(directory, "data")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	journal := filepath.Join(root, "installation-journal.json")
+	if err := os.WriteFile(journal, []byte("durable interrupted transaction"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	instance, err := desktop.AcquireSingleInstance(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer instance.Close()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	result := runInstallationCommand(installationCommandConfig{
+		Status: true, Root: root, DataDirectory: data,
+		ExplicitFlags: map[string]bool{"installation-status": true},
+	}, &stdout, &stderr)
+	if result != 2 || !strings.Contains(stderr.String(), "quit the running Companion") {
+		t.Fatalf("status during interrupted live transaction = %d, %q", result, stderr.String())
+	}
+	contents, err := os.ReadFile(journal)
+	if err != nil || string(contents) != "durable interrupted transaction" {
+		t.Fatalf("live journal was mutated: %q, %v", contents, err)
 	}
 }

@@ -17,6 +17,9 @@ var (
 	ErrUnavailable = errors.New("Companion installation is unavailable")
 	ErrMigration   = errors.New("Companion data migration failed")
 	ErrPlatform    = errors.New("login startup registration failed")
+	// ErrRecoveryRequired means an interrupted transaction exists. Callers
+	// must exclude the live Companion before reopening with recovery enabled.
+	ErrRecoveryRequired = errors.New("Companion installation recovery requires an exclusive runtime fence")
 )
 
 type Request struct {
@@ -41,6 +44,7 @@ type Config struct {
 	DataDirectory  string
 	Now            func() time.Time
 	AvailableBytes func(string) (uint64, error)
+	platform       platformAdapter
 }
 
 type launchSpec struct {
