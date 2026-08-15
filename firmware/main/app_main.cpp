@@ -343,6 +343,8 @@ void apply_serial_event(const deck_serial_service_event_t &event)
             event.snapshot.owner_generation,
             event.snapshot.usb_tx_rejected,
             event.snapshot.uart_install_failures,
+            event.has_router_stats ? event.router_stats.uart_fifo_overflows : 0,
+            event.has_router_stats ? event.router_stats.uart_driver_buffer_full : 0,
             event.snapshot.uart_install_failed,
             event.snapshot.uart_installed,
         };

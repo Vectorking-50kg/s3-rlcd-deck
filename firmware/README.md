@@ -127,9 +127,36 @@ fault while preserving its cumulative counter. Serial and peripheral tasks start
 after an explicit UI READY event, so asynchronous UI failure cannot leave an invisible,
 armed target. Owner events cross a depth-one latest-state mailbox, so a stalled UI/model
 consumer cannot block BOOT revocation or Lease expiry. The state module contains no
-serial payload buffers, logs, or persistence; the Router and bridge tickets attach their
-bounded in-memory queues behind this owner. The full ownership decision is recorded in
+serial payload buffers, logs, or persistence. The full ownership decision is recorded in
 [`ADR 0017`](../docs/adr/0017-centralize-serial-session-authority-in-one-owner-task.md).
+
+## UART Router and current-session history
+
+Each successful Serial Session creates an ESP-IDF UART event queue, 16 fixed 256-byte
+ingress blocks, and one Router task. The RX task is the sole consumer of GPIO44 data and
+never writes USB, WSS, Flash, logs, or UI synchronously. The Router copies each input once
+into a shared PSRAM pool, assigns a per-session nonzero sequence, and installs references
+in independent USB, WSS, history, and statistics rings. A full ring overwrites only its
+own oldest reference and counter; a stalled or disconnected sink cannot wait on or evict
+another sink. The statistics ring is exactly one block, so the screen side can retain
+only the latest observation.
+
+The history ring is retained but non-destructive, contains only the current Serial
+Session, and defaults to 512 KiB. `CONFIG_DECK_SERIAL_HISTORY_KIB` accepts 64–2048 KiB;
+metadata and ring indices use additional PSRAM. Reconnect copies preserve Session ID,
+sequence, monotonic receive time, length, and raw bytes, and explicitly report when the
+requested cursor has fallen behind the oldest retained sequence. FIFO overflow and UART
+driver-buffer-full are global severe counters. The owner publishes changes through the
+depth-one UI mailbox, and the Serial page places the resulting data-loss warning and
+bounded FIFO/driver counts immediately below its title. Local sink overwrite bytes/blocks
+remain independent. No Router allocation occurs after UART tasks start.
+
+Exit first signals and joins RX/Router tasks, then deletes the UART driver and zeroes all
+session blocks before freeing them. A bounded teardown failure preserves the complete
+service for retry and GPIO17 is restored to input/high-impedance. USB/WSS transports use
+the service's copy APIs and never receive internal queues or block ownership. The data
+path decision is recorded in
+[`ADR 0018`](../docs/adr/0018-fan-out-uart-rx-through-a-fixed-block-router.md).
 
 ## Safe boot smoke test
 

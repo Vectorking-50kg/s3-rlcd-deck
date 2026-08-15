@@ -33,7 +33,8 @@ that exit transition and retains the complete service owner if its bounded join 
 allowing cleanup to be retried.
 
 The owner task exists while the application runs, but it is dormant in `DISARMED`; UART1 and the
-target data path do not exist on the AI Page. Later Router, USB bridge, WebSocket, and history work
-must attach behind this owner boundary instead of introducing another authorization flag. This
-adds one command hop and generation fields, but makes simultaneous USB/Web transmission, stale
-browser control, and partial teardown structurally unavailable.
+target data path do not exist on the AI Page. The fixed-block Router and current-session history
+are created and destroyed inside this boundary; USB and WebSocket adapters attach through its
+copy-only sink interface instead of introducing another authorization flag. This adds one command
+hop and generation fields, but makes simultaneous USB/Web transmission, stale browser control,
+cross-session payload retention, and partial teardown structurally unavailable.

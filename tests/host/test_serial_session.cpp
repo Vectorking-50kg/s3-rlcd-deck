@@ -7,23 +7,28 @@ namespace {
 
 struct FakeHardware {
     bool install_succeeds = true;
+    bool uninstall_succeeds = true;
     unsigned installs = 0;
     unsigned uninstalls = 0;
     unsigned high_impedance = 0;
     unsigned usb_clears = 0;
     unsigned web_clears = 0;
+    uint64_t installed_session_id = 0;
 };
 
-bool install_uart(void *context)
+bool install_uart(void *context, uint64_t session_id)
 {
     auto *hardware = static_cast<FakeHardware *>(context);
     ++hardware->installs;
+    hardware->installed_session_id = session_id;
     return hardware->install_succeeds;
 }
 
-void uninstall_uart(void *context)
+bool uninstall_uart(void *context)
 {
-    ++static_cast<FakeHardware *>(context)->uninstalls;
+    auto *hardware = static_cast<FakeHardware *>(context);
+    ++hardware->uninstalls;
+    return hardware->uninstall_succeeds;
 }
 
 void set_tx_high_impedance(void *context)
@@ -75,6 +80,7 @@ void test_entry_switch_lease_and_exit()
     assert(result.state == DECK_SERIAL_USB_TX);
     assert(result.session_id == 1);
     assert(hardware.installs == 1);
+    assert(hardware.installed_session_id == 1);
 
     // Replayed physical input is idempotent and never creates a second session.
     assert(deck_serial_session_enter(session, 0, 101, &result));
@@ -153,6 +159,7 @@ void test_entry_switch_lease_and_exit()
 
     assert(deck_serial_session_enter(session, 1, 3'000, &result));
     assert(result.session_id == 2);
+    assert(hardware.installed_session_id == 2);
     assert(result.state == DECK_SERIAL_USB_TX);
     assert(snapshot(session).usb_tx_rejected == 0);
     deck_serial_session_destroy(session);
@@ -245,6 +252,54 @@ void test_exit_barrier_supersedes_a_delayed_enter()
     deck_serial_session_destroy(session);
 }
 
+void test_uninstall_failure_is_disarmed_and_retryable()
+{
+    FakeHardware hardware;
+    deck_serial_session_t *session = make_session(&hardware);
+    assert(session != nullptr);
+    deck_serial_command_result_t result{};
+    assert(deck_serial_session_enter(session, 0, 0, &result));
+
+    hardware.uninstall_succeeds = false;
+    assert(deck_serial_session_exit(session, 1, &result));
+    assert(result.code == DECK_SERIAL_COMMAND_UART_UNINSTALL_FAILED);
+    assert(result.state == DECK_SERIAL_DISARMED);
+    assert(snapshot(session).uart_installed);
+    assert(hardware.high_impedance == 2);
+
+    hardware.uninstall_succeeds = true;
+    assert(deck_serial_session_exit(session, 1, &result));
+    assert(result.code == DECK_SERIAL_COMMAND_NO_CHANGE);
+    assert(!snapshot(session).uart_installed);
+    assert(hardware.uninstalls == 2);
+    deck_serial_session_destroy(session);
+}
+
+void test_partial_install_cleanup_is_retained_until_retry()
+{
+    FakeHardware hardware;
+    hardware.install_succeeds = false;
+    hardware.uninstall_succeeds = false;
+    deck_serial_session_t *session = make_session(&hardware);
+    assert(session != nullptr);
+    deck_serial_command_result_t result{};
+
+    assert(deck_serial_session_enter(session, 0, 0, &result));
+    assert(result.code == DECK_SERIAL_COMMAND_UART_INSTALL_FAILED);
+    assert(snapshot(session).uart_installed);
+    hardware.install_succeeds = true;
+    assert(deck_serial_session_enter(session, 0, 1, &result));
+    assert(result.code == DECK_SERIAL_COMMAND_UART_UNINSTALL_FAILED);
+    assert(hardware.installs == 1);
+
+    hardware.uninstall_succeeds = true;
+    assert(deck_serial_session_enter(session, 0, 2, &result));
+    assert(result.code == DECK_SERIAL_COMMAND_APPLIED);
+    assert(result.session_id == 1);
+    assert(hardware.installs == 2);
+    assert(deck_serial_session_destroy(session));
+}
+
 }  // namespace
 
 int main()
@@ -253,5 +308,7 @@ int main()
     test_install_failure_is_fail_closed();
     test_expiry_boundary_and_exit_race_are_fail_closed();
     test_exit_barrier_supersedes_a_delayed_enter();
+    test_uninstall_failure_is_disarmed_and_retryable();
+    test_partial_install_cleanup_is_retained_until_retry();
     return 0;
 }

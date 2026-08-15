@@ -1,0 +1,11 @@
+menu "Serial service"
+
+config DECK_SERIAL_HISTORY_KIB
+    int "Current Serial Session history size (KiB)"
+    range 64 2048
+    default 512
+    help
+        PSRAM payload capacity retained for the current Serial Session only.
+        Router metadata and sink indices are allocated separately in PSRAM.
+
+endmenu

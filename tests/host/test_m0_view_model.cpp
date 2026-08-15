@@ -225,6 +225,8 @@ void serial_session_replaces_ai_page_without_rendering_payload()
     model.serial.owner_generation = 11;
     model.serial.usb_tx_rejected = 23;
     model.serial.uart_install_failures = 2;
+    model.serial.uart_fifo_overflows = 3;
+    model.serial.uart_driver_buffer_full = 4;
     model.serial.uart_installed = true;
 
     bool ai_page_visible = true;
@@ -240,6 +242,7 @@ void serial_session_replaces_ai_page_without_rendering_payload()
     assert(page.find("OWNER GEN 11") != std::string::npos);
     assert(page.find("USB REJECTED 23 B") != std::string::npos);
     assert(page.find("UART INSTALL ERR 2") != std::string::npos);
+    assert(page.find("!! UART RX LOSS F3 B4") != std::string::npos);
     assert(page.find("KEY: Stats    BOOT: Exit") != std::string::npos);
     assert(page.find("TX DISARMED") == std::string::npos);
 
@@ -247,6 +250,10 @@ void serial_session_replaces_ai_page_without_rendering_payload()
     same_visible_serial.ai_page.snapshot_state = DECK_AI_PAGE_SNAPSHOT_UNAVAILABLE;
     assert(deck_m0_view_model_equal(&model, &same_visible_serial));
     ++same_visible_serial.serial.usb_tx_rejected;
+    assert(!deck_m0_view_model_equal(&model, &same_visible_serial));
+
+    same_visible_serial = model;
+    ++same_visible_serial.serial.uart_fifo_overflows;
     assert(!deck_m0_view_model_equal(&model, &same_visible_serial));
 
     model.serial.state = DECK_SERIAL_VIEW_DISARMED;

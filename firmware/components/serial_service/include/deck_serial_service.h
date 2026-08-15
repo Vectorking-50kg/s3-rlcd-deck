@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "deck_serial_session.h"
+#include "deck_serial_router.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -13,6 +14,8 @@ typedef struct deck_serial_service deck_serial_service_t;
 
 typedef struct {
     deck_serial_session_snapshot_t snapshot;
+    bool has_router_stats;
+    deck_serial_router_stats_t router_stats;
     bool has_command_result;
     deck_serial_command_result_t command_result;
 } deck_serial_service_event_t;
@@ -60,6 +63,30 @@ bool deck_serial_service_web_disconnect(
 bool deck_serial_service_snapshot(
     deck_serial_service_t *service,
     deck_serial_session_snapshot_t *snapshot
+);
+
+/*
+ * Transport adapters copy blocks through this boundary. They never receive
+ * Router queues, pool addresses, or block ownership.
+ */
+deck_serial_router_copy_result_t deck_serial_service_take(
+    deck_serial_service_t *service,
+    deck_serial_sink_id_t sink,
+    deck_serial_routed_block_t *block
+);
+deck_serial_router_copy_result_t deck_serial_service_copy_history_after(
+    deck_serial_service_t *service,
+    uint64_t after_sequence,
+    deck_serial_routed_block_t *block
+);
+bool deck_serial_service_sink_stats(
+    deck_serial_service_t *service,
+    deck_serial_sink_id_t sink,
+    deck_serial_sink_stats_t *stats
+);
+bool deck_serial_service_router_stats(
+    deck_serial_service_t *service,
+    deck_serial_router_stats_t *stats
 );
 
 #ifdef __cplusplus
