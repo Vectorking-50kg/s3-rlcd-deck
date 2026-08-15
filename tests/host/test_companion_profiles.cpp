@@ -307,6 +307,22 @@ void capacity_update_selection_and_revoke_are_transactional()
     assert(deck_companion_profiles_select_active(profiles, selected.c_str()) ==
            DECK_COMPANION_PROFILE_UPDATED);
     assert(std::string(snapshot(profiles).active_profile_id) == selected);
+    const uint32_t before_priority = snapshot(profiles).generation;
+    assert(deck_companion_profiles_set_priority(
+               profiles,
+               selected.c_str(),
+               42
+           ) == DECK_COMPANION_PROFILE_UPDATED);
+    const deck_companion_profiles_snapshot_t prioritized = snapshot(profiles);
+    assert(prioritized.generation > before_priority);
+    bool saw_priority = false;
+    for (size_t index = 0; index < prioritized.count; ++index) {
+        if (std::string(prioritized.profiles[index].profile_id) == selected) {
+            assert(prioritized.profiles[index].priority == 42);
+            saw_priority = true;
+        }
+    }
+    assert(saw_priority);
     assert(deck_companion_profiles_revoke(profiles, selected.c_str()) ==
            DECK_COMPANION_PROFILE_UPDATED);
     const deck_companion_profiles_snapshot_t after_revoke = snapshot(profiles);

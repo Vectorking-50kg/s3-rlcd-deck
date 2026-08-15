@@ -11,10 +11,13 @@ namespace {
 deck_setup_command_t companion_command(size_t index)
 {
     deck_setup_command_t command{};
-    command.type = index % 3 == 0
+    command.type = index % 4 == 0
                        ? DECK_SETUP_COMMAND_PAIR_COMPANION
-                       : index % 3 == 1 ? DECK_SETUP_COMMAND_SELECT_COMPANION
-                                        : DECK_SETUP_COMMAND_REVOKE_COMPANION;
+                       : index % 4 == 1
+                             ? DECK_SETUP_COMMAND_SELECT_COMPANION
+                             : index % 4 == 2
+                                   ? DECK_SETUP_COMMAND_SET_COMPANION_PRIORITY
+                                   : DECK_SETUP_COMMAND_REVOKE_COMPANION;
     const char *profile =
         "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     std::memcpy(command.companion_profile_id, profile, std::strlen(profile) + 1);
@@ -22,6 +25,7 @@ deck_setup_command_t companion_command(size_t index)
         std::memcpy(command.companion_pair.code, "123456", 7);
     }
     command.temperature_offset_tenths_c = static_cast<int16_t>(index);
+    command.companion_priority = static_cast<int32_t>(index) - 400;
     return command;
 }
 
@@ -45,6 +49,10 @@ void concurrent_setup_producers_use_the_production_bounded_queue()
             assert(command.type <= DECK_SETUP_COMMAND_REVOKE_COMPANION);
             if (command.type == DECK_SETUP_COMMAND_PAIR_COMPANION) {
                 assert(std::strcmp(command.companion_pair.code, "123456") == 0);
+            }
+            if (command.type == DECK_SETUP_COMMAND_SET_COMPANION_PRIORITY) {
+                assert(command.companion_priority >= -400);
+                assert(command.companion_priority < 400);
             }
             deck_setup_command_clear(&command);
             ++consumed;

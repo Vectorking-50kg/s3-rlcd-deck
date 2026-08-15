@@ -331,6 +331,37 @@ void test_partial_install_cleanup_is_retained_until_retry()
     assert(deck_serial_session_destroy(session));
 }
 
+void test_transport_revoke_fences_a_delayed_web_enable()
+{
+    FakeHardware hardware;
+    deck_serial_session_t *session = make_session(&hardware);
+    deck_serial_command_result_t result{};
+    assert(deck_serial_session_enter(session, 0, 0, &result));
+    assert(deck_serial_session_request_web_at_epoch(
+        session, 0, 1, 90, true, 1, &result
+    ));
+    assert(result.state == DECK_SERIAL_WEB_TX);
+
+    assert(deck_serial_session_revoke_web_transport(session, 2, &result));
+    assert(result.state == DECK_SERIAL_USB_TX);
+
+    // BOOT/exit has an independent lifecycle epoch. Even if the revoke was
+    // placed at the front of the owner queue after exit was already queued,
+    // it cannot turn the safety-critical exit into a stale command.
+    assert(deck_serial_session_exit(session, 1, &result));
+    assert(result.code == DECK_SERIAL_COMMAND_APPLIED);
+    assert(snapshot(session).state == DECK_SERIAL_DISARMED);
+
+    // This enable was queued by the disconnected transport before the fence,
+    // but reached the sole owner after the revoke. It cannot regain TX.
+    assert(deck_serial_session_request_web_at_epoch(
+        session, 0, 1, 91, true, 2, &result
+    ));
+    assert(result.code == DECK_SERIAL_COMMAND_STALE_REQUEST);
+    assert(snapshot(session).state == DECK_SERIAL_DISARMED);
+    assert(deck_serial_session_destroy(session));
+}
+
 }  // namespace
 
 int main()
@@ -341,5 +372,6 @@ int main()
     test_exit_barrier_supersedes_a_delayed_enter();
     test_uninstall_failure_is_disarmed_and_retryable();
     test_partial_install_cleanup_is_retained_until_retry();
+    test_transport_revoke_fences_a_delayed_web_enable();
     return 0;
 }

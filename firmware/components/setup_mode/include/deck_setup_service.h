@@ -58,6 +58,11 @@ bool deck_setup_service_select_companion(
     deck_setup_service_t *service,
     const char *profile_id
 );
+bool deck_setup_service_set_companion_priority(
+    deck_setup_service_t *service,
+    const char *profile_id,
+    int32_t priority
+);
 bool deck_setup_service_revoke_companion(
     deck_setup_service_t *service,
     const char *profile_id

@@ -1,4 +1,5 @@
 #include "deck_companion_failover.h"
+#include "deck_companion_transport_authority.h"
 
 #include <cassert>
 #include <cstring>
@@ -352,6 +353,107 @@ void one_profile_never_restarts_its_transport_at_the_failover_boundary()
     assert(action.kind == DECK_COMPANION_FAILOVER_NONE);
 }
 
+void fake_transport_uses_the_production_authority_gate()
+{
+    deck_companion_transport_authority_t transport{};
+    assert(deck_companion_transport_begin(&transport, 7));
+    assert(deck_companion_transport_allows(
+        &transport, 7, DECK_COMPANION_TRANSPORT_HEARTBEAT
+    ));
+    assert(!deck_companion_transport_allows(
+        &transport, 7, DECK_COMPANION_TRANSPORT_AI_SNAPSHOT
+    ));
+    assert(!deck_companion_transport_allows(
+        &transport, 7, DECK_COMPANION_TRANSPORT_SERIAL_CONTROL
+    ));
+    assert(!deck_companion_transport_allows(
+        &transport, 7, DECK_COMPANION_TRANSPORT_SERIAL_BINARY
+    ));
+
+    assert(deck_companion_transport_activate(&transport, 7));
+    assert(deck_companion_transport_allows(
+        &transport, 7, DECK_COMPANION_TRANSPORT_AI_SNAPSHOT
+    ));
+    assert(!deck_companion_transport_snapshot_current(&transport, 7));
+    assert(deck_companion_transport_accept_snapshot(&transport, 7));
+    assert(deck_companion_transport_snapshot_current(&transport, 7));
+
+    assert(deck_companion_transport_begin(&transport, 8));
+    assert(!deck_companion_transport_allows(
+        &transport, 7, DECK_COMPANION_TRANSPORT_HEARTBEAT
+    ));
+    assert(!deck_companion_transport_snapshot_current(&transport, 8));
+    assert(!deck_companion_transport_accept_snapshot(&transport, 7));
+}
+
+void fake_clock_and_transport_follow_manual_generation_changes()
+{
+    deck_companion_profiles_snapshot_t current = profiles();
+    current.count = 2;
+    deck_companion_failover_t failover{};
+    deck_companion_failover_action_t action{};
+    deck_companion_transport_authority_t transport{};
+
+    assert(deck_companion_failover_advance(
+        &failover,
+        &current,
+        0,
+        DECK_COMPANION_FAILOVER_PROFILES_OBSERVED,
+        &action
+    ));
+    assert(action.kind == DECK_COMPANION_FAILOVER_CONNECT);
+    assert(std::strcmp(action.profile_id, current.active_profile_id) == 0);
+    assert(deck_companion_transport_begin(&transport, 10));
+    assert(deck_companion_transport_activate(&transport, 10));
+    assert(deck_companion_transport_accept_snapshot(&transport, 10));
+
+    // A manual select is a new Profile transaction. The production policy
+    // chooses that exact profile and the production transport gate makes the
+    // previous source stale before the replacement can publish anything.
+    current.generation += 1;
+    std::memcpy(
+        current.active_profile_id,
+        current.profiles[1].profile_id,
+        sizeof(current.active_profile_id)
+    );
+    assert(deck_companion_failover_advance(
+        &failover,
+        &current,
+        1,
+        DECK_COMPANION_FAILOVER_PROFILES_OBSERVED,
+        &action
+    ));
+    assert(action.kind == DECK_COMPANION_FAILOVER_CONNECT);
+    assert(std::strcmp(action.profile_id, current.profiles[1].profile_id) == 0);
+    assert(deck_companion_transport_begin(&transport, 11));
+    assert(!deck_companion_transport_snapshot_current(&transport, 11));
+    assert(!deck_companion_transport_allows(
+        &transport, 11, DECK_COMPANION_TRANSPORT_SERIAL_CONTROL
+    ));
+    assert(!deck_companion_transport_allows(
+        &transport, 10, DECK_COMPANION_TRANSPORT_HEARTBEAT
+    ));
+
+    // Revoking the selected Profile is another generation change and cannot
+    // revive queued events from either older transport.
+    current.generation += 1;
+    current.count = 1;
+    std::memcpy(
+        current.active_profile_id,
+        current.profiles[0].profile_id,
+        sizeof(current.active_profile_id)
+    );
+    assert(deck_companion_failover_advance(
+        &failover,
+        &current,
+        2,
+        DECK_COMPANION_FAILOVER_PROFILES_OBSERVED,
+        &action
+    ));
+    assert(action.kind == DECK_COMPANION_FAILOVER_CONNECT);
+    assert(std::strcmp(action.profile_id, current.profiles[0].profile_id) == 0);
+}
+
 }  // namespace
 
 int main()
@@ -362,5 +464,7 @@ int main()
     generation_changes_cancel_the_old_round_and_ties_are_stable();
     manual_selection_after_candidate_commit_replaces_the_candidate_transport();
     one_profile_never_restarts_its_transport_at_the_failover_boundary();
+    fake_transport_uses_the_production_authority_gate();
+    fake_clock_and_transport_follow_manual_generation_changes();
     return 0;
 }

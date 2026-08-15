@@ -5,6 +5,7 @@ idf_component_register(
         "deck_companion_link_frame.cpp"
         "deck_companion_link_message.cpp"
         "deck_companion_link_timing.cpp"
+        "deck_companion_transport_authority.cpp"
         "deck_device_protocol.cpp"
         "deck_serial_frame.cpp"
         "deck_serial_request_tracker.cpp"

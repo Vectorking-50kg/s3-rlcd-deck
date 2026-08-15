@@ -13,6 +13,7 @@ struct deck_serial_session {
     uint64_t lease_deadline_ms;
     uint64_t usb_tx_rejected;
     uint64_t control_epoch;
+    uint64_t web_transport_epoch;
     uint64_t last_request_id;
     deck_serial_command_result_t last_request_result;
     uint32_t uart_install_failures;
@@ -253,8 +254,41 @@ bool deck_serial_session_request_web(
     deck_serial_command_result_t *result
 )
 {
+    if (session == nullptr) {
+        return false;
+    }
+    return deck_serial_session_request_web_at_epoch(
+        session,
+        session->web_transport_epoch,
+        session_id,
+        request_id,
+        enable,
+        now_ms,
+        result
+    );
+}
+
+bool deck_serial_session_request_web_at_epoch(
+    deck_serial_session_t *session,
+    uint64_t web_transport_epoch,
+    uint64_t session_id,
+    uint64_t request_id,
+    bool enable,
+    uint64_t now_ms,
+    deck_serial_command_result_t *result
+)
+{
     if (session == nullptr || result == nullptr || request_id == 0) {
         return false;
+    }
+    if (web_transport_epoch != session->web_transport_epoch) {
+        fill_result(
+            session,
+            DECK_SERIAL_COMMAND_STALE_REQUEST,
+            request_id,
+            result
+        );
+        return true;
     }
     expire_web_lease(session, now_ms);
     if (session->state == DECK_SERIAL_DISARMED || session_id != session->session_id) {
@@ -305,6 +339,37 @@ bool deck_serial_session_request_web(
     session->last_request_id = request_id;
     session->last_request_result = *result;
     session->has_last_request = true;
+    return true;
+}
+
+bool deck_serial_session_revoke_web_transport(
+    deck_serial_session_t *session,
+    uint64_t web_transport_epoch,
+    deck_serial_command_result_t *result
+)
+{
+    if (session == nullptr || result == nullptr) {
+        return false;
+    }
+    if (web_transport_epoch < session->web_transport_epoch) {
+        fill_result(session, DECK_SERIAL_COMMAND_STALE_REQUEST, 0, result);
+        return true;
+    }
+    session->web_transport_epoch = web_transport_epoch;
+    const deck_serial_state_t previous = session->state;
+    return_to_usb(session);
+    if (previous != DECK_SERIAL_WEB_TX) {
+        session->hardware.clear_web_tx(session->hardware.context);
+    }
+    session->has_last_request = false;
+    session->last_request_id = 0;
+    fill_result(
+        session,
+        previous == DECK_SERIAL_WEB_TX ? DECK_SERIAL_COMMAND_APPLIED
+                                       : DECK_SERIAL_COMMAND_NO_CHANGE,
+        0,
+        result
+    );
     return true;
 }
 

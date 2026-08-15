@@ -221,6 +221,7 @@ deck_add_host_test(
     SOURCES
         test_companion_failover.cpp
         ../../firmware/components/companion_link/deck_companion_failover.cpp
+        ../../firmware/components/companion_link/deck_companion_transport_authority.cpp
     INCLUDE_DIRS
         ../../firmware/components/companion_link/include
         ../../firmware/components/companion_profiles/include

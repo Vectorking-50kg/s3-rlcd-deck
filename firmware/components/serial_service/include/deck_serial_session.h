@@ -93,6 +93,21 @@ bool deck_serial_session_request_web(
     uint64_t now_ms,
     deck_serial_command_result_t *result
 );
+bool deck_serial_session_request_web_at_epoch(
+    deck_serial_session_t *session,
+    uint64_t web_transport_epoch,
+    uint64_t session_id,
+    uint64_t request_id,
+    bool enable,
+    uint64_t now_ms,
+    deck_serial_command_result_t *result
+);
+/* Advances the transport fence and returns any current Web Lease to USB. */
+bool deck_serial_session_revoke_web_transport(
+    deck_serial_session_t *session,
+    uint64_t web_transport_epoch,
+    deck_serial_command_result_t *result
+);
 bool deck_serial_session_web_activity(
     deck_serial_session_t *session,
     uint64_t session_id,
