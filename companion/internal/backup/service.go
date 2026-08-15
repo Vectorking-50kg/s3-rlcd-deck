@@ -149,6 +149,7 @@ func (service *Service) Export(ctx context.Context, passphrase []byte) ([]byte, 
 	if err != nil {
 		return nil, ErrCommit
 	}
+	defer structuredprovider.DestroyRestorableConfiguration(&configuration)
 	document := Document{
 		Type:                ArchiveType,
 		SchemaVersion:       SchemaVersion{Major: SchemaMajor, Minor: SchemaMinor},
@@ -156,7 +157,7 @@ func (service *Service) Export(ctx context.Context, passphrase []byte) ([]byte, 
 		Providers:           make([]Provider, 0, len(configuration.Definitions)),
 		ProviderOrder:       make([]string, 0, len(configuration.Definitions)),
 		WebSettings:         configuration.WebSettings,
-		ApplicationSettings: configuration.ApplicationSettings,
+		ApplicationSettings: configmodel.CloneApplicationSettings(configuration.ApplicationSettings),
 		DeviceProfiles:      configmodel.CloneDeviceProfiles(configuration.DeviceProfiles),
 	}
 	defer document.Destroy()
@@ -235,6 +236,7 @@ func (service *Service) Preview(
 	if err != nil {
 		return Preview{}, ErrCommit
 	}
+	defer structuredprovider.DestroyRestorableConfiguration(&current)
 	preview, err := previewDocument(*document, current, mode)
 	if err != nil {
 		return Preview{}, err
@@ -267,6 +269,7 @@ func (service *Service) Import(
 	if err != nil {
 		return ImportResult{}, ErrCommit
 	}
+	defer structuredprovider.DestroyRestorableConfiguration(&current)
 	if !service.consumePreview(previewID, encrypted, current, mode) {
 		return ImportResult{}, ErrPreviewRequired
 	}
@@ -274,6 +277,7 @@ func (service *Service) Import(
 	if err != nil {
 		return ImportResult{}, err
 	}
+	defer structuredprovider.DestroyRestorableConfiguration(&plan.configuration)
 	if len(plan.configuration.Definitions) > 6 ||
 		len(plan.configuration.DeviceProfiles) > configmodel.MaximumDeviceProfiles {
 		return ImportResult{}, ErrCommit
@@ -577,7 +581,8 @@ func planImport(
 			}
 			if !reflect.DeepEqual(current.ApplicationSettings, document.ApplicationSettings) &&
 				decisions["application_settings"] == DecisionUseBackup {
-				plan.configuration.ApplicationSettings = document.ApplicationSettings
+				configmodel.DestroySerialPresets(plan.configuration.ApplicationSettings.SerialPresets)
+				plan.configuration.ApplicationSettings = configmodel.CloneApplicationSettings(document.ApplicationSettings)
 			}
 			plan.configuration.DeviceProfiles = mergeDeviceProfiles(
 				current.DeviceProfiles, document.DeviceProfiles, decisions,
@@ -626,7 +631,7 @@ func configurationFromDocument(document Document) structuredprovider.RestorableC
 	configuration := structuredprovider.RestorableConfiguration{
 		Definitions:         make([]structuredprovider.Definition, 0, len(document.Providers)),
 		WebSettings:         document.WebSettings,
-		ApplicationSettings: document.ApplicationSettings,
+		ApplicationSettings: configmodel.CloneApplicationSettings(document.ApplicationSettings),
 		DeviceProfiles:      configmodel.CloneDeviceProfiles(document.DeviceProfiles),
 	}
 	for _, provider := range providersInOrder(document) {
@@ -639,7 +644,7 @@ func cloneConfiguration(source structuredprovider.RestorableConfiguration) struc
 	clone := structuredprovider.RestorableConfiguration{
 		Definitions:         make([]structuredprovider.Definition, len(source.Definitions)),
 		WebSettings:         source.WebSettings,
-		ApplicationSettings: source.ApplicationSettings,
+		ApplicationSettings: configmodel.CloneApplicationSettings(source.ApplicationSettings),
 		DeviceProfiles:      configmodel.CloneDeviceProfiles(source.DeviceProfiles),
 	}
 	for index := range source.Definitions {

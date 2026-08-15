@@ -30,6 +30,57 @@ func (owner *historySettingsOwner) UpdateApplicationSettings(
 	return nil
 }
 
+func (owner *historySettingsOwner) UpdateHistoryEnabled(_ context.Context, enabled bool) error {
+	owner.application.HistoryEnabled = enabled
+	return nil
+}
+
+func (owner *historySettingsOwner) SerialPresets(context.Context) ([]configmodel.SerialPreset, error) {
+	return configmodel.CloneSerialPresets(owner.application.SerialPresets), nil
+}
+
+func (owner *historySettingsOwner) UpdateSerialPresets(
+	_ context.Context,
+	presets []configmodel.SerialPreset,
+) error {
+	owner.application.SerialPresets = configmodel.CloneSerialPresets(presets)
+	return nil
+}
+
+func (owner *historySettingsOwner) UpdateSerialPreset(
+	_ context.Context,
+	preset configmodel.SerialPreset,
+) (bool, error) {
+	for index := range owner.application.SerialPresets {
+		if owner.application.SerialPresets[index].ID == preset.ID {
+			configmodel.DestroySerialPresets(owner.application.SerialPresets[index : index+1])
+			owner.application.SerialPresets[index] = configmodel.CloneSerialPresets(
+				[]configmodel.SerialPreset{preset},
+			)[0]
+			return true, nil
+		}
+	}
+	owner.application.SerialPresets = append(
+		owner.application.SerialPresets,
+		configmodel.CloneSerialPresets([]configmodel.SerialPreset{preset})[0],
+	)
+	return true, nil
+}
+
+func (owner *historySettingsOwner) DeleteSerialPreset(_ context.Context, identifier string) (bool, error) {
+	for index := range owner.application.SerialPresets {
+		if owner.application.SerialPresets[index].ID != identifier {
+			continue
+		}
+		configmodel.DestroySerialPresets(owner.application.SerialPresets[index : index+1])
+		copy(owner.application.SerialPresets[index:], owner.application.SerialPresets[index+1:])
+		owner.application.SerialPresets[len(owner.application.SerialPresets)-1] = configmodel.SerialPreset{}
+		owner.application.SerialPresets = owner.application.SerialPresets[:len(owner.application.SerialPresets)-1]
+		return true, nil
+	}
+	return false, nil
+}
+
 func (*historySettingsOwner) UpdateDeviceProfile(
 	context.Context,
 	configmodel.DeviceProfile,

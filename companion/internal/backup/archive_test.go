@@ -19,12 +19,18 @@ func TestAgeArchiveRoundTripAndPrivacyBoundary(t *testing.T) {
 	scryptWorkFactor = 10
 	t.Cleanup(func() { scryptWorkFactor = 18 })
 	const canary = "PRIVATE_BACKUP_PROVIDER_API_KEY_CANARY"
+	const presetCanary = "PRIVATE_SERIAL_PRESET_CANARY"
 	document := testDocument([]byte(canary))
+	document.ApplicationSettings.SerialPresets = []configmodel.SerialPreset{{
+		ID: "login", Name: "Login", Mode: configmodel.SerialPresetText,
+		Payload: []byte(presetCanary), LineEnding: configmodel.SerialLineEndingCRLF,
+	}}
 	encrypted, err := Encrypt(context.Background(), &document, []byte("correct horse battery staple"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(encrypted, []byte(canary)) || bytes.Contains(encrypted, []byte("AIHubMix")) {
+	if bytes.Contains(encrypted, []byte(canary)) || bytes.Contains(encrypted, []byte(presetCanary)) ||
+		bytes.Contains(encrypted, []byte("AIHubMix")) {
 		t.Fatal("age ciphertext exposed plaintext Provider state")
 	}
 	decoded, err := Decrypt(context.Background(), encrypted, []byte("correct horse battery staple"))
@@ -38,10 +44,54 @@ func TestAgeArchiveRoundTripAndPrivacyBoundary(t *testing.T) {
 		decoded.DeviceProfiles[0].Board != "esp32-s3-rlcd-4.2" {
 		t.Fatalf("decoded document = %#v", decoded)
 	}
+	if got := string(decoded.ApplicationSettings.SerialPresets[0].Payload); got != presetCanary {
+		t.Fatalf("Serial Preset = %q", got)
+	}
 	secret := decoded.Providers[0].Secrets[0].Value
+	presetSecret := decoded.ApplicationSettings.SerialPresets[0].Payload
 	decoded.Destroy()
-	if !allZero(secret) || decoded.Providers[0].Secrets != nil {
+	if !allZero(secret) || !allZero(presetSecret) || decoded.Providers[0].Secrets != nil {
 		t.Fatal("decrypted secret was not overwritten")
+	}
+}
+
+func TestBackupSchemaMinorOneMigratesMinorZeroWithoutSerialPresets(t *testing.T) {
+	if SchemaMinor != 1 {
+		t.Fatalf("SchemaMinor = %d, want 1 for Serial Presets", SchemaMinor)
+	}
+	scryptWorkFactor = 10
+	t.Cleanup(func() { scryptWorkFactor = 18 })
+	document := testDocument([]byte("private-api-key"))
+	document.SchemaVersion.Minor = 0
+	raw, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacy map[string]any
+	if err = json.Unmarshal(raw, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	delete(legacy["application_settings"].(map[string]any), "serial_presets")
+	raw, err = json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decrypt(
+		context.Background(), encryptRawArchive(t, raw, "correct horse battery staple"),
+		[]byte("correct horse battery staple"),
+	)
+	if err != nil {
+		t.Fatalf("minor-zero archive = %v", err)
+	}
+	defer decoded.Destroy()
+	if decoded.ApplicationSettings.SerialPresets != nil {
+		t.Fatalf("legacy Serial Presets = %#v, want nil", decoded.ApplicationSettings.SerialPresets)
+	}
+	document.SchemaVersion.Minor = 2
+	if _, err = Encrypt(
+		context.Background(), &document, []byte("correct horse battery staple"),
+	); !errors.Is(err, ErrArchiveSchema) {
+		t.Fatalf("future minor export error = %v", err)
 	}
 }
 

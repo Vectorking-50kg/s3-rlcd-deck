@@ -209,6 +209,7 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			}
 		}
 	}
+	structuredprovider.DestroyRestorableConfiguration(&restorableConfiguration)
 	providerHistory, closeProviderHistory := loadProviderHistory(resolvedDataDirectory, stderr)
 	defer closeProviderHistory()
 	if configurationOwner != nil && providerHistory != nil {
@@ -220,14 +221,17 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 				settingsErr = configurationOwner.UpdateApplicationSettings(settingsContext, applicationSettings)
 			}
 		} else if settingsErr == nil {
-			currentSettings := configmodel.ApplicationSettings{HistoryEnabled: providerHistory.Enabled()}
-			if currentSettings != applicationSettings {
+			currentSettings := configmodel.CloneApplicationSettings(applicationSettings)
+			currentSettings.HistoryEnabled = providerHistory.Enabled()
+			if currentSettings.HistoryEnabled != applicationSettings.HistoryEnabled {
 				settingsErr = configurationOwner.UpdateApplicationSettings(
 					settingsContext,
 					currentSettings,
 				)
 			}
+			configmodel.DestroySerialPresets(currentSettings.SerialPresets)
 		}
+		configmodel.DestroySerialPresets(applicationSettings.SerialPresets)
 		cancelSettings()
 		if settingsErr != nil {
 			fmt.Fprintln(stderr, "application settings synchronization is unavailable")

@@ -196,6 +196,93 @@ func TestSerialStatusNeverExposesObserverOrLeaseCapabilities(t *testing.T) {
 	}
 }
 
+func TestSerialObserverEncodesUint64CapabilitiesAsExactDecimalStrings(t *testing.T) {
+	application := newSerialHTTPRuntime(t)
+	if err := application.serialHub.Reconcile("deck-max-session", ^uint64(0), serialhub.StateUSBTX); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(application.managementRoutes())
+	defer server.Close()
+	application.config.Management.AllowedOrigin = server.URL
+	const sessionToken = "serial-exact-integer-session"
+	if !application.sessions.add(sessionToken, "unused-csrf", time.Now()) {
+		t.Fatal("add management session")
+	}
+	header := http.Header{}
+	header.Set("Cookie", managementSessionCookie+"="+sessionToken)
+	header.Set("Origin", server.URL)
+	connection, response, err := websocket.Dial(
+		context.Background(),
+		"ws"+server.URL[4:]+"/api/v1/serial/observe",
+		&websocket.DialOptions{HTTPHeader: header, Subprotocols: []string{serialObserverSubprotocol}},
+	)
+	if err != nil {
+		t.Fatalf("Dial(observer) response=%v error=%v", response, err)
+	}
+	defer connection.CloseNow()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	messageType, document, err := connection.Read(ctx)
+	cancel()
+	if err != nil || messageType != websocket.MessageText {
+		t.Fatalf("initial observer state type=%v error=%v", messageType, err)
+	}
+	if !bytes.Contains(document, []byte(`"serial_session_id":"18446744073709551615"`)) {
+		t.Fatalf("observer state lost uint64 precision: %s", document)
+	}
+}
+
+func TestReadOnlySerialObserverSeesWebLeaseOwnerAndRemainingTimeWithoutCapability(t *testing.T) {
+	application := newSerialHTTPRuntime(t)
+	if err := application.serialHub.Reconcile("deck-shared-lease", 77, serialhub.StateUSBTX); err != nil {
+		t.Fatal(err)
+	}
+	request, err := application.serialHub.AcquireLease("other-browser", 77)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = application.serialHub.ApplyOwnerResult("deck-shared-lease", serialhub.OwnerResult{
+		SessionID: 77, RequestID: request.RequestID, Owner: serialhub.OwnerWeb, LeaseID: 90210,
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(application.managementRoutes())
+	defer server.Close()
+	application.config.Management.AllowedOrigin = server.URL
+	const sessionToken = "serial-read-only-lease-session"
+	if !application.sessions.add(sessionToken, "unused-csrf", time.Now()) {
+		t.Fatal("add management session")
+	}
+	header := http.Header{}
+	header.Set("Cookie", managementSessionCookie+"="+sessionToken)
+	header.Set("Origin", server.URL)
+	connection, response, err := websocket.Dial(
+		context.Background(),
+		"ws"+server.URL[4:]+"/api/v1/serial/observe",
+		&websocket.DialOptions{HTTPHeader: header, Subprotocols: []string{serialObserverSubprotocol}},
+	)
+	if err != nil {
+		t.Fatalf("Dial(observer) response=%v error=%v", response, err)
+	}
+	defer connection.CloseNow()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	_, document, err := connection.Read(ctx)
+	cancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state struct {
+		LeaseOwner       serialhub.Owner `json:"lease_owner"`
+		LeaseHeld        bool            `json:"lease_held_by_this_observer"`
+		LeaseID          string          `json:"lease_id"`
+		LeaseRemainingMS int64           `json:"lease_remaining_ms"`
+	}
+	if err = json.Unmarshal(document, &state); err != nil || state.LeaseOwner != serialhub.OwnerWeb ||
+		state.LeaseHeld || state.LeaseID != "" || state.LeaseRemainingMS <= 0 {
+		t.Fatalf("read-only observer state=%#v document=%s error=%v", state, document, err)
+	}
+}
+
 func TestSerialAcquireWriteFailureRemainsPendingAndTransitioning(t *testing.T) {
 	application := newSerialHTTPRuntime(t)
 	if err := application.serialHub.Reconcile("deck-offline", 202, serialhub.StateUSBTX); err != nil {
@@ -227,7 +314,7 @@ func TestSerialAcquireWriteFailureRemainsPendingAndTransitioning(t *testing.T) {
 		t.Fatal(err)
 	}
 	request, _ := json.Marshal(serialObserverControl{
-		Type: "serial.lease.acquire", ProtocolVersion: 1, SerialSessionID: 202,
+		Type: "serial.lease.acquire", ProtocolVersion: 1, SerialSessionID: "202", LeaseID: "0",
 	})
 	if err = connection.Write(context.Background(), websocket.MessageText, request); err != nil {
 		t.Fatal(err)
@@ -241,17 +328,20 @@ func TestSerialAcquireWriteFailureRemainsPendingAndTransitioning(t *testing.T) {
 	var acknowledgement struct {
 		Type        string `json:"type"`
 		Accepted    bool   `json:"accepted"`
-		ReferenceID uint64 `json:"reference_id"`
+		ReferenceID string `json:"reference_id"`
 	}
 	if err = json.Unmarshal(result, &acknowledgement); err != nil ||
-		acknowledgement.Type != "serial.lease.result" || !acknowledgement.Accepted ||
-		acknowledgement.ReferenceID == 0 {
+		acknowledgement.Type != "serial.lease.result" || !acknowledgement.Accepted {
 		t.Fatalf("ambiguous send acknowledgement=%s error=%v", result, err)
+	}
+	referenceID, validReferenceID := parseSerialObserverUint64(acknowledgement.ReferenceID, false)
+	if !validReferenceID {
+		t.Fatalf("ambiguous send reference ID=%q", acknowledgement.ReferenceID)
 	}
 	status := application.serialHub.Status()
 	pending, clientID, exists := application.serialHub.PendingOwnerRequest()
 	if status.Lease.Owner != serialhub.OwnerTransitioning || status.Lease.Owner == serialhub.OwnerUSB ||
-		!exists || pending.RequestID != acknowledgement.ReferenceID || clientID == "" {
+		!exists || pending.RequestID != referenceID || clientID == "" {
 		t.Fatalf("ambiguous send was not retained: status=%#v pending=%#v client=%q", status, pending, clientID)
 	}
 }

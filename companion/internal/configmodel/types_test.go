@@ -44,3 +44,27 @@ func TestValidateDeviceProfileRequiresCanonicalBoundedPublicMetadata(t *testing.
 		t.Fatal("non-canonical UTC was accepted")
 	}
 }
+
+func TestSerialPresetsAreBoundedStructuredCommands(t *testing.T) {
+	presets := []SerialPreset{
+		{ID: "health", Name: "健康检查", Mode: SerialPresetText, Payload: []byte("health --token SECRET"), LineEnding: SerialLineEndingCRLF},
+		{ID: "frame", Name: "二进制帧", Mode: SerialPresetHex, Payload: []byte{0x00, 0xff, 0x41}, LineEnding: SerialLineEndingNone},
+	}
+	if !ValidateSerialPresets(presets) {
+		t.Fatal("valid text and HEX presets were rejected")
+	}
+	cloned := CloneSerialPresets(presets)
+	cloned[0].Payload[0] = 'X'
+	if string(presets[0].Payload) != "health --token SECRET" {
+		t.Fatal("preset clone shared payload ownership")
+	}
+	for _, invalid := range [][]SerialPreset{
+		{{ID: "bad", Name: "empty HEX", Mode: SerialPresetHex, Payload: nil, LineEnding: SerialLineEndingNone}},
+		{{ID: "bad", Name: "oversize", Mode: SerialPresetText, Payload: make([]byte, 257), LineEnding: SerialLineEndingNone}},
+		{{ID: "duplicate", Name: "one", Mode: SerialPresetText, Payload: []byte("1"), LineEnding: SerialLineEndingNone}, {ID: "duplicate", Name: "two", Mode: SerialPresetText, Payload: []byte("2"), LineEnding: SerialLineEndingNone}},
+	} {
+		if ValidateSerialPresets(invalid) {
+			t.Fatalf("invalid presets were accepted: %#v", invalid)
+		}
+	}
+}

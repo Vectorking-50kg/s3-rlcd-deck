@@ -102,6 +102,11 @@ cursor. Observation alone grants no transmit authority; Web transmit additionall
 Web TX Lease.
 _Avoid_: Serial owner, terminal session
 
+**Serial Preset**:
+A bounded command template that a user explicitly authors and saves before any Serial Session
+transmission. It is protected configuration, never captured Session data or implicit transmit authority.
+_Avoid_: Serial history, captured command, macro execution
+
 **Target**:
 The external 3.3 V TTL UART device connected to the Deck for monitoring or controlled transmission.
 _Avoid_: Client device, downstream board

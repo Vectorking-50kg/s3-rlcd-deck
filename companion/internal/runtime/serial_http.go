@@ -26,8 +26,8 @@ const (
 type serialObserverControl struct {
 	Type            string `json:"type"`
 	ProtocolVersion int    `json:"protocol_version"`
-	SerialSessionID uint64 `json:"serial_session_id"`
-	LeaseID         uint64 `json:"lease_id"`
+	SerialSessionID string `json:"serial_session_id"`
+	LeaseID         string `json:"lease_id"`
 }
 
 type serialObserverInput struct {
@@ -99,7 +99,7 @@ func (registry *serialObserverRegistry) closeAndWait(ctx context.Context) error 
 type serialManagementStatus struct {
 	DeviceID         string          `json:"device_id"`
 	SerialState      serialhub.State `json:"serial_state"`
-	SerialSessionID  uint64          `json:"serial_session_id"`
+	SerialSessionID  string          `json:"serial_session_id"`
 	BufferedBytes    int             `json:"buffered_bytes"`
 	BufferedFrames   int             `json:"buffered_frames"`
 	OverwrittenBytes uint64          `json:"overwritten_bytes"`
@@ -110,7 +110,7 @@ type serialManagementStatus struct {
 func publicSerialStatus(status serialhub.ServiceStatus) serialManagementStatus {
 	return serialManagementStatus{
 		DeviceID: status.DeviceID, SerialState: status.State,
-		SerialSessionID: status.SessionID, BufferedBytes: status.BufferedBytes,
+		SerialSessionID: strconv.FormatUint(status.SessionID, 10), BufferedBytes: status.BufferedBytes,
 		BufferedFrames: status.BufferedFrames, OverwrittenBytes: status.OverwrittenBytes,
 		Observers: status.Observers, LeaseOwner: status.Lease.Owner,
 	}
@@ -345,14 +345,18 @@ func (application *Runtime) handleSerialObserverInput(
 		control.ProtocolVersion != 1 {
 		return false
 	}
+	sessionID, validSessionID := parseSerialObserverUint64(control.SerialSessionID, false)
+	leaseID, validLeaseID := parseSerialObserverUint64(control.LeaseID, true)
+	if !validSessionID || !validLeaseID {
+		return false
+	}
 	switch control.Type {
 	case "serial.lease.acquire":
 		status := application.serialHub.Status()
-		if control.SerialSessionID == 0 || control.SerialSessionID != status.SessionID ||
-			control.LeaseID != 0 {
+		if sessionID != status.SessionID || leaseID != 0 {
 			return writeSerialObserverResult(connection, "serial.lease.result", false, 0)
 		}
-		request, err := application.serialHub.AcquireLease(clientID, control.SerialSessionID)
+		request, err := application.serialHub.AcquireLease(clientID, sessionID)
 		if err != nil {
 			return writeSerialObserverResult(connection, "serial.lease.result", false, 0)
 		}
@@ -362,8 +366,8 @@ func (application *Runtime) handleSerialObserverInput(
 		application.sendSerialOwnerRequest(request)
 		return writeSerialObserverResult(connection, "serial.lease.result", true, request.RequestID)
 	case "serial.lease.heartbeat":
-		activity, err := application.serialHub.HeartbeatLease(clientID, control.LeaseID)
-		if err != nil || control.SerialSessionID != activity.SessionID {
+		activity, err := application.serialHub.HeartbeatLease(clientID, leaseID)
+		if err != nil || sessionID != activity.SessionID {
 			return writeSerialObserverResult(connection, "serial.lease.heartbeat.result", false, 0)
 		}
 		status := application.serialHub.Status()
@@ -376,8 +380,8 @@ func (application *Runtime) handleSerialObserverInput(
 		return writeSerialObserverResult(connection, "serial.lease.heartbeat.result", err == nil, activity.LeaseID)
 	case "serial.lease.release":
 		status := application.serialHub.Status()
-		if control.SerialSessionID != status.SessionID || control.LeaseID == 0 ||
-			control.LeaseID != status.Lease.LeaseID || status.Lease.ClientID != clientID {
+		if sessionID != status.SessionID || leaseID == 0 ||
+			leaseID != status.Lease.LeaseID || status.Lease.ClientID != clientID {
 			return writeSerialObserverResult(connection, "serial.lease.result", false, 0)
 		}
 		request, err := application.serialHub.DisconnectLease(clientID)
@@ -395,6 +399,14 @@ func (application *Runtime) handleSerialObserverInput(
 	default:
 		return false
 	}
+}
+
+func parseSerialObserverUint64(value string, allowZero bool) (uint64, bool) {
+	parsed, err := strconv.ParseUint(value, 10, 64)
+	if err != nil || strconv.FormatUint(parsed, 10) != value || (!allowZero && parsed == 0) {
+		return 0, false
+	}
+	return parsed, true
 }
 
 func (application *Runtime) sendSerialOwnerRequest(request serialhub.OwnerRequest) bool {
@@ -491,8 +503,8 @@ func writeSerialObserverResult(
 		Type            string `json:"type"`
 		ProtocolVersion int    `json:"protocol_version"`
 		Accepted        bool   `json:"accepted"`
-		ReferenceID     uint64 `json:"reference_id"`
-	}{messageType, 1, accepted, referenceID})
+		ReferenceID     string `json:"reference_id"`
+	}{messageType, 1, accepted, strconv.FormatUint(referenceID, 10)})
 }
 
 func writeSerialObserverStatus(
@@ -506,21 +518,30 @@ func writeSerialObserverStatus(
 		ProtocolVersion  int             `json:"protocol_version"`
 		DeviceID         string          `json:"device_id"`
 		SerialState      serialhub.State `json:"serial_state"`
-		SerialSessionID  uint64          `json:"serial_session_id"`
+		SerialSessionID  string          `json:"serial_session_id"`
 		BufferedBytes    int             `json:"buffered_bytes"`
+		BufferedFrames   int             `json:"buffered_frames"`
 		OverwrittenBytes uint64          `json:"overwritten_bytes"`
+		Observers        int             `json:"observers"`
 		LeaseOwner       serialhub.Owner `json:"lease_owner"`
 		LeaseHeld        bool            `json:"lease_held_by_this_observer"`
-		LeaseID          uint64          `json:"lease_id,omitempty"`
+		LeaseID          string          `json:"lease_id,omitempty"`
+		LeaseRemainingMS int64           `json:"lease_remaining_ms"`
 	}{
 		Type: "serial.observer.state", ProtocolVersion: 1,
 		DeviceID: status.DeviceID, SerialState: status.State,
-		SerialSessionID: status.SessionID, BufferedBytes: status.BufferedBytes,
-		OverwrittenBytes: overwrittenBytes, LeaseOwner: status.Lease.Owner,
+		SerialSessionID: strconv.FormatUint(status.SessionID, 10), BufferedBytes: status.BufferedBytes,
+		BufferedFrames: status.BufferedFrames, OverwrittenBytes: overwrittenBytes,
+		Observers: status.Observers, LeaseOwner: status.Lease.Owner,
 		LeaseHeld: status.Lease.ClientID == clientID && status.Lease.Owner == serialhub.OwnerWeb,
 	}
 	if document.LeaseHeld {
-		document.LeaseID = status.Lease.LeaseID
+		document.LeaseID = strconv.FormatUint(status.Lease.LeaseID, 10)
+	}
+	if status.Lease.Owner == serialhub.OwnerWeb {
+		if remaining := time.Until(status.Lease.ExpiresAt); remaining > 0 {
+			document.LeaseRemainingMS = remaining.Milliseconds()
+		}
 	}
 	return writeSerialObserverJSON(connection, document)
 }

@@ -26,8 +26,20 @@ func TestEmbeddedConsoleContainsCompleteChineseSchemeCWorkflows(t *testing.T) {
 			"keep_current", "use_backup", "resetBackupPreview", "#import-file",
 			"scrubSensitiveState", "issued.device_hub_address", "authEpoch", "TX 未启用",
 			"state.sync.console.lastSuccess", "providerDataWritable", "保留最后有效数据", "确认替换当前配置",
+			"/api/v1/serial/presets", "connectSerialObserver", "submitSerial",
+			`$("#serial-compose").addEventListener`, `$("#serial-lease").addEventListener`,
+			`$("#serial-preset-form").addEventListener`, "downloadSerialCapture",
+			"serialPresetOperationController", "serialPresetOperationIsCurrent", "scrubSerialPresetEditor",
 		},
-		"/app.css": {"focus-visible", "prefers-reduced-motion", "@media (max-width: 700px)", "@media (max-width: 410px)"},
+		"/serial-terminal.js": {
+			"S3DeckSerialTerminal", "createClient", "decodeFrame", "MAX_TRANSMIT_BYTES",
+		},
+		"/vendor/xterm/xterm.js":           {"Terminal", "Uint8Array", "dispose"},
+		"/vendor/xterm/addon-fit.js":       {"FitAddon"},
+		"/vendor/xterm/addon-search.js":    {"SearchAddon"},
+		"/vendor/xterm/addon-unicode11.js": {"Unicode11Addon"},
+		"/vendor/xterm/xterm.css":          {".xterm", ".xterm-viewport"},
+		"/app.css":                         {"focus-visible", "prefers-reduced-motion", "@media (max-width: 700px)", "@media (max-width: 410px)"},
 	} {
 		request := httptest.NewRequest(http.MethodGet, path, nil)
 		response := httptest.NewRecorder()
@@ -47,9 +59,12 @@ func TestEmbeddedConsoleContainsCompleteChineseSchemeCWorkflows(t *testing.T) {
 				t.Errorf("GET %s omitted %q", path, expected)
 			}
 		}
-		if strings.Contains(string(body), "innerHTML") ||
+		firstPartyAsset := path == "/" || path == "/app.js" || path == "/app.css" ||
+			path == "/serial-terminal.js"
+		if firstPartyAsset && (strings.Contains(string(body), "innerHTML") ||
 			strings.Contains(string(body), "localStorage") ||
-			strings.Contains(string(body), "https://") {
+			strings.Contains(string(body), "navigator.clipboard") ||
+			strings.Contains(string(body), "https://")) {
 			t.Errorf("GET %s contains an unsafe browser boundary", path)
 		}
 	}

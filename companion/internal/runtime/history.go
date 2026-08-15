@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/configmodel"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/history"
 )
 
@@ -79,10 +78,7 @@ func (application *Runtime) handleHistorySettingsUpdate(response http.ResponseWr
 		return
 	}
 	if application.configuration != nil {
-		if err := application.configuration.UpdateApplicationSettings(
-			request.Context(),
-			configmodel.ApplicationSettings{HistoryEnabled: settings.Enabled},
-		); err != nil {
+		if err := application.configuration.UpdateHistoryEnabled(request.Context(), settings.Enabled); err != nil {
 			rollbackContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			_ = application.history.SetEnabled(rollbackContext, previous)
 			cancel()

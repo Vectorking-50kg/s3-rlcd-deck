@@ -10,6 +10,10 @@ if ! command -v go >/dev/null 2>&1; then
     echo "Go is unavailable; install the Go 1.26.x toolchain" >&2
     exit 2
 fi
+if ! command -v node >/dev/null 2>&1; then
+    echo "Node.js is unavailable; install Node.js to verify the embedded Serial terminal" >&2
+    exit 2
+fi
 
 go_version="$(go env GOVERSION)"
 if [[ "$go_version" != go1.26.* ]]; then
@@ -25,6 +29,11 @@ if [[ -n "$unformatted" ]]; then
 fi
 
 cd "$companion_root"
+node --check web/dist/app.js
+node --check web/dist/serial-terminal.js
+node --check web/serial_terminal_browser_test.mjs
+node --test web/serial_terminal_test.mjs
+node web/serial_terminal_browser_test.mjs
 go vet ./...
 # AI Snapshot contract tests read canonical fixtures outside the Go module.
 # Disable the Go result cache so a fixture-only change is always re-evaluated.
