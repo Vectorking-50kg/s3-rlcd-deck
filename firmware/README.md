@@ -99,6 +99,38 @@ dependencies with:
 ./tools/generate_m0_font.sh
 ```
 
+## Serial Session authority
+
+`serial_service` owns the `DISARMED → USB_TX ↔ WEB_TX` transition graph in one FreeRTOS
+task. GPIO17 is configured as input/high-impedance before that task starts. While the
+Deck remains on an AI Page, UART1 is not installed and no target data-path task runs.
+A KEY long press queues a new Serial Session; successful UART1 installation on GPIO44
+RX/GPIO17 TX assigns a new Session ID and always selects USB as the sole TX Owner.
+
+Web owner requests carry the current Session ID and a monotonic request ID. The owner
+clears pending USB TX in the same serialized transition that grants a Web TX Lease.
+Duplicate requests only replay while their owner generation is still current; stale
+Session, request, activity, and disconnect messages cannot revive authority. A Web
+release, disconnect, or the ten-minute Lease boundary clears pending Web TX and returns
+to USB. USB input observed during WEB TX is rejected and counted without retaining its
+bytes.
+
+BOOT short press advances a control epoch before its urgent exit is queued. The owner
+therefore rejects any older KEY entry even if queue scheduling delivers that entry after
+BOOT. Exit revokes the TX Owner, clears both pending source queues, uninstalls UART1, and
+restores GPIO17 to input/high-impedance. Installation failure takes the same fail-closed
+path, does not allocate a Session ID, and leaves the AI Page visible. Only an owner
+snapshot confirming USB or Web authority activates the bounded Serial status page; no
+payload bytes are rendered. Service unavailability and UART installation failure remain
+visible in the AI Page TX footer; a later successful installation clears the current
+fault while preserving its cumulative counter. Serial and peripheral tasks start only
+after an explicit UI READY event, so asynchronous UI failure cannot leave an invisible,
+armed target. Owner events cross a depth-one latest-state mailbox, so a stalled UI/model
+consumer cannot block BOOT revocation or Lease expiry. The state module contains no
+serial payload buffers, logs, or persistence; the Router and bridge tickets attach their
+bounded in-memory queues behind this owner. The full ownership decision is recorded in
+[`ADR 0017`](../docs/adr/0017-centralize-serial-session-authority-in-one-owner-task.md).
+
 ## Safe boot smoke test
 
 With exactly one Deck connected and its serial port free:

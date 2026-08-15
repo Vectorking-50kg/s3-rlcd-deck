@@ -72,6 +72,13 @@ deck_add_host_test(
     INCLUDE_DIRS ../../firmware/components/board_support/include
 )
 deck_add_host_test(
+    test_serial_session
+    SOURCES
+        test_serial_session.cpp
+        ../../firmware/components/serial_service/deck_serial_session.cpp
+    INCLUDE_DIRS ../../firmware/components/serial_service/include
+)
+deck_add_host_test(
     test_pcf85063
     SOURCES
         test_pcf85063.cpp
