@@ -58,13 +58,15 @@ func TestConsoleViewIsAuthenticatedStableAndPrivacySafe(t *testing.T) {
 		Sessions     []json.RawMessage `json:"sessions"`
 		Capabilities struct {
 			Pairing bool `json:"pairing"`
+			Serial  bool `json:"serial"`
 		} `json:"capabilities"`
 	}
 	if err = json.Unmarshal(body, &document); err != nil {
 		t.Fatalf("decode console response: %v", err)
 	}
 	if document.Runtime.State != "ready" || document.Runtime.Version != config.Version ||
-		document.Providers == nil || document.Sessions == nil || !document.Capabilities.Pairing {
+		document.Providers == nil || document.Sessions == nil || !document.Capabilities.Pairing ||
+		!document.Capabilities.Serial {
 		t.Fatalf("console ViewModel = %#v", document)
 	}
 

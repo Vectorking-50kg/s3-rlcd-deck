@@ -58,7 +58,7 @@ func (application *Runtime) consoleView() consoleViewResponse {
 			History:            status.HistoryAvailable,
 			Backup:             application.backup != nil,
 			Pairing:            application.pairing != nil,
-			Serial:             false,
+			Serial:             application.serialHub != nil,
 			Updates:            false,
 			Diagnostics:        false,
 		},
