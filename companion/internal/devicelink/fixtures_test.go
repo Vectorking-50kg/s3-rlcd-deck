@@ -60,6 +60,8 @@ func TestSharedDeviceLinkFixtures(t *testing.T) {
 				_, parseErr = parseSerialState(message)
 			case "serial_owner_result":
 				_, parseErr = parseSerialOwnerResult(message)
+			case "ota_result":
+				_, parseErr = parseOTAResult(message)
 			case "serial_control":
 				parseErr = parseSerialControlFixture(message)
 			default:

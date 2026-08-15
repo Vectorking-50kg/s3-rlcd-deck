@@ -16,6 +16,7 @@ idf_component_register(
         freertos
         health
         heap
+        ota_service
         setup_mode
         serial_service
 )

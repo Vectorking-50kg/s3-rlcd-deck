@@ -39,6 +39,21 @@ short-lived single-use receipt must be presented to commit the exact archive, mo
 configuration that were previewed.
 _Avoid_: Dry-run import, confirmation dialog
 
+**Firmware Bundle**:
+A versioned, project-signed Deck firmware image plus the public metadata needed to prove its target,
+integrity, compatibility, and signing authority before installation.
+_Avoid_: Firmware ZIP, unsigned binary, update file
+
+**OTA Transaction**:
+The explicitly confirmed transfer of one validated Firmware Bundle to one Deck's inactive firmware
+slot. It ends before the candidate boot is trusted.
+_Avoid_: Background update, firmware upload
+
+**Boot Health Confirmation**:
+The first-boot decision that either trusts an OTA candidate after the Deck restores its critical
+subsystems and Active Companion connection, or returns to the previous firmware.
+_Avoid_: Boot success, startup delay
+
 **AI Snapshot**:
 A timestamped, display-safe view of normalized Provider data sent by a Companion to a Deck. It excludes upstream credentials and raw private content.
 _Avoid_: Raw snapshot, provider response

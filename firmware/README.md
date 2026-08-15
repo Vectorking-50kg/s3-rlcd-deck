@@ -390,6 +390,23 @@ status/confidence/update age, then only the available balance, quota, Token, and
 fields. `EXPERIMENTAL`, `DEGRADED`, `STALE`, and `UNAVAILABLE` never depend on grayscale, and every
 page ends with `TX DISARMED`.
 
+## Signed A/B OTA
+
+The `ota_service` component owns one bounded Firmware Bundle transaction at a time. Device Link
+accepts OTA controls only from the authenticated Active transport, then a private worker validates
+the board, protocol, strictly newer semantic version, catalog key, P-256 signature, partition size,
+sequential offset, 30-second inactivity deadline, and ten-minute total deadline before and during the write. It streams directly to the
+inactive application slot while computing SHA-256; `esp_ota_end`, the image's embedded version, and
+the complete digest must all agree before the boot partition changes. A second offer is `busy`, a
+wrong transaction ID cannot mutate the active write, and every failure aborts the open OTA handle.
+
+`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` keeps the candidate in pending-verify state. A 60-second guard
+marks it valid only after the UI/display, peripheral service, Wi-Fi, and the authenticated Active
+Companion Link are healthy. Otherwise ESP-IDF marks the candidate invalid and reboots into the prior
+slot. OTA never touches the partition table, NVS, bootloader, eFuse, GPIO0 BOOT behavior, or release
+USB Serial/JTAG recovery. See
+[`ADR 0023`](../docs/adr/0023-sign-application-ota-and-confirm-first-boot-health.md).
+
 ## Long-duration HIL
 
 For fast development feedback, use the 90-second contract. It exercises the display and

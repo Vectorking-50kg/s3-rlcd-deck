@@ -20,9 +20,13 @@ const (
 	MessageSerialOwnerResult    = "serial.owner.result"
 	MessageSerialOwnerActivity  = "serial.owner.activity"
 	MessageSerialHistoryRequest = "serial.history.request"
+	MessageOTAOffer             = "ota.offer"
+	MessageOTAChunk             = "ota.chunk"
+	MessageOTAResult            = "ota.result"
 )
 
 var safeVersion = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z.+_-]{0,31}$`)
+var otaTransactionID = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
 type DeviceHello struct {
 	Type            string   `json:"type"`
@@ -86,6 +90,38 @@ type SerialHistoryRequest struct {
 	ProtocolVersion int    `json:"protocol_version"`
 	SerialSessionID uint64 `json:"serial_session_id"`
 	AfterSequence   uint64 `json:"after_sequence"`
+}
+
+type OTAOffer struct {
+	Type                   string `json:"type"`
+	ProtocolVersion        int    `json:"protocol_version"`
+	TransactionID          string `json:"transaction_id"`
+	Version                string `json:"version"`
+	Board                  string `json:"board"`
+	ImageLength            uint32 `json:"image_length"`
+	ImageSHA256            string `json:"image_sha256"`
+	Signature              string `json:"signature"`
+	SigningKeyID           uint32 `json:"signing_key_id"`
+	MinimumProtocolVersion uint32 `json:"minimum_protocol_version"`
+}
+
+type OTAChunk struct {
+	Type            string `json:"type"`
+	ProtocolVersion int    `json:"protocol_version"`
+	TransactionID   string `json:"transaction_id"`
+	Offset          uint32 `json:"offset"`
+	Data            string `json:"data"`
+	Final           bool   `json:"final"`
+}
+
+type OTAResult struct {
+	Type            string `json:"type"`
+	ProtocolVersion int    `json:"protocol_version"`
+	TransactionID   string `json:"transaction_id"`
+	State           string `json:"state"`
+	Code            string `json:"code"`
+	ReceivedBytes   uint32 `json:"received_bytes"`
+	ImageLength     uint32 `json:"image_length"`
 }
 
 func parseDeviceHello(message []byte, authenticatedDeviceID string) (DeviceHello, error) {
@@ -189,6 +225,38 @@ func parseSerialOwnerResult(message []byte) (SerialOwnerResult, error) {
 		(result.SerialState != "web_tx" && result.LeaseID != 0) ||
 		(result.SerialState == "web_tx" && result.LeaseID == 0) {
 		return SerialOwnerResult{}, errors.New("invalid serial.owner.result")
+	}
+	return result, nil
+}
+
+func parseOTAResult(message []byte) (OTAResult, error) {
+	envelope, err := protocol.ParseEnvelope(message)
+	if err != nil || envelope.Type != MessageOTAResult {
+		return OTAResult{}, errors.New("message is not ota.result")
+	}
+	var result OTAResult
+	if err = protocol.DecodeStrictDocument(message, &result); err != nil {
+		return OTAResult{}, err
+	}
+	validState := result.State == "receiving" ||
+		result.State == "ready_to_reboot" || result.State == "failed"
+	validCode := result.Code == "ok" || result.Code == "invalid_manifest" ||
+		result.Code == "wrong_board" || result.Code == "incompatible_protocol" ||
+		result.Code == "downgrade_rejected" || result.Code == "image_too_large" ||
+		result.Code == "signature_rejected" || result.Code == "busy" ||
+		result.Code == "stale_offset" || result.Code == "flash_failure" ||
+		result.Code == "hash_mismatch" || result.Code == "image_invalid" ||
+		result.Code == "timed_out"
+	if result.ProtocolVersion != ProtocolVersion ||
+		!otaTransactionID.MatchString(result.TransactionID) ||
+		!validState || !validCode || result.ReceivedBytes > result.ImageLength ||
+		result.ImageLength > 1_740_800 ||
+		(result.Code == "ok" && result.State == "failed") ||
+		(result.Code != "ok" && result.State != "failed") ||
+		(result.Code == "ok" && result.ImageLength == 0) ||
+		(result.State == "ready_to_reboot" &&
+			(result.Code != "ok" || result.ReceivedBytes != result.ImageLength)) {
+		return OTAResult{}, errors.New("invalid ota.result")
 	}
 	return result, nil
 }

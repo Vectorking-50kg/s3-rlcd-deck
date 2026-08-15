@@ -43,6 +43,7 @@ type Config struct {
 	OnSerialFrame       func(deviceID string, frame serialprotocol.Frame) error
 	OnDisconnect        func(deviceID string)
 	OnSerialOwnerResult func(deviceID string, result SerialOwnerResult) error
+	OnOTAResult         func(deviceID string, result OTAResult) error
 	SerialHistoryCursor func(deviceID string, sessionID uint64) (uint64, bool)
 }
 
@@ -57,6 +58,7 @@ type Hub struct {
 	onSerialFrame       func(deviceID string, frame serialprotocol.Frame) error
 	onDisconnect        func(deviceID string)
 	onSerialOwnerResult func(deviceID string, result SerialOwnerResult) error
+	onOTAResult         func(deviceID string, result OTAResult) error
 	serialHistoryCursor func(deviceID string, sessionID uint64) (uint64, bool)
 	done                chan struct{}
 	closeOnce           sync.Once
@@ -115,6 +117,7 @@ func New(config Config) (*Hub, error) {
 		onSerialFrame:       config.OnSerialFrame,
 		onDisconnect:        config.OnDisconnect,
 		onSerialOwnerResult: config.OnSerialOwnerResult,
+		onOTAResult:         config.OnOTAResult,
 		serialHistoryCursor: config.SerialHistoryCursor,
 		done:                make(chan struct{}),
 		connections:         make(map[*websocket.Conn]struct{}),
@@ -277,6 +280,26 @@ func (hub *Hub) SendSerialWebFrame(
 		return ErrDeviceUnavailable
 	}
 	return nil
+}
+
+func (hub *Hub) SendOTAOffer(
+	ctx context.Context,
+	deviceID string,
+	offer OTAOffer,
+) error {
+	offer.Type = MessageOTAOffer
+	offer.ProtocolVersion = ProtocolVersion
+	return hub.writeDeviceControl(ctx, deviceID, offer)
+}
+
+func (hub *Hub) SendOTAChunk(
+	ctx context.Context,
+	deviceID string,
+	chunk OTAChunk,
+) error {
+	chunk.Type = MessageOTAChunk
+	chunk.ProtocolVersion = ProtocolVersion
+	return hub.writeDeviceControl(ctx, deviceID, chunk)
 }
 
 func (hub *Hub) writeSerialHistoryRequest(
@@ -600,6 +623,13 @@ func (hub *Hub) serveConnection(
 					if parseErr != nil || hub.onSerialOwnerResult == nil ||
 						hub.onSerialOwnerResult(authentication.deviceID, result) != nil {
 						_ = connection.Close(websocket.StatusPolicyViolation, "invalid serial.owner.result")
+						return false
+					}
+				case MessageOTAResult:
+					result, parseErr := parseOTAResult(frame.message)
+					if parseErr != nil || hub.onOTAResult == nil ||
+						hub.onOTAResult(authentication.deviceID, result) != nil {
+						_ = connection.Close(websocket.StatusPolicyViolation, "invalid ota.result")
 						return false
 					}
 				default:

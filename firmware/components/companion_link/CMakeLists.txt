@@ -17,6 +17,7 @@ idf_component_register(
         espressif__esp_websocket_client
         freertos
         mbedtls
+        ota_service
         pthread
         serial_service
 )

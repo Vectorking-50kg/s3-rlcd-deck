@@ -138,6 +138,17 @@ func (application *Runtime) managementRoutes() http.Handler {
 		limits.SensitiveRateWindow,
 		application.requireManagementWrite(application.handleBackupImport),
 	))
+	mux.HandleFunc("POST /api/v1/ota/preview", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.requireManagementWrite(application.handleOTAPreview),
+	))
+	mux.HandleFunc("POST /api/v1/ota/apply", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.requireManagementWrite(application.handleOTAApply),
+	))
+	mux.HandleFunc("GET /api/v1/ota/status", application.requireManagementSession(application.handleOTAStatus))
 	mux.HandleFunc("POST /api/v1/logout", limitManagementRequests(
 		sensitiveRateLimiter,
 		limits.SensitiveRateWindow,
@@ -304,6 +315,9 @@ func (application *Runtime) handleSessionRefresh(response http.ResponseWriter, r
 func (application *Runtime) handleLogout(response http.ResponseWriter, request *http.Request) {
 	cookie, _ := request.Cookie(managementSessionCookie)
 	application.sessions.revoke(cookie.Value)
+	if application.ota != nil {
+		application.ota.RevokePreviews()
+	}
 	http.SetCookie(response, &http.Cookie{
 		Name:     managementSessionCookie,
 		Path:     "/",

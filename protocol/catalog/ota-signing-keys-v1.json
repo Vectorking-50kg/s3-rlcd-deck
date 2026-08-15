@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "algorithm": "ecdsa-p256-sha256",
+  "manifest_canonical_form": "S3RLCDOTA1 || u32be(key_id) || u32be(minimum_protocol_version) || u32be(image_length) || board[48] zero-padded || version[32] zero-padded || image_sha256[32]",
+  "keys": [
+    {
+      "id": 1,
+      "public_key_sec1_hex": "04656b37c0adb4d5c2a971fc07fad9bcdd679d30eeb2bff140a01d88f292fa2bb578d0f3320488c576d9990bb69dc9b05547e1752c61de8d0b84e4a8fc04ddb137",
+      "status": "active"
+    }
+  ]
+}

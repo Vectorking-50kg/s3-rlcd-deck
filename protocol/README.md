@@ -5,7 +5,9 @@ This directory is the cross-end source of truth for versioned messages exchanged
 - `schema/` defines the wire constraints.
 - `fixtures/` contains accepted and rejected envelope and Pairing examples that every Go and ESP-IDF parser must run unchanged.
 - Control messages are UTF-8 JSON objects no larger than 16 KiB.
-- Unknown envelope fields are accepted for compatible minor evolution; security-sensitive Pairing documents reject unknown fields.
+- Forward compatibility is contract-specific: AI Snapshot defines bounded higher-minor scalar
+  extensions, while security- or authority-sensitive Pairing and Device Link control documents
+  (including signed OTA) reject unknown fields.
 - Unknown protocol major versions, duplicate object keys, trailing documents, malformed JSON, and oversized messages are rejected.
 
 ## AI Snapshot v1
@@ -35,3 +37,17 @@ Raw Serial Session bytes use versioned WebSocket binary frames and are specified
 `catalog/serial-frame-v1.json` is the authoritative fixed-header catalog: big-endian fields bind every
 payload to a channel, nonzero Serial Session ID, nonzero sequence, device monotonic timestamp, and
 exact payload length. V1 payloads are bounded to the Deck Router's 256-byte immutable block size.
+
+## Signed OTA v1
+
+`schema/device-link-v1.schema.json` defines `ota.offer`, `ota.chunk`, and `ota.result`. The
+authoritative public-key catalog is `catalog/ota-signing-keys-v1.json`; firmware and Go contract
+tests must prove their compiled projections match it. The canonical manifest is fixed-width and
+binds key ID, minimum protocol, image length, board, version, and SHA-256. Signature bytes are raw
+P-256 `r || s`; JSON carries them as canonical padded base64.
+
+Chunks contain at most 3072 decoded bytes and use exact increasing offsets. Companion waits for the
+matching Deck result before sending the next chunk, so transport and firmware queues remain bounded.
+Both ends enforce a ten-minute total transaction deadline and the Deck additionally enforces a
+30-second inactivity deadline. An error result terminates the transaction; only `ready_to_reboot` with the full image length allows
+the Deck to reboot into ESP-IDF pending-verify state.

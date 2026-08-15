@@ -217,6 +217,38 @@ deck_add_host_test(
     INCLUDE_DIRS ../../firmware/components/companion_link/include
 )
 deck_add_host_test(
+    test_ota_transaction
+    SOURCES
+        test_ota_transaction.cpp
+        ../../firmware/components/ota_service/deck_ota_transaction.cpp
+    INCLUDE_DIRS ../../firmware/components/ota_service/include
+)
+deck_add_host_test(
+    test_ota_transport_fence
+    SOURCES
+        test_ota_transport_fence.cpp
+        ../../firmware/components/ota_service/deck_ota_transport_fence.cpp
+    INCLUDE_DIRS ../../firmware/components/ota_service
+)
+deck_add_host_test(
+    test_ota_boot_health
+    SOURCES
+        test_ota_boot_health.cpp
+        ../../firmware/components/ota_service/deck_ota_boot_health.cpp
+    INCLUDE_DIRS ../../firmware/components/ota_service/include
+)
+deck_add_host_test(
+    test_ota_signing_keys
+    SOURCES
+        test_ota_signing_keys.cpp
+        ../../firmware/components/ota_service/deck_ota_signing_keys.cpp
+    INCLUDE_DIRS ../../firmware/components/ota_service/include
+)
+target_compile_definitions(
+    test_ota_signing_keys
+    PRIVATE DECK_REPOSITORY_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../.."
+)
+deck_add_host_test(
     test_companion_failover
     SOURCES
         test_companion_failover.cpp
@@ -301,4 +333,8 @@ add_test(
 add_test(
     NAME serial_release_config_contract
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_serial_release_config.py
+)
+add_test(
+    NAME sign_ota_bundle_contract
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_sign_ota_bundle.py
 )
