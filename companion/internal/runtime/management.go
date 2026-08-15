@@ -149,6 +149,12 @@ func (application *Runtime) managementRoutes() http.Handler {
 		application.requireManagementWrite(application.handleOTAApply),
 	))
 	mux.HandleFunc("GET /api/v1/ota/status", application.requireManagementSession(application.handleOTAStatus))
+	mux.HandleFunc("GET /api/v1/diagnostics", application.requireManagementSession(application.handleDiagnosticsStatus))
+	mux.HandleFunc("POST /api/v1/diagnostics/export", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.requireManagementWrite(application.handleDiagnosticsExport),
+	))
 	mux.HandleFunc("POST /api/v1/logout", limitManagementRequests(
 		sensitiveRateLimiter,
 		limits.SensitiveRateWindow,

@@ -7,6 +7,7 @@
 #include "deck_application_ui.h"
 #include "deck_peripherals.h"
 #include "deck_boot_diagnostics.h"
+#include "deck_diagnostic_ring.h"
 #include "deck_companion_link.h"
 #include "deck_device_settings.h"
 #include "deck_display.h"
@@ -1252,8 +1253,23 @@ void ui_event(void *, const deck_application_ui_event_t *event)
 extern "C" void app_main(void)
 {
     const esp_app_desc_t *app = esp_app_get_description();
+    deck_diagnostic_ring_reset();
+    (void)deck_diagnostic_ring_record(
+        static_cast<uint64_t>(esp_timer_get_time() / 1'000),
+        DECK_DIAGNOSTIC_LEVEL_INFO,
+        DECK_DIAGNOSTIC_COMPONENT_SYSTEM,
+        DECK_DIAGNOSTIC_CODE_BOOT,
+        static_cast<uint32_t>(esp_reset_reason())
+    );
     deck_ota_boot_guard_t *ota_boot_guard = deck_ota_boot_guard_start(60'000);
     if (!deck_serial_service_prepare_disarmed()) {
+        (void)deck_diagnostic_ring_record(
+            static_cast<uint64_t>(esp_timer_get_time() / 1'000),
+            DECK_DIAGNOSTIC_LEVEL_ERROR,
+            DECK_DIAGNOSTIC_COMPONENT_SERIAL,
+            DECK_DIAGNOSTIC_CODE_UNAVAILABLE,
+            1
+        );
         return;
     }
 #ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
@@ -1276,6 +1292,13 @@ extern "C" void app_main(void)
 
     application_panel = deck_rlcd_panel_create();
     if (application_panel == nullptr) {
+        (void)deck_diagnostic_ring_record(
+            static_cast<uint64_t>(esp_timer_get_time() / 1'000),
+            DECK_DIAGNOSTIC_LEVEL_ERROR,
+            DECK_DIAGNOSTIC_COMPONENT_DISPLAY,
+            DECK_DIAGNOSTIC_CODE_UNAVAILABLE,
+            1
+        );
 #ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
         display_start_error("panel_create");
 #endif
@@ -1283,6 +1306,13 @@ extern "C" void app_main(void)
         return;
     }
     if (!deck_rlcd_panel_initialize(application_panel)) {
+        (void)deck_diagnostic_ring_record(
+            static_cast<uint64_t>(esp_timer_get_time() / 1'000),
+            DECK_DIAGNOSTIC_LEVEL_ERROR,
+            DECK_DIAGNOSTIC_COMPONENT_DISPLAY,
+            DECK_DIAGNOSTIC_CODE_UNAVAILABLE,
+            2
+        );
 #ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
         display_start_error("panel_initialize");
 #endif
@@ -1293,6 +1323,13 @@ extern "C" void app_main(void)
     application_display =
         deck_display_service_create(deck_rlcd_panel_adapter(application_panel), 100);
     if (application_display == nullptr) {
+        (void)deck_diagnostic_ring_record(
+            static_cast<uint64_t>(esp_timer_get_time() / 1'000),
+            DECK_DIAGNOSTIC_LEVEL_ERROR,
+            DECK_DIAGNOSTIC_COMPONENT_DISPLAY,
+            DECK_DIAGNOSTIC_CODE_UNAVAILABLE,
+            3
+        );
 #ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
         display_start_error("service_create");
 #endif
@@ -1347,6 +1384,13 @@ extern "C" void app_main(void)
         application_model_mutex = nullptr;
         return;
     }
+    (void)deck_diagnostic_ring_record(
+        static_cast<uint64_t>(esp_timer_get_time() / 1'000),
+        DECK_DIAGNOSTIC_LEVEL_INFO,
+        DECK_DIAGNOSTIC_COMPONENT_DISPLAY,
+        DECK_DIAGNOSTIC_CODE_READY,
+        0
+    );
     start_setup_after_ui_ready();
     application_serial_view_task = start_serial_view_task();
     if (application_serial_view_task != nullptr) {
@@ -1389,4 +1433,11 @@ extern "C" void app_main(void)
     }
 #endif
     confirm_ota_boot_when_healthy(ota_boot_guard);
+    (void)deck_diagnostic_ring_record(
+        static_cast<uint64_t>(esp_timer_get_time() / 1'000),
+        DECK_DIAGNOSTIC_LEVEL_INFO,
+        DECK_DIAGNOSTIC_COMPONENT_SYSTEM,
+        DECK_DIAGNOSTIC_CODE_READY,
+        0
+    );
 }

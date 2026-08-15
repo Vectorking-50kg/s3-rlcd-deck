@@ -31,6 +31,10 @@ typedef struct {
     bool enable;
 } deck_device_serial_control_t;
 
+typedef struct {
+    uint64_t request_id;
+} deck_device_diagnostics_request_t;
+
 /* Constant-time comparison after validating the canonical lowercase wire form. */
 bool deck_device_protocol_fingerprint_matches_sha256(
     const uint8_t digest[32],
@@ -55,6 +59,12 @@ bool deck_device_protocol_parse_serial_control(
     const char *message,
     size_t message_size,
     deck_device_serial_control_t *control
+);
+
+bool deck_device_protocol_parse_diagnostics_request(
+    const char *message,
+    size_t message_size,
+    deck_device_diagnostics_request_t *request
 );
 
 #ifdef __cplusplus

@@ -258,6 +258,8 @@ bool parse_capabilities(JsonCursor *cursor, bool *has_serial)
             bit = 2U;
         } else if (std::strcmp(capability, "ota") == 0) {
             bit = 4U;
+        } else if (std::strcmp(capability, "diagnostics") == 0) {
+            bit = 8U;
         } else {
             return false;
         }
@@ -665,4 +667,61 @@ bool deck_device_protocol_parse_serial_control(
         }
     }
     return has_kind && seen == required && cursor.finished();
+}
+
+bool deck_device_protocol_parse_diagnostics_request(
+    const char *message,
+    size_t message_size,
+    deck_device_diagnostics_request_t *request
+)
+{
+    if (message == nullptr || message_size == 0 ||
+        message_size > DECK_DEVICE_PROTOCOL_MAX_CONTROL_BYTES || request == nullptr) {
+        return false;
+    }
+    *request = {};
+    JsonCursor cursor(message, message_size);
+    if (!cursor.valid() || !cursor.consume('{')) {
+        return false;
+    }
+    uint8_t seen = 0;
+    bool done = false;
+    while (!done) {
+        char key[32]{};
+        if (!cursor.string(key, sizeof(key)) || !cursor.consume(':')) {
+            return false;
+        }
+        uint8_t bit = 0;
+        if (std::strcmp(key, "type") == 0) {
+            bit = 1U;
+            char value[32]{};
+            if (!cursor.string(value, sizeof(value)) ||
+                std::strcmp(value, "diagnostics.request") != 0) {
+                return false;
+            }
+        } else if (std::strcmp(key, "protocol_version") == 0) {
+            bit = 2U;
+            uint64_t value = 0;
+            if (!cursor.unsigned_integer(&value) ||
+                value != DECK_DEVICE_PROTOCOL_VERSION) {
+                return false;
+            }
+        } else if (std::strcmp(key, "request_id") == 0) {
+            bit = 4U;
+            if (!cursor.unsigned_integer(&request->request_id) ||
+                request->request_id == 0) {
+                return false;
+            }
+        } else {
+            return false;
+        }
+        if ((seen & bit) != 0) {
+            return false;
+        }
+        seen |= bit;
+        if (!cursor.object_separator(&done)) {
+            return false;
+        }
+    }
+    return seen == 7U && cursor.finished();
 }

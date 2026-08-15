@@ -16,6 +16,7 @@ idf_component_register(
         esp_timer
         espressif__esp_websocket_client
         freertos
+        health
         mbedtls
         ota_service
         pthread

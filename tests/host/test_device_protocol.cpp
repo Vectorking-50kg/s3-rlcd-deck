@@ -127,6 +127,22 @@ void serial_controls_are_strict_and_bounded()
     ));
 }
 
+void diagnostic_requests_are_strict_and_shared()
+{
+    deck_device_diagnostics_request_t request{};
+    const std::string valid = fixture("diagnostics-request-valid.json");
+    assert(deck_device_protocol_parse_diagnostics_request(
+        valid.data(), valid.size(), &request
+    ));
+    assert(request.request_id == 17);
+    constexpr char duplicate[] =
+        "{\"type\":\"diagnostics.request\",\"protocol_version\":1,"
+        "\"request_id\":17,\"request_id\":18}";
+    assert(!deck_device_protocol_parse_diagnostics_request(
+        duplicate, sizeof(duplicate) - 1U, &request
+    ));
+}
+
 }  // namespace
 
 int main()
@@ -135,5 +151,6 @@ int main()
     shared_heartbeat_fixtures_match_the_device_contract();
     exact_certificate_pin_rejects_a_wrong_digest();
     serial_controls_are_strict_and_bounded();
+    diagnostic_requests_are_strict_and_shared();
     return 0;
 }

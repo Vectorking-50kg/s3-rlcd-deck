@@ -23,6 +23,7 @@ const (
 	defaultHeartbeatInterval = 10 * time.Second
 	defaultHeartbeatTimeout  = 30 * time.Second
 	MaxSnapshotMessageBytes  = 16 << 10
+	maximumDiagnosticRings   = 32
 )
 
 var ErrInvalidSnapshot = errors.New("invalid AI Snapshot publication")
@@ -71,6 +72,20 @@ type Hub struct {
 	snapshotSignals    map[*websocket.Conn]chan struct{}
 	latestSnapshot     []byte
 	snapshotGeneration uint64
+	diagnosticExpected map[*websocket.Conn]uint64
+	diagnosticRings    map[string]cachedDiagnostics
+	nextDiagnosticID   uint64
+	nextDiagnosticRing uint64
+}
+
+type cachedDiagnostics struct {
+	snapshot DiagnosticsSnapshot
+	sequence uint64
+}
+
+type DeviceDiagnostics struct {
+	DeviceID string
+	Snapshot DiagnosticsSnapshot
 }
 
 type authenticatedDeck struct {
@@ -124,6 +139,8 @@ func New(config Config) (*Hub, error) {
 		sessions:            make(map[string]*websocket.Conn),
 		disconnecting:       make(map[string]*websocket.Conn),
 		snapshotSignals:     make(map[*websocket.Conn]chan struct{}),
+		diagnosticExpected:  make(map[*websocket.Conn]uint64),
+		diagnosticRings:     make(map[string]cachedDiagnostics),
 	}, nil
 }
 
@@ -219,6 +236,10 @@ func (hub *Hub) Close() {
 		}
 		clear(hub.latestSnapshot)
 		hub.latestSnapshot = nil
+		for deviceID, cached := range hub.diagnosticRings {
+			clear(cached.snapshot.Events)
+			delete(hub.diagnosticRings, deviceID)
+		}
 		hub.mu.Unlock()
 		for _, connection := range connections {
 			// Runtime shutdown is bounded. A Deck that stops reading must not make
@@ -234,6 +255,22 @@ func (hub *Hub) ConnectedDecks() int {
 	hub.mu.Lock()
 	defer hub.mu.Unlock()
 	return len(hub.sessions)
+}
+
+// DiagnosticRings returns independently owned, fixed-schema in-memory Deck
+// diagnostics. Authentication, transport, Profile, and serial payload state
+// never cross this boundary.
+func (hub *Hub) DiagnosticRings() []DeviceDiagnostics {
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	result := make([]DeviceDiagnostics, 0, len(hub.diagnosticRings))
+	for deviceID, cached := range hub.diagnosticRings {
+		owned := cached.snapshot
+		owned.Events = append([]DiagnosticEvent(nil), cached.snapshot.Events...)
+		result = append(result, DeviceDiagnostics{DeviceID: deviceID, Snapshot: owned})
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].DeviceID < result[j].DeviceID })
+	return result
 }
 
 func (hub *Hub) RequestSerialOwner(
@@ -379,6 +416,7 @@ func (hub *Hub) removeConnection(connection *websocket.Conn, deviceID string) {
 		removedActiveSession = true
 	}
 	delete(hub.snapshotSignals, connection)
+	delete(hub.diagnosticExpected, connection)
 	hub.mu.Unlock()
 	if removedActiveSession && hub.onDisconnect != nil {
 		hub.onDisconnect(deviceID)
@@ -390,6 +428,95 @@ func (hub *Hub) removeConnection(connection *websocket.Conn, deviceID string) {
 		}
 		hub.mu.Unlock()
 	}
+}
+
+func hasCapability(capabilities []string, wanted string) bool {
+	for _, capability := range capabilities {
+		if capability == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+func (hub *Hub) requestDiagnostics(connection *websocket.Conn) bool {
+	hub.mu.Lock()
+	if hub.closed {
+		hub.mu.Unlock()
+		return false
+	}
+	if hub.diagnosticExpected[connection] != 0 {
+		hub.mu.Unlock()
+		return true
+	}
+	hub.nextDiagnosticID++
+	if hub.nextDiagnosticID == 0 {
+		hub.nextDiagnosticID++
+	}
+	requestID := hub.nextDiagnosticID
+	hub.diagnosticExpected[connection] = requestID
+	hub.mu.Unlock()
+	document, err := json.Marshal(DiagnosticsRequest{
+		Type: MessageDiagnosticsRequest, ProtocolVersion: ProtocolVersion, RequestID: requestID,
+	})
+	if err != nil || len(document) > MaxControlMessageBytes {
+		hub.clearExpectedDiagnostics(connection, requestID)
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), hub.heartbeatInterval)
+	err = connection.Write(ctx, websocket.MessageText, document)
+	cancel()
+	clear(document)
+	if err != nil {
+		hub.clearExpectedDiagnostics(connection, requestID)
+		return false
+	}
+	return true
+}
+
+func (hub *Hub) clearExpectedDiagnostics(connection *websocket.Conn, requestID uint64) {
+	hub.mu.Lock()
+	if hub.diagnosticExpected[connection] == requestID {
+		delete(hub.diagnosticExpected, connection)
+	}
+	hub.mu.Unlock()
+}
+
+func (hub *Hub) acceptDiagnostics(
+	connection *websocket.Conn,
+	deviceID string,
+	snapshot DiagnosticsSnapshot,
+) bool {
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	if hub.closed || hub.sessions[deviceID] != connection ||
+		hub.diagnosticExpected[connection] != snapshot.RequestID {
+		return false
+	}
+	delete(hub.diagnosticExpected, connection)
+	previous, existed := hub.diagnosticRings[deviceID]
+	if !existed && len(hub.diagnosticRings) >= maximumDiagnosticRings {
+		var oldestDeviceID string
+		oldestSequence := ^uint64(0)
+		for candidateID, cached := range hub.diagnosticRings {
+			if cached.sequence < oldestSequence {
+				oldestDeviceID = candidateID
+				oldestSequence = cached.sequence
+			}
+		}
+		oldest := hub.diagnosticRings[oldestDeviceID]
+		clear(oldest.snapshot.Events)
+		delete(hub.diagnosticRings, oldestDeviceID)
+	}
+	clear(previous.snapshot.Events)
+	owned := snapshot
+	owned.Events = append([]DiagnosticEvent(nil), snapshot.Events...)
+	hub.nextDiagnosticRing++
+	hub.diagnosticRings[deviceID] = cachedDiagnostics{
+		snapshot: owned,
+		sequence: hub.nextDiagnosticRing,
+	}
+	return true
 }
 
 func (hub *Hub) snapshotSignal(connection *websocket.Conn) <-chan struct{} {
@@ -471,6 +598,10 @@ func (hub *Hub) serveConnection(
 	if !hub.writeHeartbeat(connection) {
 		return
 	}
+	diagnosticsCapable := hasCapability(hello.Capabilities, "diagnostics")
+	if diagnosticsCapable && !hub.requestDiagnostics(connection) {
+		return
+	}
 	if hello.SerialSessionID != 0 && hub.serialHistoryCursor != nil {
 		if afterSequence, available := hub.serialHistoryCursor(
 			authentication.deviceID,
@@ -530,6 +661,9 @@ func (hub *Hub) serveConnection(
 				return
 			}
 			if !hub.writeHeartbeat(connection) {
+				return
+			}
+			if diagnosticsCapable && !hub.requestDiagnostics(connection) {
 				return
 			}
 		case <-snapshotSignal:
@@ -630,6 +764,13 @@ func (hub *Hub) serveConnection(
 					if parseErr != nil || hub.onOTAResult == nil ||
 						hub.onOTAResult(authentication.deviceID, result) != nil {
 						_ = connection.Close(websocket.StatusPolicyViolation, "invalid ota.result")
+						return false
+					}
+				case MessageDiagnosticsSnapshot:
+					snapshot, parseErr := parseDiagnosticsSnapshot(frame.message)
+					if parseErr != nil ||
+						!hub.acceptDiagnostics(connection, authentication.deviceID, snapshot) {
+						_ = connection.Close(websocket.StatusPolicyViolation, "invalid diagnostics.snapshot")
 						return false
 					}
 				default:

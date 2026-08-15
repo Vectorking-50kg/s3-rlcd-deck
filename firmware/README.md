@@ -332,6 +332,15 @@ the replacement transport starts. The ESP-IDF
 stock handshake error path prints custom headers; Deck-owned diagnostics remain redacted.
 All credentials remain private to the Profile and Device Link modules.
 
+Release firmware also advertises the `diagnostics` capability. The `health` component owns one
+volatile 64-event `Deck Diagnostic Ring`; callers can record only fixed level/component/code enums,
+monotonic time, and one numeric value. No string, path, credential, Provider value, prompt, tool
+argument, or Serial payload can be represented. After the exact transport becomes Active, the Link
+answers a strict `diagnostics.request` with the matching `diagnostics.snapshot`; malformed,
+duplicate, oversized, stale-request, or unknown-enum documents fail closed. The ring is never
+written to Flash and is read through the Companion's authenticated System bundle flow. See
+[`ADR 0024`](../docs/adr/0024-bound-diagnostics-to-fixed-redacted-events.md).
+
 ## AI Snapshot contract
 
 The `ai_snapshot` component validates `snapshot.ai` before any state can replace the Deck's last

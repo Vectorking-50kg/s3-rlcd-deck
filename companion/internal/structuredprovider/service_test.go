@@ -219,7 +219,12 @@ func TestServiceTestRequestUsesPersistedDefinitionAndReturnsOnlyPreview(t *testi
 		[]SecretBinding{{HeaderIndex: 0, Value: []byte("PRIVATE_TEST_REQUEST")}}, nil); err != nil {
 		t.Fatal(err)
 	}
+	if err = service.SetDiagnosticSink(func(Diagnostic) {}); err != nil {
+		t.Fatal(err)
+	}
+	observedDiagnosticSink := false
 	service.newCollector = func(config Config) (managedCollector, error) {
+		observedDiagnosticSink = config.Diagnostic != nil
 		return &fakeManagedCollector{provider: aisnapshot.Provider{
 			SchemaVersion: aisnapshot.SchemaVersion{Major: 1, Minor: 0},
 			ID:            config.Definition.ID, DisplayName: config.Definition.DisplayName,
@@ -230,6 +235,9 @@ func TestServiceTestRequestUsesPersistedDefinitionAndReturnsOnlyPreview(t *testi
 	preview, err := service.Test(context.Background(), "aihubmix")
 	if err != nil || preview.Provider.ID != "aihubmix" {
 		t.Fatalf("Test() = %#v, %v", preview, err)
+	}
+	if !observedDiagnosticSink {
+		t.Fatal("service did not connect the fixed diagnostic sink")
 	}
 	encoded, _ := json.Marshal(preview)
 	if bytes.Contains(encoded, []byte("PRIVATE_TEST_REQUEST")) ||

@@ -51,3 +51,14 @@ matching Deck result before sending the next chunk, so transport and firmware qu
 Both ends enforce a ten-minute total transaction deadline and the Deck additionally enforces a
 30-second inactivity deadline. An error result terminates the transaction; only `ready_to_reboot` with the full image length allows
 the Deck to reboot into ESP-IDF pending-verify state.
+
+## Redacted diagnostics v1
+
+`schema/device-link-v1.schema.json` also defines `diagnostics.request` and
+`diagnostics.snapshot`. Only an authenticated Active connection that advertised the `diagnostics`
+capability participates. The Companion allocates a nonzero request ID; the Deck echoes that exact
+ID with at most 64 chronological events. Each event contains only monotonic milliseconds, bounded
+level/component/code enums, and one unsigned numeric value. Unknown fields, strings outside those
+enums, duplicate keys, out-of-order time, oversized rings, and a response for any other request or
+transport generation fail closed. Canonical shared fixtures cover both accepted and rejected
+documents.

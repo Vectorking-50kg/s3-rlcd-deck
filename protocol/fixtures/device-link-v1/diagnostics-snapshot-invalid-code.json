@@ -1,0 +1,1 @@
+{"type":"diagnostics.snapshot","protocol_version":1,"request_id":17,"dropped":0,"events":[{"monotonic_ms":10,"level":"info","component":"system","code":"Authorization: Bearer secret","value":0}]}

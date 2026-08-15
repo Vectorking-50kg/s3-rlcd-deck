@@ -62,6 +62,10 @@ func TestSharedDeviceLinkFixtures(t *testing.T) {
 				_, parseErr = parseSerialOwnerResult(message)
 			case "ota_result":
 				_, parseErr = parseOTAResult(message)
+			case "diagnostics_snapshot":
+				_, parseErr = parseDiagnosticsSnapshot(message)
+			case "diagnostics_request":
+				parseErr = parseDiagnosticsRequestFixture(message)
 			case "serial_control":
 				parseErr = parseSerialControlFixture(message)
 			default:
@@ -72,6 +76,21 @@ func TestSharedDeviceLinkFixtures(t *testing.T) {
 			}
 		})
 	}
+}
+
+func parseDiagnosticsRequestFixture(message []byte) error {
+	envelope, err := protocol.ParseEnvelope(message)
+	if err != nil || envelope.Type != MessageDiagnosticsRequest {
+		return os.ErrInvalid
+	}
+	var request DiagnosticsRequest
+	if err = protocol.DecodeStrictDocument(message, &request); err != nil {
+		return err
+	}
+	if request.ProtocolVersion != ProtocolVersion || request.RequestID == 0 {
+		return os.ErrInvalid
+	}
+	return nil
 }
 
 func parseSerialControlFixture(message []byte) error {

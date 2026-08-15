@@ -98,8 +98,9 @@ eight-hour session lifetime and invalidates the previous CSRF token.
 Provider management, history, pairing, backup, and Serial controls call their authenticated APIs.
 The Serial view embeds local xterm.js assets for Text/ANSI/Unicode/scroll/search, offers safe HEX
 and Text+HEX projections, and remains read-only until the Deck confirms this observer's exact Web
-TX Lease. Signed OTA is connected to its preview/apply/status API; diagnostic-bundle interfaces are
-not yet present and that formal view explicitly says the module is not connected. Neither view
+TX Lease. Signed OTA is connected to its preview/apply/status API. The diagnostics view reads the
+bounded rotation state and exports a local fixed-schema bundle with a per-file SHA-256 manifest.
+Neither view
 invents connections, versions, progress, or success states. All destructive operations use a scoped confirmation dialog,
 unknown metrics render as unavailable rather than zero, and the UI includes visible focus states,
 reduced-motion handling, and responsive table containment.
@@ -262,6 +263,24 @@ The Device Link endpoint is `GET /api/v1/device/link` with WebSocket subprotocol
 strict, size-limited `device.heartbeat` control messages. Missing heartbeats close the
 session after 30 seconds; a revoked trust is rechecked and disconnected without waiting
 for a Companion restart.
+
+## Redacted diagnostics
+
+The Companion writes only fixed `Diagnostic Event` fields through one nonblocking worker under
+`<data-directory>/diagnostics`. Owner-only immutable JSONL segments rotate at 256 KiB and retain at
+most seven days or 50 MiB by default. Queue/storage pressure is bounded and represented only by a
+dropped-event count. Arbitrary log strings, errors, paths, URLs, request/response content,
+credentials, Provider raw values, prompts, tool arguments, and Serial payloads cannot enter the
+diagnostic schema. Provider events contain only status, latency, adapter schema, a fixed redacted
+error code, and a hashed Provider identifier.
+
+Authenticated management clients read `GET /api/v1/diagnostics` and export through the
+Origin/CSRF/rate-limited `POST /api/v1/diagnostics/export`. Export builds the ZIP in bounded memory;
+it creates no temporary archive and never uploads it. `manifest.json` records build identity plus
+the byte length and SHA-256 of `companion/events.jsonl`, `deck/ring.json`, and
+`configuration/schema-keys.json`. The Device Hub collects only exact-response, shared-contract Deck
+memory rings and retains at most 32 in memory. See
+[`ADR 0024`](../docs/adr/0024-bound-diagnostics-to-fixed-redacted-events.md).
 
 ## Volatile Serial Hub
 

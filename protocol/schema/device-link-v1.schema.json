@@ -12,7 +12,9 @@
     {"$ref": "#/$defs/serial_history_request"},
     {"$ref": "#/$defs/ota_offer"},
     {"$ref": "#/$defs/ota_chunk"},
-    {"$ref": "#/$defs/ota_result"}
+    {"$ref": "#/$defs/ota_result"},
+    {"$ref": "#/$defs/diagnostics_request"},
+    {"$ref": "#/$defs/diagnostics_snapshot"}
   ],
   "$defs": {
     "device_hello": {
@@ -29,7 +31,7 @@
           "minItems": 1,
           "maxItems": 8,
           "uniqueItems": true,
-          "items": {"enum": ["display", "serial", "ota"]}
+          "items": {"enum": ["display", "serial", "ota", "diagnostics"]}
         },
         "serial_state": {"enum": ["disarmed", "usb_tx", "web_tx"]},
         "serial_session_id": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615}
@@ -176,6 +178,43 @@
         "code": {"enum": ["ok", "invalid_manifest", "wrong_board", "incompatible_protocol", "downgrade_rejected", "image_too_large", "signature_rejected", "busy", "stale_offset", "flash_failure", "hash_mismatch", "image_invalid", "timed_out"]},
         "received_bytes": {"type": "integer", "minimum": 0, "maximum": 1740800},
         "image_length": {"type": "integer", "minimum": 0, "maximum": 1740800}
+      },
+      "additionalProperties": false
+    },
+    "diagnostics_request": {
+      "type": "object",
+      "required": ["type", "protocol_version", "request_id"],
+      "properties": {
+        "type": {"const": "diagnostics.request"},
+        "protocol_version": {"const": 1},
+        "request_id": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615}
+      },
+      "additionalProperties": false
+    },
+    "diagnostics_snapshot": {
+      "type": "object",
+      "required": ["type", "protocol_version", "request_id", "dropped", "events"],
+      "properties": {
+        "type": {"const": "diagnostics.snapshot"},
+        "protocol_version": {"const": 1},
+        "request_id": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
+        "dropped": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+        "events": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "required": ["monotonic_ms", "level", "component", "code", "value"],
+            "properties": {
+              "monotonic_ms": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
+              "level": {"enum": ["info", "warning", "error"]},
+              "component": {"enum": ["system", "display", "wifi", "setup", "sensor", "device_link", "serial", "ota"]},
+              "code": {"enum": ["boot", "ready", "unavailable", "connected", "disconnected", "storage_error", "protocol_error", "timeout", "owner_changed", "update_started", "update_failed", "rollback", "queue_overflow"]},
+              "value": {"type": "integer", "minimum": 0, "maximum": 4294967295}
+            },
+            "additionalProperties": false
+          }
+        }
       },
       "additionalProperties": false
     }

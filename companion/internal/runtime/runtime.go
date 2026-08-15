@@ -17,6 +17,7 @@ import (
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/configmodel"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/cursorprovider"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/devicelink"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/diagnostics"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/history"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/ota"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
@@ -76,6 +77,7 @@ type Runtime struct {
 	history                 *history.Store
 	backup                  BackupService
 	configuration           ConfigurationOwner
+	diagnostics             *diagnostics.Service
 	deviceProfileUpdates    chan configmodel.DeviceProfile
 	advertisedAddress       func(context.Context, string, string) string
 
@@ -111,11 +113,34 @@ func New(config Config) (*Runtime, error) {
 	var onDeviceProfile func(configmodel.DeviceProfile)
 	if normalized.Configuration != nil {
 		deviceProfileUpdates = make(chan configmodel.DeviceProfile, 32)
+	}
+	if normalized.Configuration != nil || normalized.Diagnostics != nil {
 		onDeviceProfile = func(profile configmodel.DeviceProfile) {
-			select {
-			case deviceProfileUpdates <- profile:
-			default:
+			if normalized.Configuration != nil {
+				select {
+				case deviceProfileUpdates <- profile:
+				default:
+				}
 			}
+			if normalized.Diagnostics != nil {
+				normalized.Diagnostics.Record(diagnostics.Event{
+					Level: diagnostics.LevelInfo, Module: diagnostics.ModuleDeviceLink,
+					Code:           diagnostics.CodeDeviceConnected,
+					IdentifierHash: diagnostics.HashIdentifier(profile.DeviceID),
+				})
+			}
+		}
+	}
+	if normalized.StructuredProviders != nil && normalized.Diagnostics != nil {
+		if err = normalized.StructuredProviders.SetDiagnosticSink(func(value structuredprovider.Diagnostic) {
+			normalized.Diagnostics.RecordProvider(diagnostics.ProviderDiagnostic{
+				ProviderID: value.ProviderID, HTTPStatus: value.HTTPStatus,
+				LatencyMS:     value.LatencyMillis,
+				SchemaVersion: fmt.Sprintf("adapter-%d", value.AdapterVersion),
+				ErrorCode:     value.ErrorCode,
+			})
+		}); err != nil {
+			return nil, err
 		}
 	}
 	serialService, err := serialhub.NewService(serialhub.ServiceConfig{})
@@ -140,6 +165,13 @@ func New(config Config) (*Runtime, error) {
 		},
 		OnDisconnect: func(deviceID string) {
 			serialService.RequireOwnerRevocation(deviceID)
+			if normalized.Diagnostics != nil {
+				normalized.Diagnostics.Record(diagnostics.Event{
+					Level: diagnostics.LevelWarning, Module: diagnostics.ModuleDeviceLink,
+					Code:           diagnostics.CodeDeviceDisconnected,
+					IdentifierHash: diagnostics.HashIdentifier(deviceID),
+				})
+			}
 		},
 		OnSerialOwnerResult: func(deviceID string, result devicelink.SerialOwnerResult) error {
 			owner := serialhub.OwnerUnavailable
@@ -197,6 +229,7 @@ func New(config Config) (*Runtime, error) {
 		history:              normalized.History,
 		backup:               normalized.Backup,
 		configuration:        normalized.Configuration,
+		diagnostics:          normalized.Diagnostics,
 		advertisedAddress:    liveDeviceHubAdvertisedAddress,
 		deviceProfileUpdates: deviceProfileUpdates,
 		structuredProviders:  make(map[string]aisnapshot.Provider),
@@ -296,11 +329,19 @@ func (application *Runtime) Run(ctx context.Context) error {
 
 	managementListener, err := net.Listen("tcp", application.config.Management.Address)
 	if err != nil {
+		application.recordDiagnostic(diagnostics.Event{
+			Level: diagnostics.LevelError, Module: diagnostics.ModuleRuntime,
+			Code: diagnostics.CodeOperationFailed, ErrorCode: diagnostics.ErrorUnavailable,
+		})
 		application.setState(StateStopped, application.config.Management.Address, application.config.DeviceHub.Address)
 		return fmt.Errorf("listen on management address: %w", err)
 	}
 	deviceHubListener, err := net.Listen("tcp", application.config.DeviceHub.Address)
 	if err != nil {
+		application.recordDiagnostic(diagnostics.Event{
+			Level: diagnostics.LevelError, Module: diagnostics.ModuleRuntime,
+			Code: diagnostics.CodeOperationFailed, ErrorCode: diagnostics.ErrorUnavailable,
+		})
 		_ = managementListener.Close()
 		application.setState(StateStopped, managementListener.Addr().String(), application.config.DeviceHub.Address)
 		return fmt.Errorf("listen on Device Hub address: %w", err)
@@ -333,6 +374,10 @@ func (application *Runtime) Run(ctx context.Context) error {
 		MaxHeaderBytes:    limits.MaxHeaderBytes,
 	}
 	application.setState(StateReady, managementListener.Addr().String(), deviceHubListener.Addr().String())
+	application.recordDiagnostic(diagnostics.Event{
+		Level: diagnostics.LevelInfo, Module: diagnostics.ModuleRuntime,
+		Code: diagnostics.CodeRuntimeReady,
+	})
 	managementListener = newConnectionLimitedListener(
 		managementListener,
 		managementLimits.MaxConcurrent,
@@ -471,6 +516,10 @@ func (application *Runtime) Run(ctx context.Context) error {
 		}
 	}
 	application.setState(StateStopped, managementListener.Addr().String(), deviceHubListener.Addr().String())
+	application.recordDiagnostic(diagnostics.Event{
+		Level: diagnostics.LevelInfo, Module: diagnostics.ModuleRuntime,
+		Code: diagnostics.CodeRuntimeStopped,
+	})
 
 	if trigger.name != "context" && !errors.Is(trigger.err, http.ErrServerClosed) {
 		return fmt.Errorf("serve %s: %w", trigger.name, trigger.err)
@@ -479,6 +528,12 @@ func (application *Runtime) Run(ctx context.Context) error {
 		return fmt.Errorf("shut down Companion listeners: %w", shutdownErrors)
 	}
 	return nil
+}
+
+func (application *Runtime) recordDiagnostic(event diagnostics.Event) {
+	if application != nil && application.diagnostics != nil {
+		application.diagnostics.Record(event)
+	}
 }
 
 func (application *Runtime) publishCodexUpdate(

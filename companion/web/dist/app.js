@@ -2,7 +2,7 @@
 
 const state = {
   csrf: "", bootstrap: null, console: null, providers: [], templates: [], providerStates: [], history: [],
-  editing: "", backup: null, ota: null, otaPreviewEpoch: 0, page: "overview", providerFilter: "all", deckIndex: 0,
+  editing: "", backup: null, ota: null, diagnostics: null, otaPreviewEpoch: 0, page: "overview", providerFilter: "all", deckIndex: 0,
   serialPresets: [], serialPresetEditing: "",
   serialPresetOperationEpoch: 0, serialPresetOperationController: new AbortController(),
   serial: {
@@ -16,6 +16,7 @@ const state = {
     providers: { lastSuccess: "", error: "" },
     history: { lastSuccess: "", error: "" },
     serialPresets: { lastSuccess: "", error: "" },
+    diagnostics: { lastSuccess: "", error: "" },
   },
 };
 
@@ -55,6 +56,8 @@ const errorMessages = new Map([
   ["Provider management unavailable", "Provider 管理当前不可用。"], ["malformed Provider request", "Provider 配置格式无效。"],
   ["invalid Provider request", "Provider 配置未通过校验。"], ["Provider configuration changed", "Provider 配置已在其他位置更新，请刷新后重试。"],
   ["Provider operation unavailable", "Provider 操作暂时不可用。"],
+  ["diagnostics unavailable", "脱敏诊断当前不可用。"],
+  ["diagnostic bundle unavailable", "诊断包暂时无法生成。"],
 ]);
 
 const $ = (selector) => document.querySelector(selector);
@@ -275,6 +278,7 @@ function navigate(page, updateHash = true) {
   if (config.domain === "serial") startSerial();
   else stopSerial();
   if (page === "serial-presets") loadSerialPresets();
+  if (page === "diagnostics") loadDiagnostics();
   if (updateHash && location.hash !== `#${page}`) history.pushState(null, "", `#${page}`);
   $("#main-content").focus({ preventScroll: true });
   window.scrollTo({ top: 0, behavior: "auto" });
@@ -288,6 +292,7 @@ function scrubSensitiveState() {
   state.history = [];
   state.editing = "";
   state.backup = null;
+  state.diagnostics = null;
   resetOTAPreview();
   $("#ota-file").value = "";
   $("#ota-device-id").value = "";
@@ -313,7 +318,7 @@ function scrubSensitiveState() {
   if (dialog.open) dialog.close();
   $("#dialog-body").replaceChildren();
   message();
-  ["console", "providers", "history"].forEach((resource) => resourceFeedback(resource));
+  ["console", "providers", "history", "diagnostics"].forEach((resource) => resourceFeedback(resource));
   $("#toast-region").replaceChildren();
   $("#toast-alert-region").replaceChildren();
 }
@@ -513,6 +518,80 @@ function renderRuntimeSurfaces(runtime, providers) {
   setText("#tray-runtime", stale ? "Companion 状态已过期" : `Companion ${label}`);
   setText("#tray-decks", stale ? "Deck —" : `Deck ${runtime.connected_decks ?? 0}`);
   setText("#tray-clock", formatTime(new Date().toISOString(), false));
+}
+
+function formatDiagnosticBytes(value) {
+  if (!Number.isSafeInteger(value) || value < 0) return "—";
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+function renderDiagnosticsStorage() {
+  const diagnostic = state.diagnostics;
+  const stale = Boolean(state.sync.diagnostics.error);
+  const available = Boolean(diagnostic?.available) && !stale;
+  setPill($("#diagnostics-storage-state"), stale ? "已过期" : available ? "可导出" : "不可用",
+    available ? "success" : "warning");
+  setText("#diagnostics-retention", diagnostic ?
+    `${diagnostic.retention_days} 天 / ${formatDiagnosticBytes(diagnostic.maximum_bytes)}` : "—");
+  setText("#diagnostics-segments", diagnostic ?
+    `${diagnostic.segments} 段 · ${formatDiagnosticBytes(diagnostic.stored_bytes)}` : "—");
+  setText("#diagnostics-rings", diagnostic ? `${diagnostic.deck_rings} 个 Deck` : "—");
+  setText("#diagnostics-files", diagnostic?.bundle_files?.length ?
+    `${diagnostic.bundle_files.length} 个固定路径` : "—");
+  $("#export-diagnostics").disabled = !available;
+}
+
+async function loadDiagnostics(quiet = false) {
+  const operation = authenticatedOperation();
+  if (!state.sync.diagnostics.lastSuccess) resourceFeedback("diagnostics", "正在读取脱敏诊断状态……");
+  try {
+    const response = await request("/api/v1/diagnostics", { signal: operation.signal });
+    const diagnostic = await response.json();
+    if (!operationIsCurrent(operation)) return;
+    state.diagnostics = diagnostic;
+    state.sync.diagnostics.lastSuccess = new Date().toISOString();
+    state.sync.diagnostics.error = "";
+    resourceFeedback("diagnostics");
+    renderDiagnosticsStorage();
+    if (!quiet) message("诊断状态已刷新。", true);
+  } catch (error) {
+    if (!operationIsCurrent(operation)) return;
+    state.sync.diagnostics.error = error.message;
+    resourceFeedback("diagnostics", state.sync.diagnostics.lastSuccess ?
+      `无法刷新诊断状态；保留 ${formatTime(state.sync.diagnostics.lastSuccess, false)} 的最后有效统计。` :
+      "脱敏诊断当前不可用。", true);
+    renderDiagnosticsStorage();
+    if (!quiet) message(error.message);
+  }
+}
+
+async function exportDiagnostics() {
+  if ($("#export-diagnostics").disabled) return;
+  const operation = authenticatedOperation();
+  $("#export-diagnostics").disabled = true;
+  resourceFeedback("diagnostics", "正在本机生成脱敏诊断包……");
+  try {
+    const response = await request("/api/v1/diagnostics/export", {
+      method: "POST", signal: operation.signal,
+    });
+    const archive = await response.blob();
+    if (!operationIsCurrent(operation)) return;
+    const url = URL.createObjectURL(archive);
+    const link = element("a");
+    link.href = url;
+    link.download = "s3-rlcd-deck-diagnostics.zip";
+    link.click();
+    URL.revokeObjectURL(url);
+    resourceFeedback("diagnostics", "诊断包已交给浏览器下载；没有上传到外部服务。", false);
+    toast("诊断包已生成", "ZIP 包含 manifest、逐文件 SHA-256、脱敏事件和 Deck 内存环。", false);
+    await loadDiagnostics(true);
+  } catch (error) {
+    if (operationIsCurrent(operation)) resourceFeedback("diagnostics", error.message, true);
+  } finally {
+    if (operationIsCurrent(operation)) renderDiagnosticsStorage();
+  }
 }
 
 function updateCapabilityControls() {
@@ -1848,6 +1927,8 @@ $("#ota-preview").addEventListener("click", previewOTA);
 $("#ota-confirm").addEventListener("change", updateOTAApplyAvailability);
 $("#ota-device-id").addEventListener("input", updateOTAApplyAvailability);
 $("#ota-apply").addEventListener("click", applyOTA);
+$("#refresh-diagnostics").addEventListener("click", () => loadDiagnostics());
+$("#export-diagnostics").addEventListener("click", exportDiagnostics);
 $("#mobile-menu").addEventListener("click", openMobileNavigation);
 $("#mobile-backdrop").addEventListener("click", closeMobileNavigation);
 $$('[data-page]').forEach((button) => button.addEventListener("click", () => navigate(button.dataset.page)));

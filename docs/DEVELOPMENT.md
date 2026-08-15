@@ -989,6 +989,20 @@ Companion 保存脱敏轮转日志，默认保留 7 天或最多 50 MiB：
 
 ESP32 发布固件只维护小型内存诊断环，通过已登录的 System 页面读取。开发/HIL 构建允许启用不含凭据或用户数据的结构化 USB 启动事件。
 
+生产实现把诊断定义为封闭数据模型，而不是自由文本：Companion 的 `internal/diagnostics`
+只接受固定 level/module/code、有限数字、schema 版本、脱敏 error code 和短 SHA-256 标识；
+没有能表达异常正文、URL、Header、路径、Provider raw、Prompt、工具参数或 Serial 正文的字段。
+单一后台 worker 非阻塞接收事件，默认以 256 KiB owner-only immutable JSONL 分段轮转；队列或
+存储压力只增加 bounded dropped 计数。System 的 `GET /api/v1/diagnostics` 读取状态，受登录、
+Origin、CSRF 和敏感操作限流保护的 `POST /api/v1/diagnostics/export` 在内存中生成固定路径 ZIP，
+包含最近 24 小时事件、最多 32 个 Deck 环、配置 schema key，以及逐文件 size/SHA-256 manifest；
+不创建导出临时文件，也不自动上传。
+
+Deck 的 `health` 组件维护 64 项 enum+numeric 内存环。只有已激活且声明 `diagnostics` capability
+的 Device Link 才响应精确 request ID；Companion 严格校验共享 `diagnostics.request` /
+`diagnostics.snapshot` 契约后缓存。参见
+[`ADR 0024`](adr/0024-bound-diagnostics-to-fixed-redacted-events.md)。
+
 ## 15. 开发环境
 
 ### 15.1 当前基线

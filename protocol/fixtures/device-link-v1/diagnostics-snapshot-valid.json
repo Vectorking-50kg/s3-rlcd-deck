@@ -1,0 +1,1 @@
+{"type":"diagnostics.snapshot","protocol_version":1,"request_id":17,"dropped":2,"events":[{"monotonic_ms":10,"level":"info","component":"system","code":"boot","value":0},{"monotonic_ms":42,"level":"warning","component":"wifi","code":"unavailable","value":7}]}
