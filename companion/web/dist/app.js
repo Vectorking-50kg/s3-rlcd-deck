@@ -2,7 +2,7 @@
 
 const state = {
   csrf: "", bootstrap: null, console: null, providers: [], templates: [], providerStates: [], history: [],
-  editing: "", backup: null, page: "overview", providerFilter: "all", deckIndex: 0,
+  editing: "", backup: null, ota: null, otaPreviewEpoch: 0, page: "overview", providerFilter: "all", deckIndex: 0,
   serialPresets: [], serialPresetEditing: "",
   serialPresetOperationEpoch: 0, serialPresetOperationController: new AbortController(),
   serial: {
@@ -116,7 +116,7 @@ function translatedError(detail, status) {
 async function request(path, options = {}) {
   const method = options.method || "GET";
   const headers = new Headers(options.headers || {});
-  if (options.body !== undefined) headers.set("Content-Type", "application/json");
+  if (options.body !== undefined && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   if (method !== "GET") {
     headers.set("Origin", location.origin);
     if (state.csrf) headers.set("X-CSRF-Token", state.csrf);
@@ -288,6 +288,9 @@ function scrubSensitiveState() {
   state.history = [];
   state.editing = "";
   state.backup = null;
+  resetOTAPreview();
+  $("#ota-file").value = "";
+  $("#ota-device-id").value = "";
   stopSerial();
   state.serialPresets = [];
   rotateSerialPresetOperations();
@@ -520,6 +523,8 @@ function updateCapabilityControls() {
   $("#save-history").disabled = !capabilities.history;
   $("#export-backup").disabled = !capabilities.backup;
   $("#preview-backup").disabled = !capabilities.backup;
+  $("#ota-preview").disabled = !capabilities.updates;
+  updateOTAApplyAvailability();
   updateProviderEditorControls();
 }
 
@@ -1090,6 +1095,125 @@ async function applyBackup() {
     toast("导入完成", result.restart_required ? "需要重启 Companion 才能应用全部设置。" : "配置已完成事务写入。");
     await Promise.all([loadProviders(), loadConsole(true)]);
   } catch (error) { if (operationIsCurrent(operation)) toast("无法导入备份", error.message, true); }
+}
+
+function resetOTAPreview(text = "请选择签名固件包并先执行校验。") {
+  state.otaPreviewEpoch += 1;
+  state.ota = null;
+  const file = $("#ota-file");
+  if (!file) return;
+  $("#ota-confirm").checked = false;
+  setText("#ota-version", "—");
+  setText("#ota-board", "—");
+  setText("#ota-size", "—");
+  setText("#ota-key", "—");
+  setText("#ota-digest", "—");
+  setText("#ota-state", "等待预览");
+  setText("#ota-progress", "—");
+  setText("#ota-result", "—");
+  resourceFeedback("ota", text);
+  updateOTAApplyAvailability();
+}
+
+function updateOTAApplyAvailability() {
+  const apply = $("#ota-apply");
+  if (!apply) return;
+  apply.disabled = !state.console?.capabilities?.updates || !state.ota?.receipt ||
+    !$("#ota-confirm").checked || !/^[a-z0-9][a-z0-9_-]{7,63}$/.test($("#ota-device-id").value);
+}
+
+async function previewOTA() {
+  resetOTAPreview("正在验证签名、镜像摘要与目标板卡……");
+  const previewEpoch = state.otaPreviewEpoch;
+  const file = $("#ota-file").files[0];
+  if (!file) {
+    resourceFeedback("ota", "请选择 .s3ota 签名固件包。", true);
+    return;
+  }
+  const operation = authenticatedOperation();
+  let document;
+  try {
+    document = new Uint8Array(await file.arrayBuffer());
+    if (!operationIsCurrent(operation) || previewEpoch !== state.otaPreviewEpoch) return;
+    const response = await request("/api/v1/ota/preview", {
+      method: "POST", body: document,
+      headers: { "Content-Type": "application/vnd.s3deck.ota+json" }, signal: operation.signal,
+    });
+    const preview = await response.json();
+    if (!operationIsCurrent(operation) || previewEpoch !== state.otaPreviewEpoch) return;
+    state.ota = preview;
+    setText("#ota-version", preview.version);
+    setText("#ota-board", preview.board);
+    setText("#ota-size", `${formatNumber(preview.image_length)} B`);
+    setText("#ota-key", `v${preview.signing_key_id}`);
+    setText("#ota-digest", preview.image_sha256);
+    setText("#ota-state", "签名校验通过");
+    resourceFeedback("ota", "更新包有效；尚未向 Deck 发送任何固件字节。", false);
+    updateOTAApplyAvailability();
+  } catch (error) {
+    if (!operationIsCurrent(operation) || previewEpoch !== state.otaPreviewEpoch) return;
+    resetOTAPreview("更新包校验失败；没有向 Deck 写入任何内容。");
+    resourceFeedback("ota", error.message, true);
+  } finally {
+    document?.fill(0);
+  }
+}
+
+function renderOTAStatus(status) {
+  const labels = { offering: "等待 Deck 接受", receiving: "正在写入非活动槽", ready_to_reboot: "已写入并准备重启", failed: "更新失败" };
+  setText("#ota-state", labels[status.state] || "状态未知");
+  const percent = status.image_length > 0 ? Math.floor(status.received_bytes * 100 / status.image_length) : 0;
+  setText("#ota-progress", status.image_length > 0 ?
+    `${formatNumber(status.received_bytes)} / ${formatNumber(status.image_length)} B（${percent}%）` : "—");
+  setText("#ota-result", status.code);
+}
+
+async function pollOTAStatus(deviceID, operation) {
+  const deadline = Date.now() + 6 * 60 * 1000;
+  while (operationIsCurrent(operation) && Date.now() < deadline) {
+    const response = await request(`/api/v1/ota/status?device_id=${encodeURIComponent(deviceID)}`, { signal: operation.signal });
+    const status = await response.json();
+    if (!operationIsCurrent(operation)) return;
+    renderOTAStatus(status);
+    if (status.state === "failed") {
+      resourceFeedback("ota", "Deck 拒绝或中止了更新；当前活动固件保持不变。", true);
+      return;
+    }
+    if (status.state === "ready_to_reboot") {
+      resourceFeedback("ota", "镜像已写入。Deck 将重启并自行执行 60 秒健康确认；失败时自动回滚。", false);
+      return;
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 500));
+  }
+  if (operationIsCurrent(operation)) resourceFeedback("ota", "更新状态等待超时；请保留 BOOT/UART 恢复路径并检查 Deck。", true);
+}
+
+async function applyOTA() {
+  updateOTAApplyAvailability();
+  if ($("#ota-apply").disabled || !state.ota) return;
+  const operation = authenticatedOperation();
+  const deviceID = $("#ota-device-id").value;
+  const preview = state.ota;
+  const confirmed = await showDialog({ eyebrow: "固件写入 · 设备将重启", title: `安装 ${preview.version}？`,
+    paragraphs: [
+      `目标：${deviceID} · ${preview.board} · ${formatNumber(preview.image_length)} B`,
+      "只写入非活动 OTA 槽。签名、摘要、版本或首启健康检查失败都会拒绝或回滚；BOOT/UART 保持可用。",
+    ], confirmText: "确认安装并重启", danger: true });
+  if (!confirmed || !operationIsCurrent(operation) || state.ota !== preview) return;
+  try {
+    const response = await request("/api/v1/ota/apply", { method: "POST", signal: operation.signal,
+      body: JSON.stringify({ receipt: preview.receipt, device_id: deviceID, confirm: true }) });
+    const status = await response.json();
+    if (!operationIsCurrent(operation)) return;
+    state.ota = null;
+    $("#ota-confirm").checked = false;
+    updateOTAApplyAvailability();
+    renderOTAStatus(status);
+    resourceFeedback("ota", "更新事务已开始；不要断开 Deck 电源。", false);
+    await pollOTAStatus(deviceID, operation);
+  } catch (error) {
+    if (operationIsCurrent(operation)) resourceFeedback("ota", error.message, true);
+  }
 }
 
 const SERIAL_BROWSER_LOG_BYTES = 1 << 20;
@@ -1719,6 +1843,11 @@ $("#apply-backup").addEventListener("click", applyBackup);
 $("#import-file").addEventListener("change", () => resetBackupPreview());
 $("#import-passphrase").addEventListener("input", () => resetBackupPreview());
 $("#backup-mode").addEventListener("change", () => resetBackupPreview("模式已更改，请重新预览。"));
+$("#ota-file").addEventListener("change", () => resetOTAPreview("文件已更改，请重新校验。"));
+$("#ota-preview").addEventListener("click", previewOTA);
+$("#ota-confirm").addEventListener("change", updateOTAApplyAvailability);
+$("#ota-device-id").addEventListener("input", updateOTAApplyAvailability);
+$("#ota-apply").addEventListener("click", applyOTA);
 $("#mobile-menu").addEventListener("click", openMobileNavigation);
 $("#mobile-backdrop").addEventListener("click", closeMobileNavigation);
 $$('[data-page]').forEach((button) => button.addEventListener("click", () => navigate(button.dataset.page)));

@@ -17,6 +17,8 @@
     {"file": "heartbeat-depth-over-capacity.json", "kind": "heartbeat", "accepted": false, "previous_monotonic_ms": 0, "has_previous": false},
     {"file": "heartbeat-noncanonical-utc.json", "kind": "heartbeat", "accepted": false, "previous_monotonic_ms": 0, "has_previous": false},
     {"file": "heartbeat-duplicate-field.json", "kind": "heartbeat", "accepted": false, "previous_monotonic_ms": 0, "has_previous": false},
-    {"file": "heartbeat-monotonic-regression.json", "kind": "heartbeat", "accepted": false, "previous_monotonic_ms": 43, "has_previous": true}
+    {"file": "heartbeat-monotonic-regression.json", "kind": "heartbeat", "accepted": false, "previous_monotonic_ms": 43, "has_previous": true},
+    {"file": "ota-result-valid.json", "kind": "ota_result", "accepted": true},
+    {"file": "ota-result-invalid-state-code.json", "kind": "ota_result", "accepted": false}
   ]
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/cursorprovider"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/devicelink"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/history"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/ota"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/protocol"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/serialhub"
@@ -63,6 +64,7 @@ type Runtime struct {
 	consoleAccess           *consoleAccessGrants
 	pairing                 *pairing.Service
 	deviceLink              *devicelink.Hub
+	ota                     *ota.Service
 	serialHub               *serialhub.Service
 	serialObservers         serialObserverRegistry
 	codexCollector          CodexCollector
@@ -120,6 +122,7 @@ func New(config Config) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
+	var otaService *ota.Service
 	deviceLink, err := devicelink.New(devicelink.Config{
 		Authenticator:     normalized.Pairing,
 		HeartbeatInterval: normalized.DeviceHub.HeartbeatInterval,
@@ -129,6 +132,12 @@ func New(config Config) (*Runtime, error) {
 			return serialService.Reconcile(deviceID, sessionID, serialhub.State(state))
 		},
 		OnSerialFrame: serialService.Ingest,
+		OnOTAResult: func(deviceID string, result devicelink.OTAResult) error {
+			if otaService == nil {
+				return ota.ErrInvalidResult
+			}
+			return otaService.HandleResult(deviceID, result)
+		},
 		OnDisconnect: func(deviceID string) {
 			serialService.RequireOwnerRevocation(deviceID)
 		},
@@ -158,6 +167,12 @@ func New(config Config) (*Runtime, error) {
 		serialService.Close()
 		return nil, err
 	}
+	otaService, err = ota.New(ota.Config{Sender: deviceLink})
+	if err != nil {
+		deviceLink.Close()
+		serialService.Close()
+		return nil, err
+	}
 	return &Runtime{
 		config:               normalized,
 		shutdownTimeout:      shutdownTimeout,
@@ -165,6 +180,7 @@ func New(config Config) (*Runtime, error) {
 		consoleAccess:        &consoleAccessGrants{},
 		pairing:              normalized.Pairing,
 		deviceLink:           deviceLink,
+		ota:                  otaService,
 		serialHub:            serialService,
 		codexCollector:       normalized.CodexCollector,
 		codexObserver:        normalized.CodexObserver,
@@ -437,11 +453,13 @@ func (application *Runtime) Run(ctx context.Context) error {
 	defer cancel()
 	observerShutdownError := application.closeSerialObservers(shutdownContext)
 	serialRevokeError := application.revokeSerialOwnerForShutdown(shutdownContext)
+	otaShutdownError := application.ota.CloseContext(shutdownContext)
 	application.deviceLink.Close()
 	application.serialHub.Close()
 	shutdownErrors := errors.Join(
 		observerShutdownError,
 		serialRevokeError,
+		otaShutdownError,
 		shutdownServers(shutdownContext, managementServer, deviceHubServer),
 	)
 	for _, done := range collectorDone {

@@ -1135,6 +1135,18 @@ s3-rlcd-deck/
 - 诊断包、安装、自启动和升级迁移。
 - macOS/Windows 72 小时验收。
 
+### 17.6 签名 A/B OTA
+
+- Firmware Bundle 采用 ECDSA P-256 / SHA-256，版本化公钥目录是跨端唯一权威；私钥不进入仓库、Companion、日志或产物。
+- Manifest 固定绑定 key ID、最低 Device Link 协议、镜像长度、`esp32-s3-rlcd-4.2`、版本和镜像 SHA-256。
+- Companion Preview 只做完整校验并生成内存单次 receipt；Apply 必须经 Web 明确确认，且全局只允许一个 OTA Transaction。
+- Device Link 每次只发送一个 3072-byte chunk，并等待同 transaction ID 的精确 `ota.result`；10 分钟总时限、30 秒 Deck 空闲时限、错误或断连均立即终止。
+- Deck 只流式写下一个 OTA app slot；只有签名、顺序、摘要、ESP image 和内嵌版本全部一致才选择该 slot。
+- V1 downgrade policy 只接受 semantic core 严格大于当前固件的版本；同版本、预发布变体和降级均拒绝。
+- 首启保持 pending verify；UI/display、peripheral service、Wi-Fi 与 Active Companion Link 在 60 秒内健康才标有效，否则自动回滚。
+- 不写 bootloader、partition table、NVS 或 eFuse，不启用不可逆 Secure Boot；BOOT 与 release USB Serial/JTAG 始终独立可恢复。
+- Host 覆盖 wrong board/signature/length/hash/offset、interruption/timeout、Flash failure、Boot Health 决策、公钥目录一致性和签名工具；实板仍需逐断点故障注入。
+
 ## 18. 测试与验收
 
 ### 18.1 自动化测试

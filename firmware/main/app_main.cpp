@@ -11,6 +11,7 @@
 #include "deck_device_settings.h"
 #include "deck_display.h"
 #include "deck_m0_view_model.h"
+#include "deck_ota_service.h"
 #include "deck_rlcd_panel.h"
 #include "deck_setup_service.h"
 #include "deck_serial_service.h"
@@ -1172,6 +1173,38 @@ void start_setup_after_ui_ready()
 #endif
 }
 
+void confirm_ota_boot_when_healthy(deck_ota_boot_guard_t *guard)
+{
+    if (guard == nullptr) {
+        return;
+    }
+    constexpr uint64_t kHealthWaitMs = 50'000;
+    const uint64_t started_ms = static_cast<uint64_t>(esp_timer_get_time() / 1'000);
+    while (static_cast<uint64_t>(esp_timer_get_time() / 1'000) - started_ms <
+           kHealthWaitMs) {
+        deck_companion_link_snapshot_t link{};
+        const bool companion_online =
+            application_companion_link != nullptr &&
+            deck_companion_link_snapshot(application_companion_link, &link) &&
+            link.state == DECK_COMPANION_LINK_ONLINE;
+        if (application_peripherals != nullptr && application_setup != nullptr &&
+            companion_online) {
+            (void)deck_ota_boot_guard_confirm(
+                guard,
+                true,
+                true,
+                true,
+                true
+            );
+            return;
+        }
+        vTaskDelay(pdMS_TO_TICKS(250));
+    }
+    // The guard owns rollback at its 60 second deadline. Leaving it active is
+    // deliberate: a boot that cannot re-establish Wi-Fi + Device Link is not
+    // marked valid merely because its local tasks were created.
+}
+
 void ui_event(void *, const deck_application_ui_event_t *event)
 {
     if (event == nullptr) {
@@ -1219,6 +1252,7 @@ void ui_event(void *, const deck_application_ui_event_t *event)
 extern "C" void app_main(void)
 {
     const esp_app_desc_t *app = esp_app_get_description();
+    deck_ota_boot_guard_t *ota_boot_guard = deck_ota_boot_guard_start(60'000);
     if (!deck_serial_service_prepare_disarmed()) {
         return;
     }
@@ -1354,4 +1388,5 @@ extern "C" void app_main(void)
         write_stdout(nullptr, error, sizeof(error) - 1);
     }
 #endif
+    confirm_ota_boot_when_healthy(ota_boot_guard);
 }

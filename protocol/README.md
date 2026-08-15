@@ -35,3 +35,17 @@ Raw Serial Session bytes use versioned WebSocket binary frames and are specified
 `catalog/serial-frame-v1.json` is the authoritative fixed-header catalog: big-endian fields bind every
 payload to a channel, nonzero Serial Session ID, nonzero sequence, device monotonic timestamp, and
 exact payload length. V1 payloads are bounded to the Deck Router's 256-byte immutable block size.
+
+## Signed OTA v1
+
+`schema/device-link-v1.schema.json` defines `ota.offer`, `ota.chunk`, and `ota.result`. The
+authoritative public-key catalog is `catalog/ota-signing-keys-v1.json`; firmware and Go contract
+tests must prove their compiled projections match it. The canonical manifest is fixed-width and
+binds key ID, minimum protocol, image length, board, version, and SHA-256. Signature bytes are raw
+P-256 `r || s`; JSON carries them as canonical padded base64.
+
+Chunks contain at most 3072 decoded bytes and use exact increasing offsets. Companion waits for the
+matching Deck result before sending the next chunk, so transport and firmware queues remain bounded.
+Both ends enforce a ten-minute total transaction deadline and the Deck additionally enforces a
+30-second inactivity deadline. An error result terminates the transaction; only `ready_to_reboot` with the full image length allows
+the Deck to reboot into ESP-IDF pending-verify state.

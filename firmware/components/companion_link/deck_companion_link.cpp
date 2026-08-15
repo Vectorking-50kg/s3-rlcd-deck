@@ -8,6 +8,8 @@
 #include "deck_companion_transport_authority.h"
 #include "deck_companion_pairing_esp.h"
 #include "deck_device_protocol.h"
+#include "deck_ota_protocol.h"
+#include "deck_ota_service.h"
 #include "deck_serial_frame.h"
 #include "deck_serial_request_tracker.h"
 
@@ -20,6 +22,7 @@
 #include <new>
 
 #include "esp_timer.h"
+#include "esp_system.h"
 #include "esp_websocket_client.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -147,6 +150,7 @@ struct deck_companion_link {
     std::unique_ptr<char[]> frame;
     deck_companion_link_frame_t frame_assembler{};
     deck_ai_snapshot_store_t *snapshots = nullptr;
+    deck_ota_service_t *ota = nullptr;
     deck_companion_failover_t failover{};
     deck_companion_profiles_snapshot_t profiles_snapshot{};
     bool has_profiles_snapshot = false;
@@ -605,7 +609,7 @@ bool send_hello(deck_companion_link_t *link)
     const int size = std::snprintf(
         message,
         sizeof(message),
-        "{\"type\":\"device.hello\",\"protocol_version\":1,\"device_id\":\"%s\",\"firmware_version\":\"%s\",\"board\":\"%s\",\"capabilities\":[\"display\",\"serial\"],\"serial_state\":\"%s\",\"serial_session_id\":%llu}",
+        "{\"type\":\"device.hello\",\"protocol_version\":1,\"device_id\":\"%s\",\"firmware_version\":\"%s\",\"board\":\"%s\",\"capabilities\":[\"display\",\"ota\",\"serial\"],\"serial_state\":\"%s\",\"serial_session_id\":%llu}",
         link->device_id,
         link->firmware_version,
         kBoard,
@@ -1290,6 +1294,33 @@ bool accept_data(deck_companion_link_t *link, const TransportEvent &event)
         deck_companion_link_frame_reset(&link->frame_assembler);
         return serial_control_accepted;
     }
+    deck_ota_protocol_command_t ota_command{};
+    if (deck_ota_protocol_parse(
+            link->frame.get(),
+            message_size,
+            &ota_command
+        )) {
+        const bool accepted =
+            link->ota != nullptr &&
+            (ota_command.kind == DECK_OTA_PROTOCOL_OFFER
+                 ? deck_ota_service_offer(
+                       link->ota,
+                       ota_command.transaction_id,
+                       &ota_command.manifest
+                   )
+                 : deck_ota_service_write(
+                       link->ota,
+                       ota_command.transaction_id,
+                       ota_command.offset,
+                       ota_command.data,
+                       ota_command.data_size,
+                       ota_command.final
+                   ));
+        deck_ota_protocol_command_clear(&ota_command);
+        secure_clear(link->frame.get(), message_size + 1);
+        deck_companion_link_frame_reset(&link->frame_assembler);
+        return accepted;
+    }
     uint64_t trusted_utc_ms = 0;
     if (link->has_server_monotonic &&
         now >= link->timing.last_server_heartbeat_ms &&
@@ -1423,6 +1454,28 @@ void link_task(void *argument)
         if (deck_ai_snapshot_store_take_storage_failure(link->snapshots)) {
             increment_error(link);
         }
+        deck_ota_service_result_t ota_result{};
+        if (link->ota != nullptr &&
+            deck_ota_service_poll_result(link->ota, &ota_result)) {
+            char message[320]{};
+            size_t message_size = 0;
+            const bool sent = deck_ota_protocol_format_result(
+                                  &ota_result,
+                                  message,
+                                  sizeof(message),
+                                  &message_size
+                              ) &&
+                              send_text(link, message, message_size);
+            const bool reboot_required = sent && ota_result.reboot_required;
+            secure_clear(message, sizeof(message));
+            secure_clear(&ota_result, sizeof(ota_result));
+            if (!sent) {
+                schedule_retry(link, monotonic_ms(), true);
+            } else if (reboot_required) {
+                vTaskDelay(pdMS_TO_TICKS(100));
+                esp_restart();
+            }
+        }
 
         TransportEvent event{};
         if (xQueueReceive(link->events, &event, kPollTicks) != pdTRUE) {
@@ -1522,7 +1575,8 @@ deck_companion_link_t *deck_companion_link_start(
         snapshot_options_pointer = &snapshot_options;
     }
     link->snapshots = deck_ai_snapshot_store_create(snapshot_options_pointer);
-    if (link->snapshots == nullptr) {
+    link->ota = deck_ota_service_start(firmware_version);
+    if (link->snapshots == nullptr || link->ota == nullptr) {
         xEventGroupSetBits(link->lifecycle, kAbortBit);
         const EventBits_t stopped = xEventGroupWaitBits(
             link->lifecycle,
@@ -1533,6 +1587,12 @@ deck_companion_link_t *deck_companion_link_start(
         );
         if ((stopped & kStoppedBit) == 0) {
             vTaskDelete(link->task);
+        }
+        if (link->snapshots != nullptr) {
+            (void)deck_ai_snapshot_store_destroy(link->snapshots);
+        }
+        if (link->ota != nullptr) {
+            (void)deck_ota_service_stop(link->ota);
         }
         vQueueDelete(link->events);
         vEventGroupDelete(link->lifecycle);
@@ -1699,6 +1759,10 @@ bool deck_companion_link_stop(deck_companion_link_t *link)
     if ((stopped & kStoppedBit) == 0) {
         return false;
     }
+    if (!deck_ota_service_stop(link->ota)) {
+        return false;
+    }
+    link->ota = nullptr;
     if (!deck_ai_snapshot_store_destroy(link->snapshots)) {
         return false;
     }

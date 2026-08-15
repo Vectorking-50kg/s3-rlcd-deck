@@ -61,7 +61,7 @@ func (application *Runtime) consoleView(ctx context.Context) consoleViewResponse
 			Backup:             application.backup != nil,
 			Pairing:            application.pairing != nil,
 			Serial:             application.serialHub != nil,
-			Updates:            false,
+			Updates:            application.ota != nil,
 			Diagnostics:        false,
 		},
 	}

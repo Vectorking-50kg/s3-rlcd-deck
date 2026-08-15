@@ -98,9 +98,9 @@ eight-hour session lifetime and invalidates the previous CSRF token.
 Provider management, history, pairing, backup, and Serial controls call their authenticated APIs.
 The Serial view embeds local xterm.js assets for Text/ANSI/Unicode/scroll/search, offers safe HEX
 and Text+HEX projections, and remains read-only until the Deck confirms this observer's exact Web
-TX Lease. Signed OTA and diagnostic-bundle interfaces are not present on the current mainline, so
-those formal views explicitly say that the module is not connected and never invent connections,
-versions, progress, or success states. All destructive operations use a scoped confirmation dialog,
+TX Lease. Signed OTA is connected to its preview/apply/status API; diagnostic-bundle interfaces are
+not yet present and that formal view explicitly says the module is not connected. Neither view
+invents connections, versions, progress, or success states. All destructive operations use a scoped confirmation dialog,
 unknown metrics render as unavailable rather than zero, and the UI includes visible focus states,
 reduced-motion handling, and responsive table containment.
 
@@ -176,6 +176,29 @@ or history backpressure degrades history alone and never stops Provider collecti
 the management recovery surface. Runtime status exposes only fixed
 `history_available`/`history_enabled` booleans; unavailable query/export endpoints return 503 rather
 than serving an unacknowledged stale view.
+
+## Signed firmware updates
+
+The management Web exposes a side-effect-free `POST /api/v1/ota/preview`, explicit-confirmation
+`POST /api/v1/ota/apply`, and read-only `GET /api/v1/ota/status?device_id=...`. Preview validates the
+complete signed archive and retains at most eight short-lived receipts in memory; it sends no bytes
+to a Deck. Apply consumes one receipt, permits one global OTA transaction, and streams 3072-byte
+chunks only after the exact prior `ota.result`. Archive, image, signature, and receipt ownership is
+cleared on terminal failure, success, expiry, logout, or Runtime shutdown. The Web uses a second
+danger confirmation and never offers background or silent updates. Each transaction has an
+independent ten-minute total deadline in addition to the per-result timeout.
+
+Release signing is intentionally outside the Companion. The private key must remain outside the
+repository and is passed explicitly to `tools/sign_ota_bundle.py`; only the versioned public catalog
+is shipped. For example:
+
+```bash
+python3 tools/sign_ota_bundle.py \
+  --image build/release/s3_rlcd_deck.bin \
+  --version 0.3.0-dev \
+  --private-key /secure/path/release-v1-private.pem \
+  --output build/release/s3_rlcd_deck-0.3.0-dev.s3ota
+```
 
 ## Run
 

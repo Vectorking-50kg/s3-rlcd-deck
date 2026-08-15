@@ -9,7 +9,10 @@
     {"$ref": "#/$defs/serial_owner_request"},
     {"$ref": "#/$defs/serial_owner_result"},
     {"$ref": "#/$defs/serial_owner_activity"},
-    {"$ref": "#/$defs/serial_history_request"}
+    {"$ref": "#/$defs/serial_history_request"},
+    {"$ref": "#/$defs/ota_offer"},
+    {"$ref": "#/$defs/ota_chunk"},
+    {"$ref": "#/$defs/ota_result"}
   ],
   "$defs": {
     "device_hello": {
@@ -129,6 +132,50 @@
         "tx_queue_capacity": {"type": "integer", "minimum": 1, "maximum": 4294967295},
         "rx_queue_depth": {"type": "integer", "minimum": 0, "maximum": 4294967295},
         "rx_queue_capacity": {"type": "integer", "minimum": 1, "maximum": 4294967295}
+      },
+      "additionalProperties": false
+    },
+    "ota_offer": {
+      "type": "object",
+      "required": ["type", "protocol_version", "transaction_id", "version", "board", "image_length", "image_sha256", "signature", "signing_key_id", "minimum_protocol_version"],
+      "properties": {
+        "type": {"const": "ota.offer"},
+        "protocol_version": {"const": 1},
+        "transaction_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+        "version": {"type": "string", "minLength": 1, "maxLength": 31, "pattern": "^[0-9][0-9A-Za-z.+-]{0,30}$"},
+        "board": {"const": "esp32-s3-rlcd-4.2"},
+        "image_length": {"type": "integer", "minimum": 1, "maximum": 1740800},
+        "image_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "signature": {"type": "string", "pattern": "^[A-Za-z0-9+/]{86}==$"},
+        "signing_key_id": {"type": "integer", "minimum": 1, "maximum": 4294967295},
+        "minimum_protocol_version": {"type": "integer", "minimum": 1, "maximum": 4294967295}
+      },
+      "additionalProperties": false
+    },
+    "ota_chunk": {
+      "type": "object",
+      "required": ["type", "protocol_version", "transaction_id", "offset", "data", "final"],
+      "properties": {
+        "type": {"const": "ota.chunk"},
+        "protocol_version": {"const": 1},
+        "transaction_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+        "offset": {"type": "integer", "minimum": 0, "maximum": 1740799},
+        "data": {"type": "string", "minLength": 4, "maxLength": 4096, "pattern": "^[A-Za-z0-9+/]+={0,2}$"},
+        "final": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "ota_result": {
+      "type": "object",
+      "required": ["type", "protocol_version", "transaction_id", "state", "code", "received_bytes", "image_length"],
+      "properties": {
+        "type": {"const": "ota.result"},
+        "protocol_version": {"const": 1},
+        "transaction_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+        "state": {"enum": ["receiving", "ready_to_reboot", "failed"]},
+        "code": {"enum": ["ok", "invalid_manifest", "wrong_board", "incompatible_protocol", "downgrade_rejected", "image_too_large", "signature_rejected", "busy", "stale_offset", "flash_failure", "hash_mismatch", "image_invalid", "timed_out"]},
+        "received_bytes": {"type": "integer", "minimum": 0, "maximum": 1740800},
+        "image_length": {"type": "integer", "minimum": 0, "maximum": 1740800}
       },
       "additionalProperties": false
     }

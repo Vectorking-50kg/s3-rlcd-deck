@@ -16,11 +16,13 @@ func TestEmbeddedConsoleContainsCompleteChineseSchemeCWorkflows(t *testing.T) {
 			"Deck 清单", "网络与信任", "系统设置", "固件更新", "诊断", "托盘 / 菜单",
 			"provider-form", "management-token", "provider-headers", "map-reset-format",
 			"backup-mode", "backup-conflicts", "providers_only", "replace", "merge",
+			"ota-file", "ota-device-id", "ota-confirm", "ota-apply",
 			`role="alert"`, "console-alert", "providers-alert", "history-alert", "toast-alert-region",
 		},
 		"/app.js": {
 			"/api/v1/session/refresh", "/api/v1/console", "/api/v1/providers", "/api/v1/providers/order", "/test",
 			"/api/v1/history", "/api/v1/backups/export", "/api/v1/backups/preview",
+			"/api/v1/ota/preview", "/api/v1/ota/apply", "/api/v1/ota/status",
 			"/api/v1/pairing/codes", "renderDeckPreview", "showDialog", "visibilitychange",
 			"textContent", "TextEncoder", "reset_format", "keep_existing",
 			"keep_current", "use_backup", "resetBackupPreview", "#import-file",
@@ -30,6 +32,7 @@ func TestEmbeddedConsoleContainsCompleteChineseSchemeCWorkflows(t *testing.T) {
 			`$("#serial-compose").addEventListener`, `$("#serial-lease").addEventListener`,
 			`$("#serial-preset-form").addEventListener`, "downloadSerialCapture",
 			"serialPresetOperationController", "serialPresetOperationIsCurrent", "scrubSerialPresetEditor",
+			"previewOTA", "applyOTA", "pollOTAStatus", "resetOTAPreview", "otaPreviewEpoch",
 		},
 		"/serial-terminal.js": {
 			"S3DeckSerialTerminal", "createClient", "decodeFrame", "MAX_TRANSMIT_BYTES",
