@@ -75,10 +75,21 @@ func (application *Runtime) managementRoutes() http.Handler {
 	mux.HandleFunc("GET /api/v1/serial/download", application.requireManagementSession(application.handleSerialDownload))
 	mux.HandleFunc("GET /api/v1/serial/observe", application.handleSerialObserve)
 	mux.HandleFunc("GET /api/v1/serial/presets", application.requireManagementSession(application.handleSerialPresets))
+	mux.HandleFunc("GET /api/v1/serial/presets/{presetID}", application.requireManagementSession(application.handleSerialPreset))
 	mux.HandleFunc("PUT /api/v1/serial/presets", limitManagementRequests(
 		sensitiveRateLimiter,
 		limits.SensitiveRateWindow,
 		application.requireManagementWrite(application.handleSerialPresetsUpdate),
+	))
+	mux.HandleFunc("PUT /api/v1/serial/presets/{presetID}", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.requireManagementWrite(application.handleSerialPresetUpdate),
+	))
+	mux.HandleFunc("DELETE /api/v1/serial/presets/{presetID}", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.requireManagementWrite(application.handleSerialPresetDelete),
 	))
 	mux.HandleFunc("GET /api/v1/console", application.requireManagementSession(application.handleConsoleView))
 	mux.HandleFunc("GET /api/v1/providers", application.requireManagementSession(application.handleProviders))

@@ -1201,7 +1201,7 @@ function renderSerialState(next) {
   setText("#serial-overwritten", active ? `${formatNumber(next.overwrittenBytes)} B` : "—");
   setText("#serial-observers", active ? formatNumber(next.observers) : "—");
   setText("#serial-owner", serialOwnerLabel(next.leaseOwner));
-  setText("#serial-remaining", next.canTransmit && next.leaseRemainingMS > 0 ?
+  setText("#serial-remaining", next.leaseOwner === "web" && next.leaseRemainingMS > 0 ?
     `${Math.ceil(next.leaseRemainingMS / 1000)} 秒` : "—");
   $("#serial-download").href = active ?
     `/api/v1/serial/download?session_id=${encodeURIComponent(next.sessionID)}` : "#";
@@ -1471,19 +1471,33 @@ function clearSerialPresetEditor() {
   renderSerialPresets();
 }
 
-function editSerialPreset(id) {
+async function fetchSerialPreset(id) {
+  const document = await (await request(`/api/v1/serial/presets/${encodeURIComponent(id)}`)).json();
+  if (!document || document.id !== id || typeof document.payload !== "string") {
+    throw new Error("串口预设详情响应格式无效。");
+  }
+  return document;
+}
+
+async function editSerialPreset(id) {
   if (!serialPresetsWritable()) return;
-  const preset = state.serialPresets.find((candidate) => candidate.id === id);
-  if (!preset) return;
-  state.serialPresetEditing = id;
-  $("#serial-preset-id").value = id;
-  $("#serial-preset-name").value = preset.name;
-  $("#serial-preset-mode").value = preset.mode;
-  $("#serial-preset-payload").value = preset.payload;
-  $("#serial-preset-ending").value = preset.line_ending;
-  setText("#serial-preset-editor-note", "编辑受保护的预设");
-  updateSerialPresetMode();
-  renderSerialPresets();
+  if (!state.serialPresets.some((candidate) => candidate.id === id)) return;
+  try {
+    const preset = await fetchSerialPreset(id);
+    if (!serialPresetsWritable() || !state.serialPresets.some((candidate) => candidate.id === id)) return;
+    state.serialPresetEditing = id;
+    $("#serial-preset-id").value = id;
+    $("#serial-preset-name").value = preset.name;
+    $("#serial-preset-mode").value = preset.mode;
+    $("#serial-preset-payload").value = preset.payload;
+    $("#serial-preset-ending").value = preset.line_ending;
+    preset.payload = "";
+    setText("#serial-preset-editor-note", "已显式打开受保护的预设正文");
+    updateSerialPresetMode();
+    renderSerialPresets();
+  } catch (error) {
+    toast("无法打开串口预设", error.message, true);
+  }
 }
 
 function updateSerialPresetMode() {
@@ -1493,12 +1507,16 @@ function updateSerialPresetMode() {
   ending.disabled = hexadecimal || !serialPresetsWritable();
 }
 
-async function persistSerialPresets(presets) {
+async function persistSerialPreset(preset) {
   if (!serialPresetsWritable()) throw new Error("串口预设不是最新状态，请先刷新。");
-  await request("/api/v1/serial/presets", { method: "PUT", body: JSON.stringify({ presets }) });
-  state.serialPresets = presets;
-  state.sync.serialPresets.lastSuccess = new Date().toISOString();
-  renderSerialPresets();
+  try {
+    await request(`/api/v1/serial/presets/${encodeURIComponent(preset.id)}`, {
+      method: "PUT", body: JSON.stringify(preset),
+    });
+  } finally {
+    preset.payload = "";
+  }
+  await loadSerialPresets();
 }
 
 async function saveSerialPreset(event) {
@@ -1521,11 +1539,7 @@ async function saveSerialPreset(event) {
     const id = state.serialPresetEditing || serialPresetID();
     const preset = { id, name: $("#serial-preset-name").value.trim(), mode, payload, line_ending: ending };
     if (!preset.name) throw new Error("请输入预设名称。");
-    const presets = state.serialPresets.filter((candidate) => candidate.id !== id);
-    const existingIndex = state.serialPresets.findIndex((candidate) => candidate.id === id);
-    if (existingIndex < 0) presets.push(preset);
-    else presets.splice(existingIndex, 0, preset);
-    await persistSerialPresets(presets);
+    await persistSerialPreset(preset);
     clearSerialPresetEditor();
     toast("串口预设已保存", "预设不会绕过 Web TX Lease 或暂停状态。");
   } catch (error) { toast("无法保存串口预设", error.message, true); }
@@ -1538,21 +1552,29 @@ async function deleteSerialPreset() {
     paragraphs: ["此操作只删除预设，不会发送任何串口字节。"], confirmText: "删除预设", danger: true })) return;
   try {
     if (!serialPresetsWritable()) throw new Error("串口预设已变化，请刷新后重试。");
-    await persistSerialPresets(state.serialPresets.filter((candidate) => candidate.id !== preset.id));
+    await request(`/api/v1/serial/presets/${encodeURIComponent(preset.id)}`, { method: "DELETE" });
+    await loadSerialPresets();
     clearSerialPresetEditor();
     toast("串口预设已删除", "没有串口字节被发送。");
   } catch (error) { toast("无法删除串口预设", error.message, true); }
 }
 
-function sendSerialPreset(id) {
-  const preset = state.serialPresets.find((candidate) => candidate.id === id);
-  if (!preset || !serialPresetsWritable()) return;
+async function sendSerialPreset(id) {
+  if (!state.serialPresets.some((candidate) => candidate.id === id) || !serialPresetsWritable()) return;
   try {
-    const ending = preset.line_ending === "current" ? $("#serial-line-ending").value : preset.line_ending;
-    const payload = preset.mode === "hex" ? window.S3DeckSerialTerminal.parseHex(preset.payload) :
-      window.S3DeckSerialTerminal.encodeText(preset.payload, ending);
-    sendSerialPayload(payload);
-    payload.fill(0);
+    const preset = await fetchSerialPreset(id);
+    try {
+      if (!serialPresetsWritable() || !state.serial.status?.canTransmit) {
+        throw new Error("Web TX Lease 已失效。");
+      }
+      const ending = preset.line_ending === "current" ? $("#serial-line-ending").value : preset.line_ending;
+      const payload = preset.mode === "hex" ? window.S3DeckSerialTerminal.parseHex(preset.payload) :
+        window.S3DeckSerialTerminal.encodeText(preset.payload, ending);
+      sendSerialPayload(payload);
+      payload.fill(0);
+    } finally {
+      preset.payload = "";
+    }
   } catch (error) { toast("无法发送串口预设", error.message, true); }
 }
 

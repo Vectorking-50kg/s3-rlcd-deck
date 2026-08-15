@@ -231,6 +231,58 @@ func TestSerialObserverEncodesUint64CapabilitiesAsExactDecimalStrings(t *testing
 	}
 }
 
+func TestReadOnlySerialObserverSeesWebLeaseOwnerAndRemainingTimeWithoutCapability(t *testing.T) {
+	application := newSerialHTTPRuntime(t)
+	if err := application.serialHub.Reconcile("deck-shared-lease", 77, serialhub.StateUSBTX); err != nil {
+		t.Fatal(err)
+	}
+	request, err := application.serialHub.AcquireLease("other-browser", 77)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = application.serialHub.ApplyOwnerResult("deck-shared-lease", serialhub.OwnerResult{
+		SessionID: 77, RequestID: request.RequestID, Owner: serialhub.OwnerWeb, LeaseID: 90210,
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(application.managementRoutes())
+	defer server.Close()
+	application.config.Management.AllowedOrigin = server.URL
+	const sessionToken = "serial-read-only-lease-session"
+	if !application.sessions.add(sessionToken, "unused-csrf", time.Now()) {
+		t.Fatal("add management session")
+	}
+	header := http.Header{}
+	header.Set("Cookie", managementSessionCookie+"="+sessionToken)
+	header.Set("Origin", server.URL)
+	connection, response, err := websocket.Dial(
+		context.Background(),
+		"ws"+server.URL[4:]+"/api/v1/serial/observe",
+		&websocket.DialOptions{HTTPHeader: header, Subprotocols: []string{serialObserverSubprotocol}},
+	)
+	if err != nil {
+		t.Fatalf("Dial(observer) response=%v error=%v", response, err)
+	}
+	defer connection.CloseNow()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	_, document, err := connection.Read(ctx)
+	cancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state struct {
+		LeaseOwner       serialhub.Owner `json:"lease_owner"`
+		LeaseHeld        bool            `json:"lease_held_by_this_observer"`
+		LeaseID          string          `json:"lease_id"`
+		LeaseRemainingMS int64           `json:"lease_remaining_ms"`
+	}
+	if err = json.Unmarshal(document, &state); err != nil || state.LeaseOwner != serialhub.OwnerWeb ||
+		state.LeaseHeld || state.LeaseID != "" || state.LeaseRemainingMS <= 0 {
+		t.Fatalf("read-only observer state=%#v document=%s error=%v", state, document, err)
+	}
+}
+
 func TestSerialAcquireWriteFailureRemainsPendingAndTransitioning(t *testing.T) {
 	application := newSerialHTTPRuntime(t)
 	if err := application.serialHub.Reconcile("deck-offline", 202, serialhub.StateUSBTX); err != nil {

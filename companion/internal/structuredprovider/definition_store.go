@@ -720,6 +720,7 @@ func readDefinitionStore(path string) (definitionStoreState, error) {
 	if err != nil {
 		return definitionStoreState{}, errors.New("structured Provider store is unavailable")
 	}
+	defer clear(contents)
 	var header struct {
 		SchemaVersion int `json:"schema_version"`
 	}
@@ -727,6 +728,13 @@ func readDefinitionStore(path string) (definitionStoreState, error) {
 		return definitionStoreState{}, errors.New("structured Provider store is malformed")
 	}
 	var state definitionStoreState
+	stateReturned := false
+	defer func() {
+		if !stateReturned {
+			configmodel.DestroySerialPresets(state.ApplicationSettings.SerialPresets)
+			state.ApplicationSettings.SerialPresets = nil
+		}
+	}()
 	switch header.SchemaVersion {
 	case 1:
 		var previous definitionStoreStateV1
@@ -758,6 +766,7 @@ func readDefinitionStore(path string) (definitionStoreState, error) {
 	if validateDefinitionStoreState(state) != nil {
 		return definitionStoreState{}, errors.New("structured Provider store is malformed")
 	}
+	stateReturned = true
 	return state, nil
 }
 

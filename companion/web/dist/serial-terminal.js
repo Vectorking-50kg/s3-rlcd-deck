@@ -260,9 +260,18 @@
   }
 
   function describePreset(preset) {
-    if (!preset || typeof preset.payload !== "string") {
+    if (!preset) {
       throw new Error("malformed Serial Preset");
     }
+    if (Number.isSafeInteger(preset.transmit_bytes) && preset.transmit_bytes > 0 && preset.transmit_bytes <= 256) {
+      const labels = { none: "无行结束符", current: "当前设置", cr: "CR", lf: "LF", crlf: "CRLF" };
+      if ((preset.mode !== "text" && preset.mode !== "hex") ||
+          !Object.prototype.hasOwnProperty.call(labels, preset.line_ending)) {
+        throw new Error("malformed Serial Preset");
+      }
+      return `${preset.mode === "hex" ? "HEX" : "Text"} · ${preset.transmit_bytes} bytes · ${labels[preset.line_ending]}`;
+    }
+    if (typeof preset.payload !== "string") throw new Error("malformed Serial Preset");
     if (preset.mode === "hex") {
       return `HEX · ${parseHex(preset.payload).length} bytes · 无行结束符`;
     }

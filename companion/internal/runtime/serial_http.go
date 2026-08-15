@@ -537,6 +537,8 @@ func writeSerialObserverStatus(
 	}
 	if document.LeaseHeld {
 		document.LeaseID = strconv.FormatUint(status.Lease.LeaseID, 10)
+	}
+	if status.Lease.Owner == serialhub.OwnerWeb {
 		if remaining := time.Until(status.Lease.ExpiresAt); remaining > 0 {
 			document.LeaseRemainingMS = remaining.Milliseconds()
 		}

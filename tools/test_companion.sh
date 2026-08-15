@@ -31,7 +31,9 @@ fi
 cd "$companion_root"
 node --check web/dist/app.js
 node --check web/dist/serial-terminal.js
+node --check web/serial_terminal_browser_test.mjs
 node --test web/serial_terminal_test.mjs
+node web/serial_terminal_browser_test.mjs
 go vet ./...
 # AI Snapshot contract tests read canonical fixtures outside the Go module.
 # Disable the Go result cache so a fixture-only change is always re-evaluated.

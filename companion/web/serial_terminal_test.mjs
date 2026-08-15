@@ -67,6 +67,9 @@ test("saved preset list summaries never repeat command or secret content", () =>
   assert.equal(terminal.describePreset({
     mode: "hex", payload: "00 ff 41", line_ending: "none",
   }), "HEX · 3 bytes · 无行结束符");
+  assert.equal(terminal.describePreset({
+    mode: "text", transmit_bytes: 11, line_ending: "current",
+  }), "Text · 11 bytes · 当前设置");
 });
 
 test("canonical SRD1 binary frames decode without losing uint64 metadata", () => {

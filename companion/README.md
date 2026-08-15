@@ -258,9 +258,11 @@ download is bounded to 1 MiB through `/api/v1/serial/download`, and `/api/v1/ser
 browser IDs, Lease IDs, and pending request capabilities. A slow observer can lose its own oldest
 bytes but cannot block Deck ingest or another observer.
 
-Serial Presets use authenticated `GET/PUT /api/v1/serial/presets`; writes additionally require the
-exact Origin, CSRF token, and sensitive-operation rate limit. List rows expose only name, mode,
-bounded byte count, and line-ending metadata until the user explicitly opens an editor.
+Serial Presets use authenticated metadata-only `GET /api/v1/serial/presets`; an explicit editor or
+send action reads one protected body through `GET /api/v1/serial/presets/{id}`. Per-ID PUT/DELETE
+and the bounded whole-collection PUT additionally require the exact Origin, CSRF token, and
+sensitive-operation rate limit. List rows expose only name, mode, bounded byte count, and
+line-ending metadata until the user explicitly opens an editor.
 
 Only one observer may hold the ten-minute Web TX Lease. Acquire/release results remain
 `transitioning` until the Deck's sole owner acknowledges the exact request. Observer disconnect and
