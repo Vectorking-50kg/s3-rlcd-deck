@@ -208,10 +208,13 @@ Go 1.26.x is the development baseline.
 
 ```bash
 ./tools/package_companion.sh
-./build/companion/darwin-arm64/s3deck-companion
+open "build/packages/s3deck-companion_0.1.0-dev_darwin-arm64.zip"
 ```
 
-Use the matching Intel macOS or Windows x64 artifact on those platforms. The
+Each archive contains a macOS `.app` or Windows x64 application, installation instructions,
+third-party notices, an SPDX 2.3 SBOM, a per-file manifest, and reproducible-build inputs;
+`build/packages/SHA256SUMS` authenticates the archives. Use the matching Intel macOS or Windows
+x64 artifact on those platforms. The
 desktop shell starts the runtime, remains in the menu bar or notification area,
 and exchanges a 30-second single-use grant when **Open Console** launches the
 browser. **Stop Companion** stops both listeners without quitting the shell;
@@ -254,7 +257,21 @@ S3DECK_MANAGEMENT_TOKEN="$(openssl rand -hex 32)" \
 
 Only one Companion may own a data directory. A repeated launch fails with an
 explicit `already running` error instead of competing for listeners or trust
-files. Login-start installation is deliberately deferred to M5.
+files. Install the unpacked application for the current user without administrator rights:
+
+```bash
+s3deck-companion --install
+s3deck-companion --installation-status
+s3deck-companion --disable-login   # current process keeps running
+s3deck-companion --enable-login
+s3deck-companion --uninstall       # user data and rollback versions are retained
+```
+
+The installed management Web and Device Hub both default to loopback. Exposing the Device Hub to
+the LAN is an explicit install-time choice such as `--device-hub-address 0.0.0.0:7780`; the
+installer never changes firewall rules. Quit a running Companion before upgrading. Migration
+snapshots and the owner-only Installation Journal restore the prior data and startup target after
+failure or process interruption.
 
 The authenticated management API issues codes at `POST /api/v1/pairing/codes`, issues a device-bound rotation code at `POST /api/v1/devices/{device_id}/rotate`, and revokes trust at `DELETE /api/v1/devices/{device_id}`. Provider management uses `/api/v1/providers`, `/api/v1/providers/order`, and `/api/v1/providers/{id}/test`. Provider Hour data is read from `GET /api/v1/history`, exported from `GET /api/v1/history/export.csv`, enabled or disabled through `/api/v1/history/settings`, and cleared with `DELETE /api/v1/history`. Encrypted migration uses `/api/v1/backups/export`, `/api/v1/backups/preview`, and `/api/v1/backups/import`. A Deck redeems a code once at the rate-limited Device Hub route `POST /api/v1/pairing/redeem`. Management writes require the login session, exact Origin, and CSRF token described above; a successful redeem response is the only place a plaintext device Token is returned. Device requests authenticate the complete Device ID + Token + identity + protocol-version binding.
 
@@ -336,8 +353,9 @@ From the repository root:
 ```
 
 The command enforces formatting, runs `go vet`, regular and race-enabled tests,
-then cross-compiles menu-bar/tray executables for macOS arm64/amd64 and Windows
-amd64 under the ignored `build/companion/` directory. The SPA, build version,
+then reproducibly cross-compiles menu-bar/tray executables for macOS arm64/amd64 and Windows
+amd64 under the ignored `build/companion/` directory. `package_companion.sh` additionally emits
+deterministic audited archives under `build/packages/`. The SPA, build version,
 third-party notices, static assets, and native icon are embedded in each single
 executable. The local macOS artifact for the host architecture executes `--version`; the other
 cross-compiled artifacts receive executable metadata and embedded build-identity checks.
@@ -345,7 +363,8 @@ The `Companion desktop native smoke` GitHub Actions workflow then runs the match
 artifact on macOS arm64, macOS amd64, and Windows amd64, verifies `--version`, starts
 the real menu-bar/tray path, reads its embedded management bootstrap, and exercises
 bounded shutdown. Windows development builds retain a console so their build identity
-and shutdown failures stay observable; M5 owns the signed GUI-only installer.
+and shutdown failures stay observable. Publication signs/notarizes the audited application
+contents with external platform credentials; development archives never claim a release signature.
 
 The native tray adapter is pinned to `gogpu/systray` commit
 `a3901e26a16407483bcb765d35cba446e60c6932`, which includes the macOS

@@ -521,6 +521,27 @@ Companion 提供内置模板，同时提供结构化 HTTP Provider：
 
 V1 不引入 Electron。若未来需要独立原生窗口，可在同一 SPA 外增加轻量 WebView 外壳，不改变后端接口。
 
+#### 8.1.1 安装、启动与升级事务
+
+- `s3deck-companion --install` 是无管理员权限的当前用户安装入口。可执行文件按
+  `version-commit` 写入私有 installation root；不覆盖或删除旧版本。
+- macOS 使用带 installation-root 哈希后缀的 LaunchAgent；Windows 使用同样隔离的
+  ONLOGON/LIMITED Task Scheduler 任务。`--enable-login`、`--disable-login`、
+  `--installation-status` 与 `--uninstall` 共享同一状态机。
+- 安装/升级在任何 schema 迁移之前为 Pairing trust、Device Hub identity、Provider 配置和
+  Provider history SQLite/WAL/SHM 创建带逐文件 SHA-256 的私有快照。Installation Journal
+  删除前的进程终止都按未提交处理；下次操作先恢复旧数据、旧可执行文件和旧启动注册。
+- 安装事务持有 Maintenance Fence 与 Companion single-instance lock。安装期间被 LaunchAgent/
+  Task Scheduler 拉起的新进程有界等待该 fence；普通重复启动仍立即失败。安装器不杀死未知
+  进程，升级前必须退出正在运行的 Companion。
+- 卸载结束登录启动并删除 Installation State，但保留用户数据、迁移快照和旧可执行文件，避免
+  把“卸载应用”误当成“删除信任/凭据”。
+- 安装默认 Device Hub 为 `127.0.0.1:7780`，管理 Web 仍为 `127.0.0.1:7777`。只有显式传入
+  `--device-hub-address` 才允许 LAN 监听；安装器从不自动创建防火墙规则。
+- 发布 ZIP 必须包含嵌入版本/commit、SPDX 2.3 SBOM、完整第三方许可证、逐文件 manifest、
+  `SHA256SUMS` 和固定 `SOURCE_DATE_EPOCH` 的复现说明。平台签名/公证使用外部发布凭据，私钥
+  不进入仓库、构建日志或未签名开发包。
+
 ### 8.2 推荐模块
 
 ```text
@@ -540,6 +561,7 @@ companion/
 │   ├── serialhub/         # 8 MiB ring, browser fan-out
 │   ├── web/               # management API + embedded SPA
 │   ├── diagnostics/       # redaction + rotation
+│   ├── installation/      # migration journal + login startup adapters
 │   └── config/
 └── web/
     ├── src/
@@ -1147,7 +1169,7 @@ s3-rlcd-deck/
 
 - 最多 5 个 Companion、优先级和粘性故障切换。
 - 签名 OTA、A/B 回滚。
-- 诊断包、安装、自启动和升级迁移。
+- 诊断包、可恢复 Installation Transaction、登录自启动和升级迁移。
 - macOS/Windows 72 小时验收。
 
 ### 17.6 签名 A/B OTA

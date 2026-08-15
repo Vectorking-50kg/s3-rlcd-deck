@@ -47,20 +47,23 @@ mkdir -p \
 
 build_version="${S3DECK_BUILD_VERSION:-0.1.0-dev}"
 build_commit="${S3DECK_BUILD_COMMIT:-$(git -C "$repository_root" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)}"
-link_identity="-X main.version=$build_version -X main.commit=$build_commit"
+link_identity="-buildid= -X main.version=$build_version -X main.commit=$build_commit"
 
 CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build \
     -trimpath \
+	-buildvcs=false \
 	-ldflags "$link_identity" \
     -o "$artifact_root/darwin-arm64/s3deck-companion" \
     ./cmd/s3deck-companion
 CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build \
     -trimpath \
+	-buildvcs=false \
 	-ldflags "$link_identity" \
     -o "$artifact_root/darwin-amd64/s3deck-companion" \
     ./cmd/s3deck-companion
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
     -trimpath \
+	-buildvcs=false \
 	-ldflags "$link_identity" \
     -o "$artifact_root/windows-amd64/s3deck-companion.exe" \
     ./cmd/s3deck-companion

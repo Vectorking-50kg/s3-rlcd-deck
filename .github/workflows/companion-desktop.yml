@@ -6,14 +6,20 @@ on:
       - ".github/workflows/companion-desktop.yml"
       - "companion/**"
       - "tools/test_companion.sh"
+      - "tools/package_companion.py"
+      - "tools/package_companion.sh"
       - "tools/smoke_companion_artifact.py"
+      - "tools/smoke_companion_installation.py"
   push:
     branches: [main]
     paths:
       - ".github/workflows/companion-desktop.yml"
       - "companion/**"
       - "tools/test_companion.sh"
+      - "tools/package_companion.py"
+      - "tools/package_companion.sh"
       - "tools/smoke_companion_artifact.py"
+      - "tools/smoke_companion_installation.py"
 
 permissions:
   contents: read
@@ -30,8 +36,14 @@ jobs:
           - runner: macos-15-intel
             arch: amd64
     runs-on: ${{ matrix.runner }}
+    env:
+      VALIDATED_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ env.VALIDATED_COMMIT }}
+      - name: Verify checkout identity
+        run: test "$(git rev-parse HEAD)" = "$VALIDATED_COMMIT"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version: "1.26.x"
@@ -49,12 +61,37 @@ jobs:
             --executable "build/companion/darwin-${{ matrix.arch }}/s3deck-companion" \
             --expected-version 0.1.0-dev \
             --expected-commit "$(git rev-parse --short=12 HEAD)"
+      - name: Run per-user install and upgrade smoke
+        run: |
+          commit="$(git rev-parse --short=12 HEAD)"
+          mkdir -p "build/companion/darwin-${{ matrix.arch }}-previous"
+          cd companion
+          CGO_ENABLED=0 GOOS=darwin GOARCH=${{ matrix.arch }} go build \
+            -trimpath -buildvcs=false \
+            -ldflags "-buildid= -X main.version=0.0.0-smoke -X main.commit=000000000000" \
+            -o "../build/companion/darwin-${{ matrix.arch }}-previous/s3deck-companion" \
+            ./cmd/s3deck-companion
+          cd ..
+          python3 tools/smoke_companion_installation.py \
+            --previous-executable "build/companion/darwin-${{ matrix.arch }}-previous/s3deck-companion" \
+            --executable "build/companion/darwin-${{ matrix.arch }}/s3deck-companion" \
+            --previous-version 0.0.0-smoke \
+            --expected-version 0.1.0-dev \
+            --expected-commit "$commit"
 
   windows-native:
     name: Windows native (amd64)
     runs-on: windows-2025
+    env:
+      VALIDATED_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ env.VALIDATED_COMMIT }}
+      - name: Verify checkout identity
+        shell: pwsh
+        run: |
+          if ((git rev-parse HEAD) -ne $env:VALIDATED_COMMIT) { throw "checkout commit mismatch" }
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version: "1.26.x"
@@ -96,5 +133,22 @@ jobs:
           $commit = git rev-parse --short=12 HEAD
           python tools/smoke_companion_artifact.py `
             --executable build/companion/windows-amd64/s3deck-companion.exe `
+            --expected-version 0.1.0-dev `
+            --expected-commit $commit
+      - name: Run per-user install and upgrade smoke
+        shell: pwsh
+        run: |
+          $commit = git rev-parse --short=12 HEAD
+          New-Item -ItemType Directory -Force build/companion/windows-amd64-previous | Out-Null
+          Push-Location companion
+          go build -trimpath -buildvcs=false `
+            -ldflags "-buildid= -X main.version=0.0.0-smoke -X main.commit=000000000000" `
+            -o ../build/companion/windows-amd64-previous/s3deck-companion.exe `
+            ./cmd/s3deck-companion
+          Pop-Location
+          python tools/smoke_companion_installation.py `
+            --previous-executable build/companion/windows-amd64-previous/s3deck-companion.exe `
+            --executable build/companion/windows-amd64/s3deck-companion.exe `
+            --previous-version 0.0.0-smoke `
             --expected-version 0.1.0-dev `
             --expected-commit $commit

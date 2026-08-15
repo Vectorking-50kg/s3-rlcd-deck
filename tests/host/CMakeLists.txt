@@ -345,3 +345,7 @@ add_test(
     NAME sign_ota_bundle_contract
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_sign_ota_bundle.py
 )
+add_test(
+    NAME companion_package_contract
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_package_companion.py
+)
