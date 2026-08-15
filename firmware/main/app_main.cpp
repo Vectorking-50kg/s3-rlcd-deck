@@ -215,6 +215,13 @@ bool release_companion_resources()
 bool release_serial_resources()
 {
     if (application_serial != nullptr) {
+        if (application_companion_link != nullptr &&
+            !deck_companion_link_detach_serial(
+                application_companion_link,
+                application_serial
+            )) {
+            return false;
+        }
         if (!deck_serial_service_stop(application_serial)) {
             return false;
         }
@@ -1313,6 +1320,15 @@ extern "C" void app_main(void)
             serial_event,
             application_serial_view_task
         );
+    }
+    if (application_serial != nullptr && application_companion_link != nullptr &&
+        !deck_companion_link_attach_serial(
+            application_companion_link,
+            application_serial
+        )) {
+        if (deck_serial_service_stop(application_serial)) {
+            application_serial = nullptr;
+        }
     }
     if (application_serial == nullptr) {
         (void)stop_serial_view_task();

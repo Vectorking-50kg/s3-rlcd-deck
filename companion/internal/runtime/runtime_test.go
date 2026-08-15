@@ -138,6 +138,7 @@ func TestRuntimeServesAuthenticatedDeviceLinkOnlyOverTLS(t *testing.T) {
 		Board:           devicelink.BoardESP32S3RLCD42,
 		Capabilities:    []string{"display", "serial", "ota"},
 		SerialState:     "disarmed",
+		SerialSessionID: 0,
 	})
 	if err = connection.Write(context.Background(), websocket.MessageText, hello); err != nil {
 		t.Fatalf("write device.hello: %v", err)

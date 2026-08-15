@@ -1,0 +1,9 @@
+{
+  "catalog": "../../catalog/serial-frame-v1.json",
+  "cases": [
+    {"file": "valid-target-rx.hex", "accepted": true},
+    {"file": "valid-web-tx.hex", "accepted": true},
+    {"file": "invalid-flags.hex", "accepted": false},
+    {"file": "invalid-length.hex", "accepted": false}
+  ]
+}

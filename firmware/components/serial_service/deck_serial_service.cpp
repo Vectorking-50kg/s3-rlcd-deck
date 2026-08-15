@@ -33,6 +33,7 @@ constexpr size_t kUartEventQueueDepth = 20;
 constexpr size_t kInputBlockCount = 16;
 constexpr size_t kInputQueueDepth = kInputBlockCount;
 constexpr size_t kUsbInputQueueDepth = 16;
+constexpr size_t kWebInputQueueDepth = 16;
 constexpr size_t kUsbDriverBufferBytes = 4U * 1024U;
 constexpr size_t kUsbSinkBytes = 16U * 1024U;
 constexpr size_t kWssSinkBytes = 16U * 1024U;
@@ -102,7 +103,14 @@ struct UsbInputBlock {
     uint8_t bytes[DECK_SERIAL_ROUTER_BLOCK_BYTES];
 };
 
-enum class UsbDrainResult : uint8_t {
+struct WebInputBlock {
+    uint16_t length;
+    uint64_t session_id;
+    uint64_t lease_id;
+    uint8_t bytes[DECK_SERIAL_ROUTER_BLOCK_BYTES];
+};
+
+enum class InputDrainResult : uint8_t {
     idle,
     progress,
     stalled,
@@ -139,6 +147,7 @@ struct SerialDataPath {
     QueueHandle_t free_blocks;
     QueueHandle_t filled_blocks;
     QueueHandle_t usb_input_blocks;
+    QueueHandle_t web_input_blocks;
     EventGroupHandle_t lifecycle;
     TaskHandle_t rx_task;
     TaskHandle_t router_task;
@@ -158,12 +167,17 @@ struct deck_serial_service {
     deck_serial_service_event_fn callback;
     void *callback_context;
     deck_serial_session_snapshot_t latest_snapshot;
+    deck_serial_command_result_t latest_command_result;
+    bool has_latest_command_result;
     deck_serial_router_stats_t published_router_stats;
     bool has_published_router_stats;
     UsbInputBlock pending_usb_input;
     size_t pending_usb_offset;
     bool has_pending_usb_input;
     bool pending_usb_authorized;
+    WebInputBlock pending_web_input;
+    size_t pending_web_offset;
+    bool has_pending_web_input;
     std::atomic<uint64_t> usb_input_authority_generation;
     std::atomic<uint64_t> pending_usb_rejected_bytes;
     std::atomic<bool> stop_requested;
@@ -552,6 +566,25 @@ void clear_usb_input_state(deck_serial_service_t *service)
     clear_pending_usb_input(service);
 }
 
+void clear_pending_web_input(deck_serial_service_t *service)
+{
+    std::memset(
+        &service->pending_web_input,
+        0,
+        sizeof(service->pending_web_input)
+    );
+    service->pending_web_offset = 0;
+    service->has_pending_web_input = false;
+}
+
+void clear_web_input_state(deck_serial_service_t *service)
+{
+    if (service->data_path.web_input_blocks != nullptr) {
+        (void)xQueueReset(service->data_path.web_input_blocks);
+    }
+    clear_pending_web_input(service);
+}
+
 void release_data_path_allocations(deck_serial_service_t *service)
 {
     SerialDataPath &path = service->data_path;
@@ -561,6 +594,7 @@ void release_data_path_allocations(deck_serial_service_t *service)
     );
     service->pending_usb_rejected_bytes.store(0, std::memory_order_release);
     clear_usb_input_state(service);
+    clear_web_input_state(service);
     if (path.usb_bridge != nullptr) {
         deck_serial_usb_bridge_destroy(path.usb_bridge);
         path.usb_bridge = nullptr;
@@ -580,6 +614,10 @@ void release_data_path_allocations(deck_serial_service_t *service)
     if (path.usb_input_blocks != nullptr) {
         vQueueDelete(path.usb_input_blocks);
         path.usb_input_blocks = nullptr;
+    }
+    if (path.web_input_blocks != nullptr) {
+        vQueueDelete(path.web_input_blocks);
+        path.web_input_blocks = nullptr;
     }
     if (path.lifecycle != nullptr) {
         vEventGroupDelete(path.lifecycle);
@@ -681,6 +719,10 @@ bool prepare_data_path(deck_serial_service_t *service, uint64_t session_id)
     path.lifecycle = xEventGroupCreate();
     path.free_blocks = xQueueCreate(kInputQueueDepth, sizeof(void *));
     path.filled_blocks = xQueueCreate(kInputQueueDepth, sizeof(void *));
+    path.web_input_blocks = xQueueCreate(
+        kWebInputQueueDepth,
+        sizeof(WebInputBlock)
+    );
     if constexpr (kUsbBridgeEnabled) {
         path.usb_input_blocks = xQueueCreate(
             kUsbInputQueueDepth,
@@ -710,7 +752,7 @@ bool prepare_data_path(deck_serial_service_t *service, uint64_t session_id)
     }
     if (path.lifecycle == nullptr || path.free_blocks == nullptr ||
         path.filled_blocks == nullptr || path.input_blocks == nullptr ||
-        path.router == nullptr ||
+        path.router == nullptr || path.web_input_blocks == nullptr ||
         (kUsbBridgeEnabled &&
          (path.usb_input_blocks == nullptr || path.usb_bridge == nullptr)) ||
         !register_data_sinks(path.router)) {
@@ -935,7 +977,13 @@ void clear_usb_tx(void *context)
     }
 }
 
-void clear_web_tx(void *) {}
+void clear_web_tx(void *context)
+{
+    auto *service = static_cast<deck_serial_service_t *>(context);
+    if (service != nullptr) {
+        clear_web_input_state(service);
+    }
+}
 
 void publish(
     deck_serial_service_t *service,
@@ -971,6 +1019,10 @@ void publish(
     service->has_published_router_stats = event.has_router_stats;
     if (xSemaphoreTake(service->snapshot_mutex, portMAX_DELAY) == pdTRUE) {
         service->latest_snapshot = event.snapshot;
+        if (result != nullptr) {
+            service->latest_command_result = *result;
+            service->has_latest_command_result = true;
+        }
         xSemaphoreGive(service->snapshot_mutex);
     }
     if (service->callback != nullptr) {
@@ -1039,10 +1091,10 @@ bool drain_usb_rejections(deck_serial_service_t *service)
     );
 }
 
-UsbDrainResult drain_usb_input(deck_serial_service_t *service)
+InputDrainResult drain_usb_input(deck_serial_service_t *service)
 {
     if (!kUsbBridgeEnabled || service->data_path.usb_input_blocks == nullptr) {
-        return UsbDrainResult::idle;
+        return InputDrainResult::idle;
     }
     if (!service->has_pending_usb_input) {
         if (xQueueReceive(
@@ -1050,13 +1102,13 @@ UsbDrainResult drain_usb_input(deck_serial_service_t *service)
                 &service->pending_usb_input,
                 0
             ) != pdTRUE) {
-            return UsbDrainResult::idle;
+            return InputDrainResult::idle;
         }
         if (service->pending_usb_input.length == 0 ||
             service->pending_usb_input.length >
                 DECK_SERIAL_ROUTER_BLOCK_BYTES) {
             clear_pending_usb_input(service);
-            return UsbDrainResult::rejected;
+            return InputDrainResult::rejected;
         }
         service->has_pending_usb_input = true;
     }
@@ -1067,7 +1119,7 @@ UsbDrainResult drain_usb_input(deck_serial_service_t *service)
                 service->pending_usb_input.length
             )) {
             clear_pending_usb_input(service);
-            return UsbDrainResult::rejected;
+            return InputDrainResult::rejected;
         }
         service->pending_usb_authorized = true;
     }
@@ -1083,16 +1135,69 @@ UsbDrainResult drain_usb_input(deck_serial_service_t *service)
     );
     if (written < 0 || static_cast<size_t>(written) > remaining) {
         clear_pending_usb_input(service);
-        return UsbDrainResult::rejected;
+        return InputDrainResult::rejected;
     }
     if (written == 0) {
-        return UsbDrainResult::stalled;
+        return InputDrainResult::stalled;
     }
     service->pending_usb_offset += static_cast<size_t>(written);
     if (service->pending_usb_offset == service->pending_usb_input.length) {
         clear_pending_usb_input(service);
     }
-    return UsbDrainResult::progress;
+    return InputDrainResult::progress;
+}
+
+InputDrainResult drain_web_input(deck_serial_service_t *service)
+{
+    if (service->data_path.web_input_blocks == nullptr) {
+        return InputDrainResult::idle;
+    }
+    if (!service->has_pending_web_input) {
+        if (xQueueReceive(
+                service->data_path.web_input_blocks,
+                &service->pending_web_input,
+                0
+            ) != pdTRUE) {
+            return InputDrainResult::idle;
+        }
+        if (service->pending_web_input.length == 0 ||
+            service->pending_web_input.length >
+                DECK_SERIAL_ROUTER_BLOCK_BYTES) {
+            clear_pending_web_input(service);
+            return InputDrainResult::rejected;
+        }
+        service->has_pending_web_input = true;
+    }
+    if (!deck_serial_session_accept_web_input(
+            service->session,
+            service->pending_web_input.session_id,
+            service->pending_web_input.lease_id
+        )) {
+        clear_pending_web_input(service);
+        return InputDrainResult::rejected;
+    }
+    const size_t remaining =
+        static_cast<size_t>(service->pending_web_input.length) -
+        service->pending_web_offset;
+    const int written = uart_tx_chars(
+        kTargetUart,
+        reinterpret_cast<const char *>(
+            service->pending_web_input.bytes + service->pending_web_offset
+        ),
+        static_cast<uint32_t>(remaining)
+    );
+    if (written < 0 || static_cast<size_t>(written) > remaining) {
+        clear_pending_web_input(service);
+        return InputDrainResult::rejected;
+    }
+    if (written == 0) {
+        return InputDrainResult::stalled;
+    }
+    service->pending_web_offset += static_cast<size_t>(written);
+    if (service->pending_web_offset == service->pending_web_input.length) {
+        clear_pending_web_input(service);
+    }
+    return InputDrainResult::progress;
 }
 
 void process_command(deck_serial_service_t *service, const Command &command)
@@ -1224,17 +1329,26 @@ void owner_task(void *context)
             continue;
         }
 
-        const UsbDrainResult drained = drain_usb_input(service);
-        if (drained == UsbDrainResult::rejected) {
+        const InputDrainResult web_drained = drain_web_input(service);
+        if (web_drained == InputDrainResult::rejected) {
             publish(service, nullptr);
             continue;
         }
-        if (drained == UsbDrainResult::progress) {
+        if (web_drained == InputDrainResult::progress) {
             continue;
         }
+        const InputDrainResult usb_drained = drain_usb_input(service);
+        if (usb_drained == InputDrainResult::rejected) {
+            publish(service, nullptr);
+            continue;
+        }
+        if (usb_drained == InputDrainResult::progress) {
+            continue;
+        }
+        const bool stalled = web_drained == InputDrainResult::stalled ||
+                             usb_drained == InputDrainResult::stalled;
         const TickType_t wait =
-            drained == UsbDrainResult::stalled ? pdMS_TO_TICKS(1)
-                                               : kOwnerPollTicks;
+            stalled ? pdMS_TO_TICKS(1) : kOwnerPollTicks;
         (void)ulTaskNotifyTake(pdTRUE, wait);
     }
 }
@@ -1477,6 +1591,48 @@ bool deck_serial_service_web_disconnect(
     );
 }
 
+bool deck_serial_service_submit_web(
+    deck_serial_service_t *service,
+    uint64_t session_id,
+    uint64_t lease_id,
+    const uint8_t *bytes,
+    size_t size
+)
+{
+    if (service == nullptr || bytes == nullptr || size == 0 ||
+        size > DECK_SERIAL_ROUTER_BLOCK_BYTES || session_id == 0 ||
+        lease_id == 0 ||
+        service->stop_requested.load(std::memory_order_acquire)) {
+        return false;
+    }
+    deck_serial_session_snapshot_t snapshot{};
+    if (!deck_serial_service_snapshot(service, &snapshot) ||
+        snapshot.state != DECK_SERIAL_WEB_TX || !snapshot.uart_installed ||
+        snapshot.session_id != session_id || snapshot.lease_id != lease_id) {
+        return false;
+    }
+    WebInputBlock block{};
+    block.length = static_cast<uint16_t>(size);
+    block.session_id = session_id;
+    block.lease_id = lease_id;
+    std::memcpy(block.bytes, bytes, size);
+    bool submitted = false;
+    if (xSemaphoreTake(service->router_mutex, kOwnerPollTicks) == pdTRUE) {
+        submitted = service->data_path.web_input_blocks != nullptr &&
+                    xQueueSend(
+                        service->data_path.web_input_blocks,
+                        &block,
+                        0
+                    ) == pdTRUE;
+        xSemaphoreGive(service->router_mutex);
+    }
+    std::memset(&block, 0, sizeof(block));
+    if (submitted && service->owner_task != nullptr) {
+        xTaskNotifyGive(service->owner_task);
+    }
+    return submitted;
+}
+
 bool deck_serial_service_snapshot(
     deck_serial_service_t *service,
     deck_serial_session_snapshot_t *snapshot
@@ -1489,6 +1645,25 @@ bool deck_serial_service_snapshot(
     *snapshot = service->latest_snapshot;
     xSemaphoreGive(service->snapshot_mutex);
     return true;
+}
+
+bool deck_serial_service_command_result(
+    deck_serial_service_t *service,
+    uint64_t request_id,
+    deck_serial_command_result_t *result
+)
+{
+    if (service == nullptr || request_id == 0 || result == nullptr ||
+        xSemaphoreTake(service->snapshot_mutex, kOwnerPollTicks) != pdTRUE) {
+        return false;
+    }
+    const bool matches = service->has_latest_command_result &&
+                         service->latest_command_result.request_id == request_id;
+    if (matches) {
+        *result = service->latest_command_result;
+    }
+    xSemaphoreGive(service->snapshot_mutex);
+    return matches;
 }
 
 deck_serial_router_copy_result_t deck_serial_service_take(

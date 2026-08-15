@@ -94,6 +94,9 @@ void test_entry_switch_lease_and_exit()
     assert(result.lease_id != 0);
     const uint64_t lease_id = result.lease_id;
     assert(hardware.usb_clears == 1);
+    assert(deck_serial_session_accept_web_input(session, 1, lease_id));
+    assert(!deck_serial_session_accept_web_input(session, 2, lease_id));
+    assert(!deck_serial_session_accept_web_input(session, 1, lease_id + 1));
 
     // The exact request replays its prior result without touching queues or the lease.
     deck_serial_command_result_t replay{};
@@ -120,6 +123,7 @@ void test_entry_switch_lease_and_exit()
     deck_serial_session_tick(session, 2'199);
     state = snapshot(session);
     assert(state.state == DECK_SERIAL_USB_TX);
+    assert(!deck_serial_session_accept_web_input(session, 1, lease_id));
     assert(state.lease_id == 0);
     assert(hardware.web_clears == 1);
     assert(deck_serial_session_accept_usb_input(session, 1));

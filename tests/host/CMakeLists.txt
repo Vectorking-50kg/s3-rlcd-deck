@@ -94,6 +94,18 @@ deck_add_host_test(
     INCLUDE_DIRS ../../firmware/components/serial_service/include
 )
 deck_add_host_test(
+    test_serial_frame
+    SOURCES
+        test_serial_frame.cpp
+        ../../firmware/components/companion_link/deck_serial_frame.cpp
+        ../../firmware/components/companion_link/deck_serial_request_tracker.cpp
+    INCLUDE_DIRS ../../firmware/components/companion_link/include
+)
+target_compile_definitions(
+    test_serial_frame
+    PRIVATE DECK_REPOSITORY_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../.."
+)
+deck_add_host_test(
     test_pcf85063
     SOURCES
         test_pcf85063.cpp
@@ -213,6 +225,7 @@ deck_add_host_test(
         ../../firmware/components/companion_link/deck_companion_link_frame.cpp
         ../../firmware/components/companion_link/deck_companion_link_message.cpp
         ../../firmware/components/companion_link/deck_device_protocol.cpp
+        ../../firmware/components/companion_link/deck_serial_frame.cpp
         ../../firmware/components/transaction_store/deck_transaction_store.cpp
     INCLUDE_DIRS
         ../../firmware/components/ai_snapshot/include

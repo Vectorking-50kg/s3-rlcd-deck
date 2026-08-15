@@ -4,12 +4,17 @@
   "title": "S3 RLCD Deck Device Link control messages v1",
   "oneOf": [
     {"$ref": "#/$defs/device_hello"},
-    {"$ref": "#/$defs/device_heartbeat"}
+    {"$ref": "#/$defs/device_heartbeat"},
+    {"$ref": "#/$defs/serial_state"},
+    {"$ref": "#/$defs/serial_owner_request"},
+    {"$ref": "#/$defs/serial_owner_result"},
+    {"$ref": "#/$defs/serial_owner_activity"},
+    {"$ref": "#/$defs/serial_history_request"}
   ],
   "$defs": {
     "device_hello": {
       "type": "object",
-      "required": ["type", "protocol_version", "device_id", "firmware_version", "board", "capabilities", "serial_state"],
+      "required": ["type", "protocol_version", "device_id", "firmware_version", "board", "capabilities", "serial_state", "serial_session_id"],
       "properties": {
         "type": {"const": "device.hello"},
         "protocol_version": {"const": 1},
@@ -23,9 +28,94 @@
           "uniqueItems": true,
           "items": {"enum": ["display", "serial", "ota"]}
         },
-        "serial_state": {"const": "disarmed"}
+        "serial_state": {"enum": ["disarmed", "usb_tx", "web_tx"]},
+        "serial_session_id": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615}
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {"properties": {"serial_state": {"const": "disarmed"}}},
+          "then": {"properties": {"serial_session_id": {"const": 0}}},
+          "else": {
+            "properties": {
+              "serial_session_id": {"minimum": 1},
+              "capabilities": {"contains": {"const": "serial"}}
+            }
+          }
+        }
+      ]
+    },
+    "serial_state": {
+      "type": "object",
+      "required": ["type", "protocol_version", "serial_state", "serial_session_id", "owner_generation", "lease_id"],
+      "properties": {
+        "type": {"const": "serial.state"},
+        "protocol_version": {"const": 1},
+        "serial_state": {"enum": ["disarmed", "usb_tx", "web_tx"]},
+        "serial_session_id": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
+        "owner_generation": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
+        "lease_id": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615}
+      },
+      "additionalProperties": false,
+      "oneOf": [
+        {"properties": {"serial_state": {"const": "disarmed"}, "serial_session_id": {"const": 0}, "lease_id": {"const": 0}}},
+        {"properties": {"serial_state": {"const": "usb_tx"}, "serial_session_id": {"minimum": 1}, "lease_id": {"const": 0}}},
+        {"properties": {"serial_state": {"const": "web_tx"}, "serial_session_id": {"minimum": 1}, "lease_id": {"minimum": 1}}}
+      ]
+    },
+    "serial_owner_request": {
+      "type": "object",
+      "required": ["type", "protocol_version", "serial_session_id", "request_id", "enable"],
+      "properties": {
+        "type": {"const": "serial.owner.request"},
+        "protocol_version": {"const": 1},
+        "serial_session_id": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
+        "request_id": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
+        "enable": {"type": "boolean"}
       },
       "additionalProperties": false
+    },
+    "serial_owner_activity": {
+      "type": "object",
+      "required": ["type", "protocol_version", "serial_session_id", "lease_id"],
+      "properties": {
+        "type": {"const": "serial.owner.activity"},
+        "protocol_version": {"const": 1},
+        "serial_session_id": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
+        "lease_id": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615}
+      },
+      "additionalProperties": false
+    },
+    "serial_history_request": {
+      "type": "object",
+      "required": ["type", "protocol_version", "serial_session_id", "after_sequence"],
+      "properties": {
+        "type": {"const": "serial.history.request"},
+        "protocol_version": {"const": 1},
+        "serial_session_id": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
+        "after_sequence": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615}
+      },
+      "additionalProperties": false
+    },
+    "serial_owner_result": {
+      "type": "object",
+      "required": ["type", "protocol_version", "serial_session_id", "request_id", "code", "serial_state", "owner_generation", "lease_id"],
+      "properties": {
+        "type": {"const": "serial.owner.result"},
+        "protocol_version": {"const": 1},
+        "serial_session_id": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
+        "request_id": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
+        "code": {"enum": ["applied", "no_change", "stale_session", "stale_request", "uart_install_failed", "uart_uninstall_failed", "invalid"]},
+        "serial_state": {"enum": ["disarmed", "usb_tx", "web_tx"]},
+        "owner_generation": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
+        "lease_id": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615}
+      },
+      "additionalProperties": false,
+      "oneOf": [
+        {"properties": {"serial_state": {"const": "disarmed"}, "serial_session_id": {"const": 0}, "lease_id": {"const": 0}}},
+        {"properties": {"serial_state": {"const": "usb_tx"}, "serial_session_id": {"minimum": 1}, "lease_id": {"const": 0}}},
+        {"properties": {"serial_state": {"const": "web_tx"}, "serial_session_id": {"minimum": 1}, "lease_id": {"minimum": 1}}}
+      ]
     },
     "device_heartbeat": {
       "type": "object",

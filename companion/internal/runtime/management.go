@@ -66,6 +66,9 @@ func (application *Runtime) managementRoutes() http.Handler {
 		application.handleLogin,
 	))
 	mux.HandleFunc("GET /api/v1/status", application.requireManagementSession(application.handleStatus))
+	mux.HandleFunc("GET /api/v1/serial/status", application.requireManagementSession(application.handleSerialStatus))
+	mux.HandleFunc("GET /api/v1/serial/download", application.requireManagementSession(application.handleSerialDownload))
+	mux.HandleFunc("GET /api/v1/serial/observe", application.handleSerialObserve)
 	mux.HandleFunc("GET /api/v1/providers", application.requireManagementSession(application.handleProviders))
 	mux.HandleFunc("POST /api/v1/providers", limitManagementRequests(
 		sensitiveRateLimiter,

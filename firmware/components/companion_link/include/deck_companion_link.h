@@ -6,6 +6,7 @@
 
 #include "deck_ai_snapshot_store.h"
 #include "deck_companion_profiles.h"
+#include "deck_serial_service.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -39,6 +40,19 @@ typedef struct {
 deck_companion_link_t *deck_companion_link_start(
     deck_companion_profiles_t *profiles,
     const char *firmware_version
+);
+
+/*
+ * The Serial service is borrowed only while attached. Detach synchronizes
+ * with the Link owner before the caller may stop or destroy the service.
+ */
+bool deck_companion_link_attach_serial(
+    deck_companion_link_t *link,
+    deck_serial_service_t *serial
+);
+bool deck_companion_link_detach_serial(
+    deck_companion_link_t *link,
+    deck_serial_service_t *serial
 );
 
 bool deck_companion_link_snapshot(

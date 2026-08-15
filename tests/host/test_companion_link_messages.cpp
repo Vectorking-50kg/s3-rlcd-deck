@@ -1,5 +1,6 @@
 #include "deck_companion_link_message.h"
 #include "deck_companion_link_frame.h"
+#include "deck_serial_frame.h"
 
 #include <algorithm>
 #include <array>
@@ -240,11 +241,38 @@ void production_frame_reassembly_accepts_large_and_continuation_messages()
     assert(std::string(buffer.data(), frame.message_size) == near_limit);
 }
 
+void production_frame_reassembly_preserves_binary_opcode()
+{
+    std::array<char, DECK_SERIAL_FRAME_MAX_BYTES> buffer{};
+    deck_companion_link_frame_t frame{};
+    deck_companion_link_frame_init(&frame, buffer.data(), buffer.size());
+    const std::vector<uint8_t> binary = {
+        'S', 'R', 'D', '1', 2, 0, 0, 2,
+        0, 0, 0, 0, 0, 0, 0, 1,
+        0, 0, 0, 0, 0, 0, 0, 1,
+        0, 0, 0, 0, 0, 0, 0, 9,
+        0xaa, 0xbb,
+    };
+    assert(deck_companion_link_frame_accept(
+               &frame,
+               static_cast<int>(binary.size()),
+               0,
+               2,
+               true,
+               reinterpret_cast<const char *>(binary.data()),
+               binary.size()
+           ) == DECK_COMPANION_LINK_FRAME_COMPLETE);
+    assert(frame.message_opcode == 2);
+    assert(frame.message_size == binary.size());
+    assert(std::memcmp(buffer.data(), binary.data(), binary.size()) == 0);
+}
+
 }  // namespace
 
 int main()
 {
     heartbeat_and_snapshot_share_one_fail_closed_dispatch();
     production_frame_reassembly_accepts_large_and_continuation_messages();
+    production_frame_reassembly_preserves_binary_opcode();
     return 0;
 }
