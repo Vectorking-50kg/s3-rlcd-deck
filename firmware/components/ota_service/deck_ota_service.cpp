@@ -2,7 +2,7 @@
 
 #include "deck_ota_boot_health.h"
 #include "deck_ota_signing_keys.h"
-#include "deck_ota_transport_epoch.h"
+#include "deck_ota_transport_fence.h"
 
 #include <atomic>
 #include <cstring>
@@ -89,8 +89,7 @@ struct deck_ota_service {
     bool hash_active = false;
     char running_version[DECK_OTA_VERSION_CAPACITY]{};
     char active_transaction_id[DECK_OTA_TRANSACTION_ID_CAPACITY]{};
-    char aborted_transaction_id[DECK_OTA_TRANSACTION_ID_CAPACITY]{};
-    DeckOtaTransportEpoch transport_epoch{};
+    DeckOtaTransportFence transport_fence{};
     std::atomic<bool> transport_abort_requested{false};
 };
 
@@ -161,8 +160,15 @@ void flash_abort(void *context)
 bool flash_select_boot(void *context)
 {
     auto *service = static_cast<deck_ota_service_t *>(context);
-    return service->update_partition != nullptr &&
-           esp_ota_set_boot_partition(service->update_partition) == ESP_OK;
+    if (!service->transport_fence.try_begin_commit()) {
+        return false;
+    }
+    const bool selected = service->update_partition != nullptr &&
+                          esp_ota_set_boot_partition(
+                              service->update_partition
+                          ) == ESP_OK;
+    service->transport_fence.finish_commit();
+    return selected;
 }
 
 bool hash_begin(void *context)
@@ -294,13 +300,6 @@ deck_ota_transaction_t *create_transaction(deck_ota_service_t *service)
 
 void abort_transport_transaction(deck_ota_service_t *service)
 {
-    if (service->active_transaction_id[0] != '\0') {
-        std::memcpy(
-            service->aborted_transaction_id,
-            service->active_transaction_id,
-            sizeof(service->aborted_transaction_id)
-        );
-    }
     if (service->transaction != nullptr) {
         deck_ota_transaction_destroy(service->transaction);
         service->transaction = nullptr;
@@ -314,6 +313,7 @@ void abort_transport_transaction(deck_ota_service_t *service)
     while (xQueueReceive(service->results, &stale, 0) == pdTRUE) {
         secure_clear(&stale, sizeof(stale));
     }
+    service->transport_fence.finish_abort();
     xEventGroupSetBits(service->lifecycle, kTransportAbortCompleteBit);
 }
 
@@ -388,6 +388,7 @@ void ota_task(void *context)
                             service->active_transaction_id,
                             result
                         );
+                        service->transport_fence.end_transaction();
                         secure_clear(
                             service->active_transaction_id,
                             sizeof(service->active_transaction_id)
@@ -416,15 +417,11 @@ void ota_task(void *context)
             secure_clear(&command, sizeof(command));
             continue;
         }
-        if (!service->transport_epoch.accepts(command.transport_epoch)) {
+        if (!service->transport_fence.accepts(command.transport_epoch)) {
             secure_clear(&command, sizeof(command));
             continue;
         }
         if (command.kind == CommandKind::offer) {
-            secure_clear(
-                service->aborted_transaction_id,
-                sizeof(service->aborted_transaction_id)
-            );
             if (service->transaction != nullptr) {
                 deck_ota_transaction_snapshot_t active{};
                 if (deck_ota_transaction_snapshot(service->transaction, &active) &&
@@ -438,6 +435,13 @@ void ota_task(void *context)
                     continue;
                 }
                 deck_ota_transaction_destroy(service->transaction);
+                service->transport_fence.end_transaction();
+            }
+            if (!service->transport_fence.begin_transaction(
+                    command.transport_epoch
+                )) {
+                secure_clear(&command, sizeof(command));
+                continue;
             }
             service->transaction = create_transaction(service);
             service->adapter_manifest = command.manifest;
@@ -457,19 +461,13 @@ void ota_task(void *context)
                                                    );
             publish_result(service, command.transaction_id, result);
             if (result != DECK_OTA_OK) {
+                service->transport_fence.end_transaction();
                 secure_clear(
                     service->active_transaction_id,
                     sizeof(service->active_transaction_id)
                 );
             }
         } else {
-            if (std::strcmp(
-                    service->aborted_transaction_id,
-                    command.transaction_id
-                ) == 0) {
-                secure_clear(&command, sizeof(command));
-                continue;
-            }
             if (service->transaction == nullptr ||
                 std::strcmp(
                     service->active_transaction_id,
@@ -494,6 +492,7 @@ void ota_task(void *context)
                 );
             publish_result(service, command.transaction_id, result);
             if (result != DECK_OTA_OK || command.final) {
+                service->transport_fence.end_transaction();
                 secure_clear(
                     service->active_transaction_id,
                     sizeof(service->active_transaction_id)
@@ -621,7 +620,6 @@ bool deck_ota_service_stop(deck_ota_service_t *service)
     secure_clear(service->adapter_manifest.signature, sizeof(service->adapter_manifest.signature));
     secure_clear(service->running_version, sizeof(service->running_version));
     secure_clear(service->active_transaction_id, sizeof(service->active_transaction_id));
-    secure_clear(service->aborted_transaction_id, sizeof(service->aborted_transaction_id));
     delete service;
     return true;
 }
@@ -638,7 +636,7 @@ bool deck_ota_service_offer(
     }
     Command command{};
     command.kind = CommandKind::offer;
-    command.transport_epoch = service->transport_epoch.capture();
+    command.transport_epoch = service->transport_fence.capture_epoch();
     std::strcpy(command.transaction_id, transaction_id);
     command.manifest = *manifest;
     const bool queued = xQueueSend(service->commands, &command, kQueueTicks) == pdTRUE;
@@ -661,7 +659,7 @@ bool deck_ota_service_write(
     }
     Command command{};
     command.kind = CommandKind::chunk;
-    command.transport_epoch = service->transport_epoch.capture();
+    command.transport_epoch = service->transport_fence.capture_epoch();
     std::strcpy(command.transaction_id, transaction_id);
     command.offset = offset;
     command.size = size;
@@ -686,10 +684,11 @@ bool deck_ota_service_abort_transport(deck_ota_service_t *service)
     if (service == nullptr) {
         return true;
     }
-    // Advance before waking the worker so every command already in the queue is
-    // stale even when the abort command is inserted ahead of it.
-    service->transport_epoch.advance();
     xEventGroupClearBits(service->lifecycle, kTransportAbortCompleteBit);
+    // This is the abort/commit linearization point. It both rejects queued old
+    // commands and prevents a final chunk that has not begun boot-slot commit
+    // from selecting the candidate partition.
+    service->transport_fence.begin_abort();
     service->transport_abort_requested.store(true, std::memory_order_release);
     Command command{};
     command.kind = CommandKind::abort_transport;

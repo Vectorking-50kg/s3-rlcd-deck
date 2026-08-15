@@ -224,10 +224,10 @@ deck_add_host_test(
     INCLUDE_DIRS ../../firmware/components/ota_service/include
 )
 deck_add_host_test(
-    test_ota_transport_epoch
+    test_ota_transport_fence
     SOURCES
-        test_ota_transport_epoch.cpp
-        ../../firmware/components/ota_service/deck_ota_transport_epoch.cpp
+        test_ota_transport_fence.cpp
+        ../../firmware/components/ota_service/deck_ota_transport_fence.cpp
     INCLUDE_DIRS ../../firmware/components/ota_service
 )
 deck_add_host_test(
