@@ -4,6 +4,7 @@ idf_component_register(
         "deck_ota_protocol.cpp"
         "deck_ota_signing_keys.cpp"
         "deck_ota_service.cpp"
+        "deck_ota_transport_epoch.cpp"
         "deck_ota_transaction.cpp"
     INCLUDE_DIRS "include"
     REQUIRES

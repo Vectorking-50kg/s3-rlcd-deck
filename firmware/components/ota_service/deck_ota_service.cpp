@@ -2,6 +2,7 @@
 
 #include "deck_ota_boot_health.h"
 #include "deck_ota_signing_keys.h"
+#include "deck_ota_transport_epoch.h"
 
 #include <atomic>
 #include <cstring>
@@ -32,6 +33,7 @@ enum class CommandKind : uint8_t { offer, chunk, abort_transport, stop };
 
 struct Command {
     CommandKind kind = CommandKind::stop;
+    uint32_t transport_epoch = 0;
     char transaction_id[DECK_OTA_TRANSACTION_ID_CAPACITY]{};
     deck_ota_manifest_t manifest{};
     uint32_t offset = 0;
@@ -88,6 +90,7 @@ struct deck_ota_service {
     char running_version[DECK_OTA_VERSION_CAPACITY]{};
     char active_transaction_id[DECK_OTA_TRANSACTION_ID_CAPACITY]{};
     char aborted_transaction_id[DECK_OTA_TRANSACTION_ID_CAPACITY]{};
+    DeckOtaTransportEpoch transport_epoch{};
     std::atomic<bool> transport_abort_requested{false};
 };
 
@@ -413,6 +416,10 @@ void ota_task(void *context)
             secure_clear(&command, sizeof(command));
             continue;
         }
+        if (!service->transport_epoch.accepts(command.transport_epoch)) {
+            secure_clear(&command, sizeof(command));
+            continue;
+        }
         if (command.kind == CommandKind::offer) {
             secure_clear(
                 service->aborted_transaction_id,
@@ -631,6 +638,7 @@ bool deck_ota_service_offer(
     }
     Command command{};
     command.kind = CommandKind::offer;
+    command.transport_epoch = service->transport_epoch.capture();
     std::strcpy(command.transaction_id, transaction_id);
     command.manifest = *manifest;
     const bool queued = xQueueSend(service->commands, &command, kQueueTicks) == pdTRUE;
@@ -653,6 +661,7 @@ bool deck_ota_service_write(
     }
     Command command{};
     command.kind = CommandKind::chunk;
+    command.transport_epoch = service->transport_epoch.capture();
     std::strcpy(command.transaction_id, transaction_id);
     command.offset = offset;
     command.size = size;
@@ -677,6 +686,9 @@ bool deck_ota_service_abort_transport(deck_ota_service_t *service)
     if (service == nullptr) {
         return true;
     }
+    // Advance before waking the worker so every command already in the queue is
+    // stale even when the abort command is inserted ahead of it.
+    service->transport_epoch.advance();
     xEventGroupClearBits(service->lifecycle, kTransportAbortCompleteBit);
     service->transport_abort_requested.store(true, std::memory_order_release);
     Command command{};
