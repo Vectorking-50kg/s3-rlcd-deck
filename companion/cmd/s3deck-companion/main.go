@@ -92,6 +92,12 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		"",
 		"read exact backup passphrase bytes from an owner-only file",
 	)
+	installCompanion := flags.Bool("install", false, "install this Companion for the current user and enable login startup")
+	uninstallCompanion := flags.Bool("uninstall", false, "remove login startup while retaining user data and rollback files")
+	enableLogin := flags.Bool("enable-login", false, "enable the installed Companion at login")
+	disableLogin := flags.Bool("disable-login", false, "disable the installed Companion at login")
+	installationStatus := flags.Bool("installation-status", false, "print the current per-user installation status")
+	installationRoot := flags.String("installation-root", "", "override the per-user installation root")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
@@ -114,7 +120,18 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			return 2
 		}
 	}
-	instance, err := desktop.AcquireSingleInstance(resolvedDataDirectory)
+	if lifecycleCommandRequested(
+		*installCompanion, *uninstallCompanion, *enableLogin, *disableLogin, *installationStatus,
+	) {
+		return runInstallationCommand(installationCommandConfig{
+			Install: *installCompanion, Uninstall: *uninstallCompanion,
+			Enable: *enableLogin, Disable: *disableLogin, Status: *installationStatus,
+			Root: *installationRoot, DataDirectory: resolvedDataDirectory,
+			DeviceHubAddress: installedDeviceHubAddress(*deviceHubAddress, explicitFlags),
+			Version:          version, Commit: commit, ExplicitFlags: explicitFlags,
+		}, stdout, stderr)
+	}
+	instance, err := acquireRuntimeInstance(resolvedDataDirectory)
 	if err != nil {
 		fmt.Fprintf(stderr, "cannot start Companion: %v\n", err)
 		return 2

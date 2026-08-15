@@ -12,6 +12,17 @@ _Avoid_: Board, terminal device
 The trusted desktop application that collects provider data, manages credentials, serves the full Web console, and coordinates connected Decks.
 _Avoid_: Agent, PC service, host app
 
+**Installation Transaction**:
+The recoverable per-user operation that stages one immutable Companion executable, snapshots
+schema-bearing data before migration, updates login startup, and either commits one Installation
+State or restores the prior executable, data, and startup registration.
+_Avoid_: In-place update, setup script, auto-updater
+
+**Login Startup Registration**:
+The macOS LaunchAgent or Windows Task Scheduler entry owned by one Installation State. Disabling it
+changes future login startup; it is distinct from stopping the currently running Companion.
+_Avoid_: Background service, daemon install, system service
+
 **Provider**:
 An AI service or local AI tool whose quota, balance, usage, or session state is normalized for presentation.
 _Avoid_: Account, collector
