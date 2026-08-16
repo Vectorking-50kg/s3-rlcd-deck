@@ -216,7 +216,14 @@ func (manager *Manager) Apply(ctx context.Context, request Request) (
 		return Status{}, fmt.Errorf("%w: commit installation journal", ErrUnavailable)
 	}
 	committed = true
-	return manager.statusFromState(ctx, next, true)
+	// Configure and SetEnabled are the mutating platform acknowledgements. Once
+	// their state and the journal commit are durable, a redundant query must not
+	// turn a successful installation into a reported rollback failure.
+	return Status{
+		Installed: true, Enabled: true, Version: next.Version, Commit: next.Commit,
+		ActiveExecutable: next.ActiveExecutable, PreviousVersion: next.PreviousVersion,
+		Platform: manager.platform.Name(),
+	}, nil
 }
 
 func (manager *Manager) SetEnabled(ctx context.Context, enabled bool) (resultErr error) {

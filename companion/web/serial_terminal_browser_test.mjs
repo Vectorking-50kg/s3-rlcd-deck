@@ -206,7 +206,7 @@ async function connectCDP(url) {
   return new CDPClient(socket);
 }
 
-async function waitForFile(filePath, processHandle, timeoutMS = 10000) {
+async function waitForFile(filePath, processHandle, timeoutMS = 30000) {
   const deadline = Date.now() + timeoutMS;
   while (Date.now() < deadline) {
     if (processHandle.exitCode !== null) throw new Error("browser exited before publishing DevToolsActivePort");
@@ -228,7 +228,12 @@ async function main() {
     ], { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
     let browserErrors = "";
     browser.stderr.on("data", (chunk) => { browserErrors = (browserErrors + chunk).slice(-8192); });
-    const activePort = await waitForFile(path.join(profile, "DevToolsActivePort"), browser);
+    let activePort;
+    try {
+      activePort = await waitForFile(path.join(profile, "DevToolsActivePort"), browser);
+    } catch (error) {
+      throw new Error(`${error.message}\n${browserErrors}`);
+    }
     const port = Number(activePort.split(/\r?\n/, 1)[0]);
     if (!Number.isInteger(port) || port < 1) throw new Error("browser returned an invalid debugging port");
     const address = server.address();

@@ -11,14 +11,17 @@ import (
 )
 
 type fakeController struct {
-	mu        sync.Mutex
-	status    companionruntime.Status
-	starts    int
-	stops     int
-	accesses  int
-	startErr  error
-	stopErr   error
-	accessErr error
+	mu          sync.Mutex
+	status      companionruntime.Status
+	starts      int
+	stops       int
+	accesses    int
+	startErr    error
+	stopErr     error
+	accessErr   error
+	stopEntered chan struct{}
+	stopRelease chan struct{}
+	stopOnce    sync.Once
 }
 
 func (controller *fakeController) Start() error {
@@ -33,6 +36,12 @@ func (controller *fakeController) Start() error {
 }
 
 func (controller *fakeController) Stop(context.Context) error {
+	if controller.stopEntered != nil {
+		controller.stopOnce.Do(func() { close(controller.stopEntered) })
+	}
+	if controller.stopRelease != nil {
+		<-controller.stopRelease
+	}
 	controller.mu.Lock()
 	defer controller.mu.Unlock()
 	controller.stops++
@@ -41,6 +50,65 @@ func (controller *fakeController) Stop(context.Context) error {
 	}
 	controller.status.State = companionruntime.StateStopped
 	return nil
+}
+
+func TestShellClosesNativeLoopBeforeAndWaitsForBoundedRuntimeStop(t *testing.T) {
+	controller := &fakeController{
+		status:      companionruntime.Status{State: companionruntime.StateReady},
+		stopEntered: make(chan struct{}),
+		stopRelease: make(chan struct{}),
+	}
+	tray := newFakeTray()
+	shell, err := NewShell(controller, tray, []byte("png"), func(string) error { return nil })
+	if err != nil {
+		t.Fatalf("NewShell() error = %v", err)
+	}
+	runDone := make(chan error, 1)
+	go func() { runDone <- shell.Run() }()
+	select {
+	case <-tray.shown:
+	case <-time.After(time.Second):
+		t.Fatal("shell did not show tray")
+	}
+	closeDone := make(chan struct{})
+	go func() {
+		shell.Close()
+		close(closeDone)
+	}()
+	select {
+	case <-controller.stopEntered:
+	case <-time.After(time.Second):
+		t.Fatal("shell did not begin runtime stop")
+	}
+	select {
+	case <-tray.closed:
+	default:
+		t.Fatal("native tray remained open while runtime stop was blocked")
+	}
+	select {
+	case err = <-runDone:
+		t.Fatalf("Shell.Run() returned before runtime stop completed: %v", err)
+	default:
+	}
+	select {
+	case <-closeDone:
+		t.Fatal("Shell.Close() returned before runtime stop completed")
+	default:
+	}
+	close(controller.stopRelease)
+	select {
+	case <-closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("Shell.Close() did not finish after runtime stop completed")
+	}
+	select {
+	case err = <-runDone:
+		if err != nil {
+			t.Fatalf("Shell.Run() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Shell.Run() did not finish after runtime stop completed")
+	}
 }
 
 func (controller *fakeController) Status() companionruntime.Status {

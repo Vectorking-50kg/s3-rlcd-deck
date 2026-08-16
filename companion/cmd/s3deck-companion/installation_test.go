@@ -53,6 +53,65 @@ func TestRuntimeDoesNotWaitForRealSecondInstance(t *testing.T) {
 	}
 }
 
+func TestInstallationWaitsForStoppingRuntime(t *testing.T) {
+	directory := t.TempDir()
+	instance, err := desktop.AcquireSingleInstance(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	released := make(chan struct{})
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		_ = instance.Close()
+		close(released)
+	}()
+	maintenance, acquired, err := acquireInstallationFences(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer maintenance.Close()
+	defer acquired.Close()
+	<-released
+}
+
+func TestInstallationFailureMessagesAreStableAndSpecific(t *testing.T) {
+	for _, test := range []struct {
+		err  error
+		want string
+	}{
+		{installation.ErrPlatformIdentity, "current-user identity failed"},
+		{installation.ErrPlatformDefinition, "startup definition failed"},
+		{installation.ErrPlatformRegister, "platform registration failed"},
+		{installation.ErrPlatformMarker, "ownership marker failed"},
+		{installation.ErrPlatformEnable, "startup enablement failed"},
+		{installation.ErrPlatform, "login startup registration failed"},
+		{installation.ErrMigration, "data migration failed"},
+		{os.ErrPermission, "installation failed"},
+	} {
+		message := installationApplyFailureMessage(test.err)
+		if !strings.Contains(message, test.want) || !strings.Contains(message, "prior state was restored") {
+			t.Fatalf("failure message for %v = %q", test.err, message)
+		}
+	}
+}
+
+func TestInstallationStatusFailureMessagesAreStableAndSpecific(t *testing.T) {
+	for _, test := range []struct {
+		err  error
+		want string
+	}{
+		{installation.ErrPlatformQuery, "status query failed"},
+		{installation.ErrPlatformDecode, "status decode failed"},
+		{installation.ErrPlatformMarker, "ownership marker is invalid"},
+		{os.ErrPermission, "status is unavailable"},
+	} {
+		message := installationStatusFailureMessage(test.err)
+		if !strings.Contains(message, test.want) {
+			t.Fatalf("status failure message for %v = %q", test.err, message)
+		}
+	}
+}
+
 func TestDeviceHubOverrideBelongsOnlyToInstall(t *testing.T) {
 	if !onlyInstallationFlags(installationCommandConfig{
 		Install: true, ExplicitFlags: map[string]bool{

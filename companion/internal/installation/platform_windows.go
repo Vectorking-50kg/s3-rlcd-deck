@@ -3,14 +3,19 @@
 package installation
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/xml"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/protectedfile"
+	"golang.org/x/sys/windows"
 )
 
 const scheduledTaskNamePrefix = `S3 RLCD Deck Companion`
@@ -38,24 +43,100 @@ func DefaultRootDirectory() (string, error) {
 func (*windowsAdapter) Name() string { return "task_scheduler" }
 
 func (adapter *windowsAdapter) Configure(ctx context.Context, spec launchSpec) error {
-	command := windowsCommandLine([]string{
-		spec.Executable, "--data-directory", spec.DataDirectory,
+	sid, err := currentWindowsUserSID()
+	if err != nil {
+		return errors.Join(ErrPlatformIdentity, err)
+	}
+	document, err := scheduledTaskDocument(spec, sid)
+	if err != nil {
+		return errors.Join(ErrPlatformDefinition, err)
+	}
+	definitionPath := filepath.Join(filepath.Dir(adapter.markerPath), "task-scheduler-definition.xml")
+	if _, err = protectedfile.Replace(definitionPath, document); err != nil {
+		return errors.Join(ErrPlatformDefinition, err)
+	}
+	clear(document)
+	_, configureErr := runPlatformCommand(
+		ctx, "schtasks.exe", "/Create", "/TN", adapter.taskName,
+		"/XML", definitionPath, "/F",
+	)
+	removeErr := os.Remove(definitionPath)
+	if configureErr != nil {
+		return errors.Join(ErrPlatformRegister, configureErr, removeErr)
+	}
+	if removeErr != nil {
+		_, _ = runPlatformCommand(ctx, "schtasks.exe", "/Delete", "/TN", adapter.taskName, "/F")
+		return errors.Join(ErrPlatformDefinition, removeErr)
+	}
+	_, err = protectedfile.Replace(adapter.markerPath, []byte("v1\n"))
+	if err != nil {
+		_, _ = runPlatformCommand(ctx, "schtasks.exe", "/Delete", "/TN", adapter.taskName, "/F")
+		return errors.Join(ErrPlatformMarker, err)
+	}
+	return nil
+}
+
+func currentWindowsUserSID() (string, error) {
+	token, err := windows.OpenCurrentProcessToken()
+	if err != nil {
+		return "", err
+	}
+	defer token.Close()
+	user, err := token.GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil {
+		return "", ErrPlatform
+	}
+	return user.User.Sid.String(), nil
+}
+
+func scheduledTaskDocument(spec launchSpec, sid string) ([]byte, error) {
+	if spec.Executable == "" || spec.DataDirectory == "" || spec.DeviceHubAddress == "" || sid == "" {
+		return nil, ErrPlatform
+	}
+	arguments := windowsCommandLine([]string{
+		"--data-directory", spec.DataDirectory,
 		"--device-hub-address", spec.DeviceHubAddress,
 	})
-	_, err := runPlatformCommand(
-		ctx, "schtasks.exe", "/Create", "/SC", "ONLOGON", "/TN", adapter.taskName,
-		"/TR", command, "/RL", "LIMITED", "/IT", "/F",
-	)
-	if err == nil {
-		_, err = runPlatformCommand(ctx, "schtasks.exe", "/Change", "/TN", adapter.taskName, "/DISABLE")
+	var document bytes.Buffer
+	document.WriteString(`<?xml version="1.0" encoding="UTF-16"?>`)
+	document.WriteString(`<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">`)
+	document.WriteString(`<RegistrationInfo><Description>S3 RLCD Deck Companion per-user startup</Description></RegistrationInfo>`)
+	document.WriteString(`<Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>`)
+	document.WriteString(`<Principals><Principal id="CurrentUser"><UserId>`)
+	if err := xml.EscapeText(&document, []byte(sid)); err != nil {
+		return nil, err
 	}
-	if err == nil {
-		_, err = protectedfile.Replace(adapter.markerPath, []byte("v1\n"))
-		if err != nil {
-			_, _ = runPlatformCommand(ctx, "schtasks.exe", "/Delete", "/TN", adapter.taskName, "/F")
-		}
+	document.WriteString(`</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>`)
+	document.WriteString(`<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>`)
+	document.WriteString(`<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>`)
+	document.WriteString(`<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>`)
+	document.WriteString(`<AllowHardTerminate>true</AllowHardTerminate><StartWhenAvailable>true</StartWhenAvailable>`)
+	document.WriteString(`<RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>`)
+	document.WriteString(`<IdleSettings><StopOnIdleEnd>false</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings>`)
+	document.WriteString(`<AllowStartOnDemand>true</AllowStartOnDemand><Enabled>false</Enabled>`)
+	document.WriteString(`<Hidden>false</Hidden><RunOnlyIfIdle>false</RunOnlyIfIdle><WakeToRun>false</WakeToRun>`)
+	document.WriteString(`<ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Priority>7</Priority></Settings>`)
+	document.WriteString(`<Actions Context="CurrentUser"><Exec><Command>`)
+	if err := xml.EscapeText(&document, []byte(spec.Executable)); err != nil {
+		return nil, err
 	}
-	return err
+	document.WriteString(`</Command><Arguments>`)
+	if err := xml.EscapeText(&document, []byte(arguments)); err != nil {
+		return nil, err
+	}
+	document.WriteString(`</Arguments></Exec></Actions></Task>`)
+	return utf16LEDocument(document.String()), nil
+}
+
+func utf16LEDocument(value string) []byte {
+	encoded := utf16.Encode([]rune(value))
+	document := make([]byte, 2+len(encoded)*2)
+	document[0] = 0xff
+	document[1] = 0xfe
+	for index, unit := range encoded {
+		binary.LittleEndian.PutUint16(document[2+index*2:], unit)
+	}
+	return document
 }
 
 func (adapter *windowsAdapter) SetEnabled(ctx context.Context, enabled bool) error {
@@ -64,7 +145,10 @@ func (adapter *windowsAdapter) SetEnabled(ctx context.Context, enabled bool) err
 		action = "/ENABLE"
 	}
 	_, err := runPlatformCommand(ctx, "schtasks.exe", "/Change", "/TN", adapter.taskName, action)
-	return err
+	if err != nil {
+		return errors.Join(ErrPlatformEnable, err)
+	}
+	return nil
 }
 
 func (adapter *windowsAdapter) Remove(ctx context.Context) error {
@@ -100,13 +184,13 @@ func (adapter *windowsAdapter) Status(ctx context.Context) (platformStatus, erro
 	)
 	if err != nil {
 		if marker {
-			return platformStatus{}, err
+			return platformStatus{}, errors.Join(ErrPlatformQuery, err)
 		}
 		return platformStatus{}, nil
 	}
 	enabled, parseErr := scheduledTaskEnabled(document)
 	if parseErr != nil {
-		return platformStatus{}, parseErr
+		return platformStatus{}, errors.Join(ErrPlatformDecode, parseErr)
 	}
 	return platformStatus{
 		Installed: true,
@@ -127,15 +211,123 @@ func ordinaryWindowsMarker(path string) (bool, error) {
 }
 
 func scheduledTaskEnabled(document []byte) (bool, error) {
+	normalized, err := normalizeScheduledTaskXML(document)
+	if err != nil {
+		return false, ErrPlatform
+	}
 	var task struct {
-		Settings struct {
+		XMLName  xml.Name `xml:"Task"`
+		Settings *struct {
 			Enabled *bool `xml:"Enabled"`
 		} `xml:"Settings"`
 	}
-	if err := xml.Unmarshal(document, &task); err != nil || task.Settings.Enabled == nil {
+	if err = xml.Unmarshal(normalized, &task); err != nil || task.Settings == nil {
 		return false, ErrPlatform
 	}
+	// Task Scheduler's schema gives Settings/Enabled a default of true and
+	// schtasks may omit the element after /ENABLE. Absence is therefore the
+	// enabled state, not malformed status output.
+	if task.Settings.Enabled == nil {
+		return true, nil
+	}
 	return *task.Settings.Enabled, nil
+}
+
+func normalizeScheduledTaskXML(document []byte) ([]byte, error) {
+	var decoded string
+	var err error
+	switch {
+	case len(document) >= 2 && document[0] == 0xff && document[1] == 0xfe:
+		if (len(document)-2)%2 != 0 {
+			return nil, ErrPlatform
+		}
+		units := make([]uint16, (len(document)-2)/2)
+		for index := range units {
+			units[index] = binary.LittleEndian.Uint16(document[2+index*2:])
+		}
+		decoded, err = decodeUTF16TaskDocument(units)
+		if err != nil {
+			return nil, err
+		}
+	case len(document) >= 2 && document[0] == 0xfe && document[1] == 0xff:
+		if (len(document)-2)%2 != 0 {
+			return nil, ErrPlatform
+		}
+		units := make([]uint16, (len(document)-2)/2)
+		for index := range units {
+			units[index] = binary.BigEndian.Uint16(document[2+index*2:])
+		}
+		decoded, err = decodeUTF16TaskDocument(units)
+		if err != nil {
+			return nil, err
+		}
+	case len(document) >= 2 && len(document)%2 == 0 && looksLikeUTF16XML(document, binary.LittleEndian):
+		units := make([]uint16, len(document)/2)
+		for index := range units {
+			units[index] = binary.LittleEndian.Uint16(document[index*2:])
+		}
+		decoded, err = decodeUTF16TaskDocument(units)
+		if err != nil {
+			return nil, err
+		}
+	case len(document) >= 2 && len(document)%2 == 0 && looksLikeUTF16XML(document, binary.BigEndian):
+		units := make([]uint16, len(document)/2)
+		for index := range units {
+			units[index] = binary.BigEndian.Uint16(document[index*2:])
+		}
+		decoded, err = decodeUTF16TaskDocument(units)
+		if err != nil {
+			return nil, err
+		}
+	case utf8.Valid(document):
+		decoded = string(document)
+	default:
+		return nil, ErrPlatform
+	}
+	decoded = strings.TrimPrefix(decoded, "\ufeff")
+	decoded = strings.TrimLeft(decoded, " \t\r\n")
+	if strings.HasPrefix(decoded, "<?xml") {
+		declarationEnd := strings.Index(decoded, "?>")
+		if declarationEnd < 0 {
+			return nil, ErrPlatform
+		}
+		decoded = decoded[declarationEnd+2:]
+	}
+	return []byte(decoded), nil
+}
+
+func looksLikeUTF16XML(document []byte, order binary.ByteOrder) bool {
+	limit := min(len(document)/2, 64)
+	var prefix strings.Builder
+	for index := 0; index < limit; index++ {
+		unit := order.Uint16(document[index*2:])
+		if unit > 0x7f {
+			return false
+		}
+		prefix.WriteByte(byte(unit))
+	}
+	trimmed := strings.TrimLeft(prefix.String(), " \t\r\n")
+	return strings.HasPrefix(trimmed, "<?xml") || strings.HasPrefix(trimmed, "<Task")
+}
+
+func decodeUTF16TaskDocument(units []uint16) (string, error) {
+	var decoded strings.Builder
+	for index := 0; index < len(units); index++ {
+		unit := units[index]
+		switch {
+		case unit >= 0xd800 && unit <= 0xdbff:
+			if index+1 >= len(units) || units[index+1] < 0xdc00 || units[index+1] > 0xdfff {
+				return "", ErrPlatform
+			}
+			decoded.WriteRune(utf16.DecodeRune(rune(unit), rune(units[index+1])))
+			index++
+		case unit >= 0xdc00 && unit <= 0xdfff:
+			return "", ErrPlatform
+		default:
+			decoded.WriteRune(rune(unit))
+		}
+	}
+	return decoded.String(), nil
 }
 
 func windowsCommandLine(arguments []string) string {

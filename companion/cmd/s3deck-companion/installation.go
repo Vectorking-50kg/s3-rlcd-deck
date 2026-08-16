@@ -27,6 +27,11 @@ type installationCommandConfig struct {
 	ExplicitFlags    map[string]bool
 }
 
+const (
+	installationInstanceReleaseTimeout = 5 * time.Second
+	installationInstanceRetryInterval  = 100 * time.Millisecond
+)
+
 func lifecycleCommandRequested(values ...bool) bool {
 	count := 0
 	for _, value := range values {
@@ -124,7 +129,7 @@ func runInstallationCommand(
 			})
 		}
 		if executableErr != nil {
-			fmt.Fprintln(stderr, "Companion installation failed and prior state was restored")
+			fmt.Fprintln(stderr, installationApplyFailureMessage(executableErr))
 			return 1
 		}
 		fmt.Fprintln(stdout, "Companion installed for login startup")
@@ -149,7 +154,7 @@ func runInstallationCommand(
 	case config.Status:
 		status, statusErr := manager.Status(ctx)
 		if statusErr != nil {
-			fmt.Fprintln(stderr, "Companion installation status is unavailable")
+			fmt.Fprintln(stderr, installationStatusFailureMessage(statusErr))
 			return 1
 		}
 		encoder := json.NewEncoder(stdout)
@@ -171,6 +176,40 @@ func runInstallationCommand(
 	return 0
 }
 
+func installationStatusFailureMessage(err error) string {
+	switch {
+	case errors.Is(err, installation.ErrPlatformQuery):
+		return "Companion login startup status query failed"
+	case errors.Is(err, installation.ErrPlatformDecode):
+		return "Companion login startup status decode failed"
+	case errors.Is(err, installation.ErrPlatformMarker):
+		return "Companion login startup ownership marker is invalid"
+	default:
+		return "Companion installation status is unavailable"
+	}
+}
+
+func installationApplyFailureMessage(err error) string {
+	switch {
+	case errors.Is(err, installation.ErrPlatformIdentity):
+		return "Companion login startup current-user identity failed and prior state was restored"
+	case errors.Is(err, installation.ErrPlatformDefinition):
+		return "Companion login startup definition failed and prior state was restored"
+	case errors.Is(err, installation.ErrPlatformRegister):
+		return "Companion login startup platform registration failed and prior state was restored"
+	case errors.Is(err, installation.ErrPlatformMarker):
+		return "Companion login startup ownership marker failed and prior state was restored"
+	case errors.Is(err, installation.ErrPlatformEnable):
+		return "Companion login startup enablement failed and prior state was restored"
+	case errors.Is(err, installation.ErrPlatform):
+		return "Companion login startup registration failed and prior state was restored"
+	case errors.Is(err, installation.ErrMigration):
+		return "Companion data migration failed and prior state was restored"
+	default:
+		return "Companion installation failed and prior state was restored"
+	}
+}
+
 func acquireInstallationFences(dataDirectory string) (
 	*installation.Maintenance,
 	*desktop.SingleInstance,
@@ -180,12 +219,18 @@ func acquireInstallationFences(dataDirectory string) (
 	if err != nil {
 		return nil, nil, err
 	}
-	instance, err := desktop.AcquireSingleInstance(dataDirectory)
-	if err != nil {
-		_ = maintenance.Close()
-		return nil, nil, err
+	deadline := time.Now().Add(installationInstanceReleaseTimeout)
+	for {
+		instance, instanceErr := desktop.AcquireSingleInstance(dataDirectory)
+		if instanceErr == nil {
+			return maintenance, instance, nil
+		}
+		if !errors.Is(instanceErr, desktop.ErrAlreadyRunning) || !time.Now().Before(deadline) {
+			_ = maintenance.Close()
+			return nil, nil, instanceErr
+		}
+		time.Sleep(installationInstanceRetryInterval)
 	}
-	return maintenance, instance, nil
 }
 
 func exactlyOneLifecycleCommand(config installationCommandConfig) bool {

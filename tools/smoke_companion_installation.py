@@ -19,16 +19,29 @@ import urllib.request
 from smoke_companion_artifact import delete_smoke_credential
 
 
+class InstallationCommandError(subprocess.SubprocessError):
+    """A bounded, redacted lifecycle command failure safe for retry/reporting."""
+
+
 def run(executable: Path, arguments: list[str], timeout: float = 120) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    completed = subprocess.run(
         [str(executable), *arguments],
-        check=True,
+        check=False,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         timeout=timeout,
         env=os.environ.copy(),
     )
+    if completed.returncode != 0:
+        # Lifecycle commands emit bounded, fixed messages and never credentials.
+        # Preserve those diagnostics without echoing argv, which contains local paths.
+        raise InstallationCommandError(
+            "installation command failed "
+            f"(exit={completed.returncode}, stdout={completed.stdout.strip()!r}, "
+            f"stderr={completed.stderr.strip()!r})"
+        )
+    return completed
 
 
 def common(root: Path, data: Path) -> list[str]:
@@ -91,15 +104,18 @@ def wait_for_status(
 ) -> dict[str, object]:
     deadline = time.monotonic() + timeout
     last: dict[str, object] = {}
+    last_error = ""
     while time.monotonic() < deadline:
         try:
             last = status(executable, root, data)
             if predicate(last):
                 return last
-        except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
-            pass
+        except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
+            last_error = str(error)
         time.sleep(0.2)
-    raise RuntimeError(f"installation state did not converge: {last!r}")
+    raise RuntimeError(
+        f"installation state did not converge: {last!r}; last_error={last_error!r}"
+    )
 
 
 def wait_for_bootstrap(expected_version: str, timeout: float = 15) -> None:
@@ -203,6 +219,10 @@ def main() -> int:
                 raise RuntimeError("upgrade did not retain both executable versions")
         finally:
             stop_registered_process(root)
+            try:
+                wait_for_bootstrap_closed(timeout=15)
+            except RuntimeError:
+                pass
             for executable in cleanup_executables:
                 try:
                     run(executable, ["--uninstall", *common(root, data)], timeout=30)

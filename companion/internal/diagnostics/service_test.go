@@ -20,6 +20,11 @@ import (
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/protectedfile"
 )
 
+// Private file replacement performs platform-native permission checks for
+// every rotated segment. Keep the test operation bounded while allowing the
+// slower Windows and Intel macOS CI filesystems to exercise the full workload.
+const testIOTimeout = 15 * time.Second
+
 func TestRecordRejectsSecretShapedAndUnboundedFields(t *testing.T) {
 	service := openTestService(t, Config{})
 	canaries := []Event{
@@ -510,7 +515,7 @@ func openTestService(t *testing.T, config Config) *Service {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), testIOTimeout)
 		defer cancel()
 		if err := service.Close(ctx); err != nil {
 			t.Errorf("close diagnostics: %v", err)
@@ -521,7 +526,7 @@ func openTestService(t *testing.T, config Config) *Service {
 
 func flushTestService(t *testing.T, service *Service) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testIOTimeout)
 	defer cancel()
 	if err := service.Flush(ctx); err != nil {
 		t.Fatal(err)
@@ -530,7 +535,7 @@ func flushTestService(t *testing.T, service *Service) {
 
 func closeTestService(t *testing.T, service *Service) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testIOTimeout)
 	defer cancel()
 	if err := service.Close(ctx); err != nil {
 		t.Fatal(err)
