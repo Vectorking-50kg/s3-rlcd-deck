@@ -18,7 +18,9 @@ func TestScheduledTaskEnabledXML(t *testing.T) {
 	}{
 		{`<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Settings><Enabled>true</Enabled></Settings></Task>`, true, true},
 		{`<Task><Settings><Enabled>false</Enabled></Settings></Task>`, false, true},
-		{`<Task><Settings/></Task>`, false, false},
+		{`<Task><Settings/></Task>`, true, true},
+		{`<Task/>`, false, false},
+		{`<NotTask><Settings><Enabled>true</Enabled></Settings></NotTask>`, false, false},
 	} {
 		enabled, err := scheduledTaskEnabled([]byte(test.document))
 		if (err == nil) != test.valid || enabled != test.enabled {
@@ -98,5 +100,15 @@ func TestScheduledTaskDocumentUsesPasswordlessCurrentUserPrincipal(t *testing.T)
 	enabled, err = scheduledTaskEnabled(document[2:])
 	if err != nil || enabled {
 		t.Fatalf("BOM-less UTF-16 scheduled task status = %v, %v", enabled, err)
+	}
+	withLeadingNewline := append(utf16LEDocument("\r\n"), document[2:]...)
+	enabled, err = scheduledTaskEnabled(withLeadingNewline)
+	if err != nil || enabled {
+		t.Fatalf("leading-newline UTF-16 scheduled task status = %v, %v", enabled, err)
+	}
+	utf8Document := append([]byte{0xef, 0xbb, 0xbf}, []byte(strings.Replace(decoded, `encoding="UTF-16"`, `encoding="UTF-8"`, 1))...)
+	enabled, err = scheduledTaskEnabled(utf8Document)
+	if err != nil || enabled {
+		t.Fatalf("UTF-8 BOM scheduled task status = %v, %v", enabled, err)
 	}
 }

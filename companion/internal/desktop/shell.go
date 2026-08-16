@@ -45,6 +45,7 @@ type Shell struct {
 	stop       chan struct{}
 	done       chan struct{}
 	actionMu   sync.Mutex
+	stopOnce   sync.Once
 	closeOnce  sync.Once
 }
 
@@ -74,9 +75,14 @@ func (shell *Shell) Run() error {
 	shell.tray.Show()
 	go shell.refreshLoop()
 	err := shell.tray.Run()
-	close(shell.stop)
+	shell.stopRefresh()
 	<-shell.done
+	shell.Close()
 	return err
+}
+
+func (shell *Shell) stopRefresh() {
+	shell.stopOnce.Do(func() { close(shell.stop) })
 }
 
 func (shell *Shell) refreshLoop() {
@@ -154,11 +160,15 @@ func (shell *Shell) showActionError(err error) {
 
 func (shell *Shell) Close() {
 	shell.closeOnce.Do(func() {
+		// Stop new UI refreshes and release the native event loop before
+		// waiting for Runtime teardown. This keeps SIGTERM responsive even
+		// when a subsystem needs the full bounded shutdown budget.
+		shell.stopRefresh()
+		shell.tray.Close()
 		shell.actionMu.Lock()
 		defer shell.actionMu.Unlock()
 		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 		_ = shell.controller.Stop(ctx)
 		cancel()
-		shell.tray.Close()
 	})
 }

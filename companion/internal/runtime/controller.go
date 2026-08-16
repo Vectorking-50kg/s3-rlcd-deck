@@ -86,8 +86,13 @@ func (controller *Controller) Start() error {
 
 	go func() {
 		runErr := application.Run(ctx)
+		// Runtime.Status may consult independently owned subsystems while they
+		// finish shutting down. Never hold the controller lock across that
+		// boundary: Stop and the desktop signal path must remain bounded even
+		// if a subsystem status snapshot is delayed.
+		finalStatus := application.Status()
 		controller.mu.Lock()
-		controller.lastStatus = application.Status()
+		controller.lastStatus = finalStatus
 		if runErr != nil {
 			controller.lastStatus.LastError = runErr.Error()
 		}

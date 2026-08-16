@@ -216,12 +216,19 @@ func scheduledTaskEnabled(document []byte) (bool, error) {
 		return false, ErrPlatform
 	}
 	var task struct {
-		Settings struct {
+		XMLName  xml.Name `xml:"Task"`
+		Settings *struct {
 			Enabled *bool `xml:"Enabled"`
 		} `xml:"Settings"`
 	}
-	if err = xml.Unmarshal(normalized, &task); err != nil || task.Settings.Enabled == nil {
+	if err = xml.Unmarshal(normalized, &task); err != nil || task.Settings == nil {
 		return false, ErrPlatform
+	}
+	// Task Scheduler's schema gives Settings/Enabled a default of true and
+	// schtasks may omit the element after /ENABLE. Absence is therefore the
+	// enabled state, not malformed status output.
+	if task.Settings.Enabled == nil {
+		return true, nil
 	}
 	return *task.Settings.Enabled, nil
 }
@@ -254,7 +261,7 @@ func normalizeScheduledTaskXML(document []byte) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-	case len(document) >= 2 && len(document)%2 == 0 && document[0] == '<' && document[1] == 0:
+	case len(document) >= 2 && len(document)%2 == 0 && looksLikeUTF16XML(document, binary.LittleEndian):
 		units := make([]uint16, len(document)/2)
 		for index := range units {
 			units[index] = binary.LittleEndian.Uint16(document[index*2:])
@@ -263,7 +270,7 @@ func normalizeScheduledTaskXML(document []byte) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-	case len(document) >= 2 && len(document)%2 == 0 && document[0] == 0 && document[1] == '<':
+	case len(document) >= 2 && len(document)%2 == 0 && looksLikeUTF16XML(document, binary.BigEndian):
 		units := make([]uint16, len(document)/2)
 		for index := range units {
 			units[index] = binary.BigEndian.Uint16(document[index*2:])
@@ -277,6 +284,8 @@ func normalizeScheduledTaskXML(document []byte) ([]byte, error) {
 	default:
 		return nil, ErrPlatform
 	}
+	decoded = strings.TrimPrefix(decoded, "\ufeff")
+	decoded = strings.TrimLeft(decoded, " \t\r\n")
 	if strings.HasPrefix(decoded, "<?xml") {
 		declarationEnd := strings.Index(decoded, "?>")
 		if declarationEnd < 0 {
@@ -285,6 +294,20 @@ func normalizeScheduledTaskXML(document []byte) ([]byte, error) {
 		decoded = decoded[declarationEnd+2:]
 	}
 	return []byte(decoded), nil
+}
+
+func looksLikeUTF16XML(document []byte, order binary.ByteOrder) bool {
+	limit := min(len(document)/2, 64)
+	var prefix strings.Builder
+	for index := 0; index < limit; index++ {
+		unit := order.Uint16(document[index*2:])
+		if unit > 0x7f {
+			return false
+		}
+		prefix.WriteByte(byte(unit))
+	}
+	trimmed := strings.TrimLeft(prefix.String(), " \t\r\n")
+	return strings.HasPrefix(trimmed, "<?xml") || strings.HasPrefix(trimmed, "<Task")
 }
 
 func decodeUTF16TaskDocument(units []uint16) (string, error) {
