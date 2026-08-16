@@ -27,6 +27,13 @@ func TestScheduledTaskEnabledXML(t *testing.T) {
 	}
 }
 
+func TestScheduledTaskEnabledRejectsMalformedUTF16(t *testing.T) {
+	document := []byte{0xff, 0xfe, 0x00, 0xd8}
+	if _, err := scheduledTaskEnabled(document); err == nil {
+		t.Fatal("unpaired UTF-16 surrogate was accepted")
+	}
+}
+
 func TestWindowsCommandLineQuotesUnicodeAndSpaces(t *testing.T) {
 	result := windowsCommandLine([]string{`C:\Users\名字\S3 Deck\companion.exe`, `--data-directory`, `C:\Data Root\`})
 	want := `"C:\Users\名字\S3 Deck\companion.exe" --data-directory "C:\Data Root\\"`
@@ -83,5 +90,9 @@ func TestScheduledTaskDocumentUsesPasswordlessCurrentUserPrincipal(t *testing.T)
 		!strings.Contains(parsed.Actions.Exec.Arguments, `"C:\Users\名字\Data & State"`) ||
 		strings.Contains(decoded, "<Password>") || !strings.Contains(decoded, `<Task version="1.2"`) {
 		t.Fatalf("unexpected task action: %+v", parsed.Actions.Exec)
+	}
+	enabled, err := scheduledTaskEnabled(document)
+	if err != nil || enabled {
+		t.Fatalf("UTF-16 scheduled task status = %v, %v", enabled, err)
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/protectedfile"
 	"golang.org/x/sys/windows"
@@ -210,15 +211,82 @@ func ordinaryWindowsMarker(path string) (bool, error) {
 }
 
 func scheduledTaskEnabled(document []byte) (bool, error) {
+	normalized, err := normalizeScheduledTaskXML(document)
+	if err != nil {
+		return false, ErrPlatform
+	}
 	var task struct {
 		Settings struct {
 			Enabled *bool `xml:"Enabled"`
 		} `xml:"Settings"`
 	}
-	if err := xml.Unmarshal(document, &task); err != nil || task.Settings.Enabled == nil {
+	if err = xml.Unmarshal(normalized, &task); err != nil || task.Settings.Enabled == nil {
 		return false, ErrPlatform
 	}
 	return *task.Settings.Enabled, nil
+}
+
+func normalizeScheduledTaskXML(document []byte) ([]byte, error) {
+	var decoded string
+	var err error
+	switch {
+	case len(document) >= 2 && document[0] == 0xff && document[1] == 0xfe:
+		if (len(document)-2)%2 != 0 {
+			return nil, ErrPlatform
+		}
+		units := make([]uint16, (len(document)-2)/2)
+		for index := range units {
+			units[index] = binary.LittleEndian.Uint16(document[2+index*2:])
+		}
+		decoded, err = decodeUTF16TaskDocument(units)
+		if err != nil {
+			return nil, err
+		}
+	case len(document) >= 2 && document[0] == 0xfe && document[1] == 0xff:
+		if (len(document)-2)%2 != 0 {
+			return nil, ErrPlatform
+		}
+		units := make([]uint16, (len(document)-2)/2)
+		for index := range units {
+			units[index] = binary.BigEndian.Uint16(document[2+index*2:])
+		}
+		decoded, err = decodeUTF16TaskDocument(units)
+		if err != nil {
+			return nil, err
+		}
+	case utf8.Valid(document):
+		decoded = string(document)
+	default:
+		return nil, ErrPlatform
+	}
+	if strings.HasPrefix(decoded, "<?xml") {
+		declarationEnd := strings.Index(decoded, "?>")
+		if declarationEnd < 0 {
+			return nil, ErrPlatform
+		}
+		decoded = decoded[declarationEnd+2:]
+	}
+	return []byte(decoded), nil
+}
+
+func decodeUTF16TaskDocument(units []uint16) (string, error) {
+	var decoded strings.Builder
+	for index := 0; index < len(units); index++ {
+		unit := units[index]
+		switch {
+		case unit >= 0xd800 && unit <= 0xdbff:
+			if index+1 >= len(units) || units[index+1] < 0xdc00 || units[index+1] > 0xdfff {
+				return "", ErrPlatform
+			}
+			decoded.WriteRune(utf16.DecodeRune(rune(unit), rune(units[index+1])))
+			index++
+		case unit >= 0xdc00 && unit <= 0xdfff:
+			return "", ErrPlatform
+		default:
+			decoded.WriteRune(rune(unit))
+		}
+	}
+	return decoded.String(), nil
 }
 
 func windowsCommandLine(arguments []string) string {
