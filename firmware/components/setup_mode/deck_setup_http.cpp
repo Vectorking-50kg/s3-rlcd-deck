@@ -358,13 +358,9 @@ bool deck_setup_http_convert_scan_results(
     return true;
 }
 
-bool deck_setup_http_render_page(char *buffer, size_t buffer_size)
+const char *deck_setup_http_page(void)
 {
-    if (buffer == nullptr || buffer_size < sizeof(kPage)) {
-        return false;
-    }
-    std::memcpy(buffer, kPage, sizeof(kPage));
-    return true;
+    return kPage;
 }
 
 deck_setup_wifi_request_result_t deck_setup_http_parse_wifi_request(

@@ -412,8 +412,8 @@ esp_err_t page_handler(httpd_req_t *request)
         httpd_resp_set_status(request, "503 Service Unavailable");
         return send_json(request, "{\"error\":\"setup_inactive\"}");
     }
-    char page[4'096];
-    if (!deck_setup_http_render_page(page, sizeof(page))) {
+    const char *page = deck_setup_http_page();
+    if (page == nullptr) {
         return httpd_resp_send_500(request);
     }
     httpd_resp_set_type(request, "text/html; charset=utf-8");

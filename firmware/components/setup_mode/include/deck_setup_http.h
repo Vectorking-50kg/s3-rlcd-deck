@@ -98,7 +98,8 @@ bool deck_setup_http_convert_scan_results(
     size_t result_capacity,
     size_t *result_count
 );
-bool deck_setup_http_render_page(char *buffer, size_t buffer_size);
+// Returns the immutable, NUL-terminated Setup page owned by this component.
+const char *deck_setup_http_page(void);
 deck_setup_wifi_request_result_t deck_setup_http_parse_wifi_request(
     const char *body,
     size_t body_size,

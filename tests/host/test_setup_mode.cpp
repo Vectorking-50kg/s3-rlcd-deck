@@ -263,8 +263,8 @@ void http_contract_exposes_profile_pairing_without_secrets()
     deck_setup_snapshot_t snapshot{};
     assert(deck_setup_mode_snapshot(setup, &snapshot));
 
-    char page[8'192];
-    assert(deck_setup_http_render_page(page, sizeof(page)));
+    const char *page = deck_setup_http_page();
+    assert(page != nullptr);
     const std::string html(page);
     assert(html.find("Setup / Recovery") != std::string::npos);
     assert(html.find("Scan networks") != std::string::npos);
