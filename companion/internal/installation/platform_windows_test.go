@@ -3,9 +3,11 @@
 package installation
 
 import (
+	"encoding/binary"
 	"encoding/xml"
 	"strings"
 	"testing"
+	"unicode/utf16"
 )
 
 func TestScheduledTaskEnabledXML(t *testing.T) {
@@ -42,6 +44,14 @@ func TestScheduledTaskDocumentUsesPasswordlessCurrentUserPrincipal(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(document) < 2 || document[0] != 0xff || document[1] != 0xfe {
+		t.Fatal("scheduled task XML is not UTF-16LE with a BOM")
+	}
+	units := make([]uint16, (len(document)-2)/2)
+	for index := range units {
+		units[index] = binary.LittleEndian.Uint16(document[2+index*2:])
+	}
+	decoded := string(utf16.Decode(units))
 	var parsed struct {
 		Principals struct {
 			Principal struct {
@@ -60,7 +70,7 @@ func TestScheduledTaskDocumentUsesPasswordlessCurrentUserPrincipal(t *testing.T)
 			} `xml:"Exec"`
 		} `xml:"Actions"`
 	}
-	if err = xml.Unmarshal(document, &parsed); err != nil {
+	if err = xml.Unmarshal([]byte(decoded), &parsed); err != nil {
 		t.Fatal(err)
 	}
 	principal := parsed.Principals.Principal
@@ -70,7 +80,7 @@ func TestScheduledTaskDocumentUsesPasswordlessCurrentUserPrincipal(t *testing.T)
 	}
 	if parsed.Actions.Exec.Command != `C:\Users\名字\S3 Deck\companion.exe` ||
 		!strings.Contains(parsed.Actions.Exec.Arguments, `"C:\Users\名字\Data & State"`) ||
-		strings.Contains(string(document), "<Password>") {
+		strings.Contains(decoded, "<Password>") || !strings.Contains(decoded, `<Task version="1.2"`) {
 		t.Fatalf("unexpected task action: %+v", parsed.Actions.Exec)
 	}
 }

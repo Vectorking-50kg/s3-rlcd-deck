@@ -5,11 +5,13 @@ package installation
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/xml"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf16"
 
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/protectedfile"
 	"golang.org/x/sys/windows"
@@ -95,14 +97,10 @@ func scheduledTaskDocument(spec launchSpec, sid string) ([]byte, error) {
 		"--device-hub-address", spec.DeviceHubAddress,
 	})
 	var document bytes.Buffer
-	document.WriteString(xml.Header)
-	document.WriteString(`<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">`)
+	document.WriteString(`<?xml version="1.0" encoding="UTF-16"?>`)
+	document.WriteString(`<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">`)
 	document.WriteString(`<RegistrationInfo><Description>S3 RLCD Deck Companion per-user startup</Description></RegistrationInfo>`)
-	document.WriteString(`<Triggers><LogonTrigger><Enabled>true</Enabled><UserId>`)
-	if err := xml.EscapeText(&document, []byte(sid)); err != nil {
-		return nil, err
-	}
-	document.WriteString(`</UserId></LogonTrigger></Triggers>`)
+	document.WriteString(`<Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>`)
 	document.WriteString(`<Principals><Principal id="CurrentUser"><UserId>`)
 	if err := xml.EscapeText(&document, []byte(sid)); err != nil {
 		return nil, err
@@ -126,7 +124,18 @@ func scheduledTaskDocument(spec launchSpec, sid string) ([]byte, error) {
 		return nil, err
 	}
 	document.WriteString(`</Arguments></Exec></Actions></Task>`)
-	return document.Bytes(), nil
+	return utf16LEDocument(document.String()), nil
+}
+
+func utf16LEDocument(value string) []byte {
+	encoded := utf16.Encode([]rune(value))
+	document := make([]byte, 2+len(encoded)*2)
+	document[0] = 0xff
+	document[1] = 0xfe
+	for index, unit := range encoded {
+		binary.LittleEndian.PutUint16(document[2+index*2:], unit)
+	}
+	return document
 }
 
 func (adapter *windowsAdapter) SetEnabled(ctx context.Context, enabled bool) error {
