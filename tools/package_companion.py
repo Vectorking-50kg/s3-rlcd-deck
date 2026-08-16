@@ -14,6 +14,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import zipfile
 
@@ -193,6 +194,19 @@ def zip_tree(source: Path, destination: Path, epoch: int) -> None:
             archive.writestr(info, path.read_bytes(), compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
 
 
+def adhoc_sign_darwin(path: Path) -> None:
+    """Create a structurally valid local signature without claiming release identity."""
+    if sys.platform != "darwin" or shutil.which("codesign") is None:
+        raise RuntimeError("Darwin application packaging requires macOS codesign")
+    subprocess.run(
+        ["codesign", "--force", "--sign", "-", "--timestamp=none", str(path)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        timeout=60,
+    )
+
+
 def package_target(
     artifact_root: Path,
     output_root: Path,
@@ -250,7 +264,24 @@ def package_target(
         f"  {binary_name} --uninstall\n"
     ).encode()
     write(resources / "INSTALL.txt", instructions)
+    if target.startswith("darwin-"):
+        # Go emits a linker signature for Mach-O executables. That signature is
+        # not valid once the executable is placed inside an application bundle
+        # with resources, so replace it before recording the file digest.
+        adhoc_sign_darwin(executable)
     write(resources / "manifest.json", file_manifest(root, target, version, commit, epoch))
+    if target.startswith("darwin-"):
+        # Seal Info.plist, the already-signed executable, and every resource.
+        # This remains an ad-hoc acceptance signature; publication signing and
+        # Apple notarization are separate release steps.
+        adhoc_sign_darwin(root)
+        subprocess.run(
+            ["codesign", "--verify", "--deep", "--strict", "--verbose=4", str(root)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=60,
+        )
     archive = output_root / f"s3deck-companion_{version}_{target}.zip"
     zip_tree(staging, archive, epoch)
     return archive

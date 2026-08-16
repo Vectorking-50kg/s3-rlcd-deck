@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import platform
 from pathlib import Path
 import subprocess
 import tempfile
@@ -28,7 +29,10 @@ class CompanionPackageContractTest(unittest.TestCase):
             for target, name in TARGETS.items():
                 path = artifacts / target / name
                 path.parent.mkdir(parents=True)
-                path.write_bytes((target + "\n").encode())
+                if target.startswith("darwin-") and platform.system() == "Darwin":
+                    path.write_bytes(Path("/usr/bin/true").read_bytes())
+                else:
+                    path.write_bytes((target + "\n").encode())
                 path.chmod(0o700)
             outputs = []
             for name in ("first", "second"):
@@ -82,6 +86,21 @@ class CompanionPackageContractTest(unittest.TestCase):
                 self.assertEqual("windows-amd64", manifest["target"])
                 self.assertEqual("SPDX-2.3", sbom["spdxVersion"])
                 self.assertIn(b"--install", archive.read(prefix + "INSTALL.txt"))
+
+            if platform.system() == "Darwin":
+                darwin_archive = next(path for path in first_archives if "darwin-arm64" in path.name)
+                extracted = root / "signed-darwin"
+                with zipfile.ZipFile(darwin_archive) as archive:
+                    archive.extractall(extracted)
+                application = extracted / "S3 RLCD Deck Companion.app"
+                self.assertTrue((application / "Contents/_CodeSignature/CodeResources").is_file())
+                subprocess.run(
+                    ["codesign", "--verify", "--deep", "--strict", "--verbose=4", str(application)],
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=30,
+                )
 
 
 if __name__ == "__main__":
