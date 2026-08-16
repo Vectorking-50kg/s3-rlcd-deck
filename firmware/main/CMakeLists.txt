@@ -25,7 +25,14 @@ idf_component_register(
 )
 
 target_compile_features(${COMPONENT_LIB} PRIVATE cxx_std_17)
-target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror)
+target_compile_options(
+    ${COMPONENT_LIB}
+    PRIVATE
+        -Wall
+        -Wextra
+        -Werror
+        -Wframe-larger-than=2048
+)
 
 if(DEFINED DECK_FIRMWARE_COMMIT)
     string(LENGTH "${DECK_FIRMWARE_COMMIT}" DECK_FIRMWARE_COMMIT_LENGTH)

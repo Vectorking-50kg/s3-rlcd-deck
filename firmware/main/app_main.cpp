@@ -45,7 +45,6 @@ struct AiPageTaskContext {
     char *document;
     deck_ai_snapshot_codex_projection_t *codex_projection;
     deck_ai_snapshot_pages_projection_t *pages_projection;
-    deck_m0_view_model_t *published_model;
     EventGroupHandle_t lifecycle;
     TaskHandle_t task;
     std::atomic<bool> stop_requested;
@@ -348,56 +347,33 @@ bool release_display_resources()
     return true;
 }
 
-deck_m0_view_model_t make_initial_model(
+void initialize_application_model(
     const char *firmware_version,
     uint64_t uptime_seconds,
     uint32_t minimum_free_heap_bytes
 )
 {
-    deck_m0_view_model_t model = {
-        firmware_version,
-        DECK_DATA_UNAVAILABLE,
-        false,
-        0,
-        0,
-        0,
-        false,
-        0,
-        0,
-        0,
-        0,
-        false,
-        DECK_BUTTON_NONE,
-        0,
-        DECK_BUTTON_NONE,
-        0,
-        DECK_WIFI_UNAVAILABLE,
-        DECK_WIFI_CONFIG_VIEW_NO_ACTIVE,
-        DECK_WIFI_RECORD_VIEW_EMPTY,
-        DECK_WIFI_RECORD_VIEW_EMPTY,
-        0,
-        DECK_SETUP_UNAVAILABLE,
-        {},
-        {},
-        {},
-        0,
-        uptime_seconds,
-        minimum_free_heap_bytes,
-        {},
-        {},
-    };
-    return model;
+    std::memset(&application_model, 0, sizeof(application_model));
+    application_model.firmware_version = firmware_version;
+    application_model.data_source = DECK_DATA_UNAVAILABLE;
+    application_model.wifi_state = DECK_WIFI_UNAVAILABLE;
+    application_model.wifi_config_state = DECK_WIFI_CONFIG_VIEW_NO_ACTIVE;
+    application_model.wifi_record_status = DECK_WIFI_RECORD_VIEW_EMPTY;
+    application_model.wifi_candidate_record_status = DECK_WIFI_RECORD_VIEW_EMPTY;
+    application_model.setup_state = DECK_SETUP_UNAVAILABLE;
+    application_model.uptime_seconds = uptime_seconds;
+    application_model.minimum_free_heap_bytes = minimum_free_heap_bytes;
 }
 
-bool publish_application_model(deck_m0_view_model_t *published)
+bool publish_application_model()
 {
-    if (published == nullptr || application_model_mutex == nullptr ||
+    if (application_model_mutex == nullptr ||
         xSemaphoreTake(application_model_mutex, portMAX_DELAY) != pdTRUE) {
         return false;
     }
-    *published = application_model;
+    const bool published = deck_application_ui_update(&application_model);
     xSemaphoreGive(application_model_mutex);
-    return deck_application_ui_update(published);
+    return published;
 }
 
 deck_serial_view_state_t serial_view_state(deck_serial_state_t state)
@@ -419,8 +395,6 @@ void apply_serial_event(const deck_serial_service_event_t &event)
         event.snapshot.state != DECK_SERIAL_DISARMED,
         std::memory_order_release
     );
-    deck_m0_view_model_t published{};
-    bool has_published = false;
     if (application_model_mutex != nullptr &&
         xSemaphoreTake(application_model_mutex, portMAX_DELAY) == pdTRUE) {
         application_model.serial = {
@@ -434,12 +408,8 @@ void apply_serial_event(const deck_serial_service_event_t &event)
             event.snapshot.uart_install_failed,
             event.snapshot.uart_installed,
         };
-        published = application_model;
-        has_published = true;
+        (void)deck_application_ui_update(&application_model);
         xSemaphoreGive(application_model_mutex);
-    }
-    if (has_published) {
-        (void)deck_application_ui_update(&published);
     }
 }
 
@@ -620,8 +590,7 @@ void peripheral_snapshot(void *, const deck_peripheral_snapshot_t *snapshot)
         }
         xSemaphoreGive(application_model_mutex);
     }
-    deck_m0_view_model_t published{};
-    (void)publish_application_model(&published);
+    (void)publish_application_model();
     if (enter_serial && application_serial != nullptr &&
         deck_serial_service_enter(application_serial)) {
         application_serial_requested.store(true, std::memory_order_release);
@@ -846,8 +815,7 @@ void ai_page_task(void *task_context)
         if (document_size != 0U) {
             std::memset(context->document, 0, document_size);
         }
-        std::memset(context->published_model, 0, sizeof(*context->published_model));
-        (void)publish_application_model(context->published_model);
+        (void)publish_application_model();
         (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1'000));
     }
     xEventGroupSetBits(context->lifecycle, kAiPageTaskStoppedBit);
@@ -884,16 +852,10 @@ AiPageTaskContext *start_ai_page_task(deck_companion_link_t *link)
             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
         )
     );
-    context->published_model = static_cast<deck_m0_view_model_t *>(heap_caps_calloc(
-        1,
-        sizeof(*context->published_model),
-        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
-    ));
     context->lifecycle = xEventGroupCreate();
     context->stop_requested.store(false, std::memory_order_release);
     if (context->document == nullptr || context->codex_projection == nullptr ||
-        context->pages_projection == nullptr || context->published_model == nullptr ||
-        context->lifecycle == nullptr ||
+        context->pages_projection == nullptr || context->lifecycle == nullptr ||
         xTaskCreatePinnedToCore(
             ai_page_task,
             "ai_page_model",
@@ -925,10 +887,6 @@ AiPageTaskContext *start_ai_page_task(deck_companion_link_t *link)
                 sizeof(*context->pages_projection)
             );
             heap_caps_free(context->pages_projection);
-        }
-        if (context->published_model != nullptr) {
-            std::memset(context->published_model, 0, sizeof(*context->published_model));
-            heap_caps_free(context->published_model);
         }
         delete context;
         return nullptr;
@@ -972,8 +930,6 @@ bool stop_ai_page_task()
         sizeof(*context->pages_projection)
     );
     heap_caps_free(context->pages_projection);
-    std::memset(context->published_model, 0, sizeof(*context->published_model));
-    heap_caps_free(context->published_model);
     vEventGroupDelete(context->lifecycle);
     delete context;
     application_ai_page_task = nullptr;
@@ -1213,8 +1169,7 @@ void setup_event(void *, const deck_setup_service_event_t *event)
             event->settings.temperature_offset_tenths_c
         );
     }
-    deck_m0_view_model_t published{};
-    (void)publish_application_model(&published);
+    (void)publish_application_model();
 #ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
     const deck_setup_diagnostic_info_t info = {
         event->setup.active,
@@ -1467,7 +1422,7 @@ extern "C" void app_main(void)
         return;
     }
 
-    application_model = make_initial_model(
+    initialize_application_model(
         app->version,
         static_cast<uint64_t>(esp_timer_get_time() / 1'000'000),
         esp_get_minimum_free_heap_size()
