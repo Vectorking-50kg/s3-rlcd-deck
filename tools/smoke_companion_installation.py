@@ -20,15 +20,24 @@ from smoke_companion_artifact import delete_smoke_credential
 
 
 def run(executable: Path, arguments: list[str], timeout: float = 120) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    completed = subprocess.run(
         [str(executable), *arguments],
-        check=True,
+        check=False,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         timeout=timeout,
         env=os.environ.copy(),
     )
+    if completed.returncode != 0:
+        # Lifecycle commands emit bounded, fixed messages and never credentials.
+        # Preserve those diagnostics without echoing argv, which contains local paths.
+        raise RuntimeError(
+            "installation command failed "
+            f"(exit={completed.returncode}, stdout={completed.stdout.strip()!r}, "
+            f"stderr={completed.stderr.strip()!r})"
+        )
+    return completed
 
 
 def common(root: Path, data: Path) -> list[str]:
