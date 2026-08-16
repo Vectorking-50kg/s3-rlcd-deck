@@ -178,6 +178,16 @@ func runInstallationCommand(
 
 func installationApplyFailureMessage(err error) string {
 	switch {
+	case errors.Is(err, installation.ErrPlatformIdentity):
+		return "Companion login startup current-user identity failed and prior state was restored"
+	case errors.Is(err, installation.ErrPlatformDefinition):
+		return "Companion login startup definition failed and prior state was restored"
+	case errors.Is(err, installation.ErrPlatformRegister):
+		return "Companion login startup platform registration failed and prior state was restored"
+	case errors.Is(err, installation.ErrPlatformMarker):
+		return "Companion login startup ownership marker failed and prior state was restored"
+	case errors.Is(err, installation.ErrPlatformEnable):
+		return "Companion login startup enablement failed and prior state was restored"
 	case errors.Is(err, installation.ErrPlatform):
 		return "Companion login startup registration failed and prior state was restored"
 	case errors.Is(err, installation.ErrMigration):

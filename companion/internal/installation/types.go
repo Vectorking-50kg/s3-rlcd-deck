@@ -13,10 +13,15 @@ import (
 const StateSchemaVersion = 1
 
 var (
-	ErrInvalid     = errors.New("invalid Companion installation request")
-	ErrUnavailable = errors.New("Companion installation is unavailable")
-	ErrMigration   = errors.New("Companion data migration failed")
-	ErrPlatform    = errors.New("login startup registration failed")
+	ErrInvalid            = errors.New("invalid Companion installation request")
+	ErrUnavailable        = errors.New("Companion installation is unavailable")
+	ErrMigration          = errors.New("Companion data migration failed")
+	ErrPlatform           = errors.New("login startup registration failed")
+	ErrPlatformIdentity   = errors.New("login startup current-user identity failed")
+	ErrPlatformDefinition = errors.New("login startup definition failed")
+	ErrPlatformRegister   = errors.New("login startup platform registration failed")
+	ErrPlatformMarker     = errors.New("login startup ownership marker failed")
+	ErrPlatformEnable     = errors.New("login startup enablement failed")
 	// ErrRecoveryRequired means an interrupted transaction exists. Callers
 	// must exclude the live Companion before reopening with recovery enabled.
 	ErrRecoveryRequired = errors.New("Companion installation recovery requires an exclusive runtime fence")

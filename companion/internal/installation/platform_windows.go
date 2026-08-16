@@ -42,15 +42,15 @@ func (*windowsAdapter) Name() string { return "task_scheduler" }
 func (adapter *windowsAdapter) Configure(ctx context.Context, spec launchSpec) error {
 	sid, err := currentWindowsUserSID()
 	if err != nil {
-		return err
+		return errors.Join(ErrPlatformIdentity, err)
 	}
 	document, err := scheduledTaskDocument(spec, sid)
 	if err != nil {
-		return err
+		return errors.Join(ErrPlatformDefinition, err)
 	}
 	definitionPath := filepath.Join(filepath.Dir(adapter.markerPath), "task-scheduler-definition.xml")
 	if _, err = protectedfile.Replace(definitionPath, document); err != nil {
-		return err
+		return errors.Join(ErrPlatformDefinition, err)
 	}
 	clear(document)
 	_, configureErr := runPlatformCommand(
@@ -59,17 +59,18 @@ func (adapter *windowsAdapter) Configure(ctx context.Context, spec launchSpec) e
 	)
 	removeErr := os.Remove(definitionPath)
 	if configureErr != nil {
-		return configureErr
+		return errors.Join(ErrPlatformRegister, configureErr, removeErr)
 	}
 	if removeErr != nil {
 		_, _ = runPlatformCommand(ctx, "schtasks.exe", "/Delete", "/TN", adapter.taskName, "/F")
-		return removeErr
+		return errors.Join(ErrPlatformDefinition, removeErr)
 	}
 	_, err = protectedfile.Replace(adapter.markerPath, []byte("v1\n"))
 	if err != nil {
 		_, _ = runPlatformCommand(ctx, "schtasks.exe", "/Delete", "/TN", adapter.taskName, "/F")
+		return errors.Join(ErrPlatformMarker, err)
 	}
-	return err
+	return nil
 }
 
 func currentWindowsUserSID() (string, error) {
@@ -134,7 +135,10 @@ func (adapter *windowsAdapter) SetEnabled(ctx context.Context, enabled bool) err
 		action = "/ENABLE"
 	}
 	_, err := runPlatformCommand(ctx, "schtasks.exe", "/Change", "/TN", adapter.taskName, action)
-	return err
+	if err != nil {
+		return errors.Join(ErrPlatformEnable, err)
+	}
+	return nil
 }
 
 func (adapter *windowsAdapter) Remove(ctx context.Context) error {

@@ -79,6 +79,11 @@ func TestInstallationFailureMessagesAreStableAndSpecific(t *testing.T) {
 		err  error
 		want string
 	}{
+		{installation.ErrPlatformIdentity, "current-user identity failed"},
+		{installation.ErrPlatformDefinition, "startup definition failed"},
+		{installation.ErrPlatformRegister, "platform registration failed"},
+		{installation.ErrPlatformMarker, "ownership marker failed"},
+		{installation.ErrPlatformEnable, "startup enablement failed"},
 		{installation.ErrPlatform, "login startup registration failed"},
 		{installation.ErrMigration, "data migration failed"},
 		{os.ErrPermission, "installation failed"},
