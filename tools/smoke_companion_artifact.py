@@ -19,6 +19,7 @@ import urllib.request
 
 
 CREDENTIAL_CLEANUP_TIMEOUT_SECONDS = 30
+PROCESS_SHUTDOWN_TIMEOUT_SECONDS = 15
 
 
 def reserve_loopback_port() -> int:
@@ -50,7 +51,11 @@ def stop_process(process: subprocess.Popen[bytes]) -> None:
     else:
         process.send_signal(signal.SIGTERM)
     try:
-        return_code = process.wait(timeout=8)
+        # Hosted Intel macOS runners occasionally need more than eight seconds
+        # to drain native UI resources under concurrent test load. The product
+        # shutdown remains bounded; this smoke allows the same platform budget
+        # used by other native cleanup operations.
+        return_code = process.wait(timeout=PROCESS_SHUTDOWN_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired as error:
         process.kill()
         process.wait(timeout=2)

@@ -52,6 +52,7 @@ func TestScheduledTaskDocumentUsesPasswordlessCurrentUserPrincipal(t *testing.T)
 		units[index] = binary.LittleEndian.Uint16(document[2+index*2:])
 	}
 	decoded := string(utf16.Decode(units))
+	parserDocument := strings.Replace(decoded, `encoding="UTF-16"`, `encoding="UTF-8"`, 1)
 	var parsed struct {
 		Principals struct {
 			Principal struct {
@@ -70,7 +71,7 @@ func TestScheduledTaskDocumentUsesPasswordlessCurrentUserPrincipal(t *testing.T)
 			} `xml:"Exec"`
 		} `xml:"Actions"`
 	}
-	if err = xml.Unmarshal([]byte(decoded), &parsed); err != nil {
+	if err = xml.Unmarshal([]byte(parserDocument), &parsed); err != nil {
 		t.Fatal(err)
 	}
 	principal := parsed.Principals.Principal
