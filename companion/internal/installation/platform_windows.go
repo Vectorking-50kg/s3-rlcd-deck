@@ -3,6 +3,7 @@
 package installation
 
 import (
+	"bytes"
 	"context"
 	"encoding/xml"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/protectedfile"
+	"golang.org/x/sys/windows"
 )
 
 const scheduledTaskNamePrefix = `S3 RLCD Deck Companion`
@@ -38,24 +40,92 @@ func DefaultRootDirectory() (string, error) {
 func (*windowsAdapter) Name() string { return "task_scheduler" }
 
 func (adapter *windowsAdapter) Configure(ctx context.Context, spec launchSpec) error {
-	command := windowsCommandLine([]string{
-		spec.Executable, "--data-directory", spec.DataDirectory,
-		"--device-hub-address", spec.DeviceHubAddress,
-	})
-	_, err := runPlatformCommand(
-		ctx, "schtasks.exe", "/Create", "/SC", "ONLOGON", "/TN", adapter.taskName,
-		"/TR", command, "/RL", "LIMITED", "/IT", "/F",
-	)
-	if err == nil {
-		_, err = runPlatformCommand(ctx, "schtasks.exe", "/Change", "/TN", adapter.taskName, "/DISABLE")
+	sid, err := currentWindowsUserSID()
+	if err != nil {
+		return err
 	}
-	if err == nil {
-		_, err = protectedfile.Replace(adapter.markerPath, []byte("v1\n"))
-		if err != nil {
-			_, _ = runPlatformCommand(ctx, "schtasks.exe", "/Delete", "/TN", adapter.taskName, "/F")
-		}
+	document, err := scheduledTaskDocument(spec, sid)
+	if err != nil {
+		return err
+	}
+	definitionPath := filepath.Join(filepath.Dir(adapter.markerPath), "task-scheduler-definition.xml")
+	if _, err = protectedfile.Replace(definitionPath, document); err != nil {
+		return err
+	}
+	clear(document)
+	_, configureErr := runPlatformCommand(
+		ctx, "schtasks.exe", "/Create", "/TN", adapter.taskName,
+		"/XML", definitionPath, "/F",
+	)
+	removeErr := os.Remove(definitionPath)
+	if configureErr != nil {
+		return configureErr
+	}
+	if removeErr != nil {
+		_, _ = runPlatformCommand(ctx, "schtasks.exe", "/Delete", "/TN", adapter.taskName, "/F")
+		return removeErr
+	}
+	_, err = protectedfile.Replace(adapter.markerPath, []byte("v1\n"))
+	if err != nil {
+		_, _ = runPlatformCommand(ctx, "schtasks.exe", "/Delete", "/TN", adapter.taskName, "/F")
 	}
 	return err
+}
+
+func currentWindowsUserSID() (string, error) {
+	token, err := windows.OpenCurrentProcessToken()
+	if err != nil {
+		return "", err
+	}
+	defer token.Close()
+	user, err := token.GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil {
+		return "", ErrPlatform
+	}
+	return user.User.Sid.String(), nil
+}
+
+func scheduledTaskDocument(spec launchSpec, sid string) ([]byte, error) {
+	if spec.Executable == "" || spec.DataDirectory == "" || spec.DeviceHubAddress == "" || sid == "" {
+		return nil, ErrPlatform
+	}
+	arguments := windowsCommandLine([]string{
+		"--data-directory", spec.DataDirectory,
+		"--device-hub-address", spec.DeviceHubAddress,
+	})
+	var document bytes.Buffer
+	document.WriteString(xml.Header)
+	document.WriteString(`<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">`)
+	document.WriteString(`<RegistrationInfo><Description>S3 RLCD Deck Companion per-user startup</Description></RegistrationInfo>`)
+	document.WriteString(`<Triggers><LogonTrigger><Enabled>true</Enabled><UserId>`)
+	if err := xml.EscapeText(&document, []byte(sid)); err != nil {
+		return nil, err
+	}
+	document.WriteString(`</UserId></LogonTrigger></Triggers>`)
+	document.WriteString(`<Principals><Principal id="CurrentUser"><UserId>`)
+	if err := xml.EscapeText(&document, []byte(sid)); err != nil {
+		return nil, err
+	}
+	document.WriteString(`</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>`)
+	document.WriteString(`<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>`)
+	document.WriteString(`<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>`)
+	document.WriteString(`<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>`)
+	document.WriteString(`<AllowHardTerminate>true</AllowHardTerminate><StartWhenAvailable>true</StartWhenAvailable>`)
+	document.WriteString(`<RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>`)
+	document.WriteString(`<IdleSettings><StopOnIdleEnd>false</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings>`)
+	document.WriteString(`<AllowStartOnDemand>true</AllowStartOnDemand><Enabled>false</Enabled>`)
+	document.WriteString(`<Hidden>false</Hidden><RunOnlyIfIdle>false</RunOnlyIfIdle><WakeToRun>false</WakeToRun>`)
+	document.WriteString(`<ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Priority>7</Priority></Settings>`)
+	document.WriteString(`<Actions Context="CurrentUser"><Exec><Command>`)
+	if err := xml.EscapeText(&document, []byte(spec.Executable)); err != nil {
+		return nil, err
+	}
+	document.WriteString(`</Command><Arguments>`)
+	if err := xml.EscapeText(&document, []byte(arguments)); err != nil {
+		return nil, err
+	}
+	document.WriteString(`</Arguments></Exec></Actions></Task>`)
+	return document.Bytes(), nil
 }
 
 func (adapter *windowsAdapter) SetEnabled(ctx context.Context, enabled bool) error {
