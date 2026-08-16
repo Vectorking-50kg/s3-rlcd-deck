@@ -22,6 +22,8 @@ var (
 	ErrPlatformRegister   = errors.New("login startup platform registration failed")
 	ErrPlatformMarker     = errors.New("login startup ownership marker failed")
 	ErrPlatformEnable     = errors.New("login startup enablement failed")
+	ErrPlatformQuery      = errors.New("login startup status query failed")
+	ErrPlatformDecode     = errors.New("login startup status decode failed")
 	// ErrRecoveryRequired means an interrupted transaction exists. Callers
 	// must exclude the live Companion before reopening with recovery enabled.
 	ErrRecoveryRequired = errors.New("Companion installation recovery requires an exclusive runtime fence")

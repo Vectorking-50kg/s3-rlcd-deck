@@ -95,4 +95,8 @@ func TestScheduledTaskDocumentUsesPasswordlessCurrentUserPrincipal(t *testing.T)
 	if err != nil || enabled {
 		t.Fatalf("UTF-16 scheduled task status = %v, %v", enabled, err)
 	}
+	enabled, err = scheduledTaskEnabled(document[2:])
+	if err != nil || enabled {
+		t.Fatalf("BOM-less UTF-16 scheduled task status = %v, %v", enabled, err)
+	}
 }

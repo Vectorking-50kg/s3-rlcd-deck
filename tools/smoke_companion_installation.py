@@ -104,15 +104,18 @@ def wait_for_status(
 ) -> dict[str, object]:
     deadline = time.monotonic() + timeout
     last: dict[str, object] = {}
+    last_error = ""
     while time.monotonic() < deadline:
         try:
             last = status(executable, root, data)
             if predicate(last):
                 return last
-        except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
-            pass
+        except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
+            last_error = str(error)
         time.sleep(0.2)
-    raise RuntimeError(f"installation state did not converge: {last!r}")
+    raise RuntimeError(
+        f"installation state did not converge: {last!r}; last_error={last_error!r}"
+    )
 
 
 def wait_for_bootstrap(expected_version: str, timeout: float = 15) -> None:

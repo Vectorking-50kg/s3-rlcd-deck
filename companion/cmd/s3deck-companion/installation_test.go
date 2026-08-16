@@ -95,6 +95,23 @@ func TestInstallationFailureMessagesAreStableAndSpecific(t *testing.T) {
 	}
 }
 
+func TestInstallationStatusFailureMessagesAreStableAndSpecific(t *testing.T) {
+	for _, test := range []struct {
+		err  error
+		want string
+	}{
+		{installation.ErrPlatformQuery, "status query failed"},
+		{installation.ErrPlatformDecode, "status decode failed"},
+		{installation.ErrPlatformMarker, "ownership marker is invalid"},
+		{os.ErrPermission, "status is unavailable"},
+	} {
+		message := installationStatusFailureMessage(test.err)
+		if !strings.Contains(message, test.want) {
+			t.Fatalf("status failure message for %v = %q", test.err, message)
+		}
+	}
+}
+
 func TestDeviceHubOverrideBelongsOnlyToInstall(t *testing.T) {
 	if !onlyInstallationFlags(installationCommandConfig{
 		Install: true, ExplicitFlags: map[string]bool{

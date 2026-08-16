@@ -154,7 +154,7 @@ func runInstallationCommand(
 	case config.Status:
 		status, statusErr := manager.Status(ctx)
 		if statusErr != nil {
-			fmt.Fprintln(stderr, "Companion installation status is unavailable")
+			fmt.Fprintln(stderr, installationStatusFailureMessage(statusErr))
 			return 1
 		}
 		encoder := json.NewEncoder(stdout)
@@ -174,6 +174,19 @@ func runInstallationCommand(
 		}
 	}
 	return 0
+}
+
+func installationStatusFailureMessage(err error) string {
+	switch {
+	case errors.Is(err, installation.ErrPlatformQuery):
+		return "Companion login startup status query failed"
+	case errors.Is(err, installation.ErrPlatformDecode):
+		return "Companion login startup status decode failed"
+	case errors.Is(err, installation.ErrPlatformMarker):
+		return "Companion login startup ownership marker is invalid"
+	default:
+		return "Companion installation status is unavailable"
+	}
 }
 
 func installationApplyFailureMessage(err error) string {

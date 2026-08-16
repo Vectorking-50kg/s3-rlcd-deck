@@ -184,13 +184,13 @@ func (adapter *windowsAdapter) Status(ctx context.Context) (platformStatus, erro
 	)
 	if err != nil {
 		if marker {
-			return platformStatus{}, err
+			return platformStatus{}, errors.Join(ErrPlatformQuery, err)
 		}
 		return platformStatus{}, nil
 	}
 	enabled, parseErr := scheduledTaskEnabled(document)
 	if parseErr != nil {
-		return platformStatus{}, parseErr
+		return platformStatus{}, errors.Join(ErrPlatformDecode, parseErr)
 	}
 	return platformStatus{
 		Installed: true,
@@ -249,6 +249,24 @@ func normalizeScheduledTaskXML(document []byte) ([]byte, error) {
 		units := make([]uint16, (len(document)-2)/2)
 		for index := range units {
 			units[index] = binary.BigEndian.Uint16(document[2+index*2:])
+		}
+		decoded, err = decodeUTF16TaskDocument(units)
+		if err != nil {
+			return nil, err
+		}
+	case len(document) >= 2 && len(document)%2 == 0 && document[0] == '<' && document[1] == 0:
+		units := make([]uint16, len(document)/2)
+		for index := range units {
+			units[index] = binary.LittleEndian.Uint16(document[index*2:])
+		}
+		decoded, err = decodeUTF16TaskDocument(units)
+		if err != nil {
+			return nil, err
+		}
+	case len(document) >= 2 && len(document)%2 == 0 && document[0] == 0 && document[1] == '<':
+		units := make([]uint16, len(document)/2)
+		for index := range units {
+			units[index] = binary.BigEndian.Uint16(document[index*2:])
 		}
 		decoded, err = decodeUTF16TaskDocument(units)
 		if err != nil {
