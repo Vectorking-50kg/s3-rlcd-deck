@@ -19,6 +19,7 @@ idf_component_register(
         freertos
         health
         heap
+        lan_pairing
         ota_service
         setup_mode
         serial_service

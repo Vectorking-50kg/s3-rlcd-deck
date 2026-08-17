@@ -1,7 +1,9 @@
 # Pairing v2 discovery and PAKE interoperability spike
 
-**Status:** NOT RUN. This spike proves technical feasibility only; it cannot satisfy the final
-Pairing v2 acceptance or authorize replacement of ADR 0007.
+**Status:** IN PROGRESS. Same-LAN discovery, wrong-code rejection, dev/release resource gates, and
+the cross-language Security2 vector have passed locally. Correct-code repetition and retained
+same-clean-commit HIL evidence are still required. This spike proves technical feasibility only;
+it cannot satisfy the final Pairing v2 acceptance or authorize replacement of ADR 0007.
 
 **Tracking:** GitHub Issue #86. The parent Pairing v2 specification is GitHub Issue #85.
 

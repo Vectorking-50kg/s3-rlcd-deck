@@ -49,6 +49,21 @@ typedef enum {
 } deck_setup_state_t;
 
 typedef enum {
+    DECK_PAIRING_V2_IDLE = 0,
+    DECK_PAIRING_V2_ACTIVE,
+    DECK_PAIRING_V2_PROOF_VERIFIED,
+    DECK_PAIRING_V2_EXPIRED,
+    DECK_PAIRING_V2_ERROR,
+} deck_pairing_v2_state_t;
+
+typedef struct {
+    deck_pairing_v2_state_t state;
+    char code[7];
+    uint32_t remaining_seconds;
+    uint32_t proof_count;
+} deck_pairing_v2_view_model_t;
+
+typedef enum {
     DECK_SERIAL_VIEW_UNAVAILABLE = 0,
     DECK_SERIAL_VIEW_DISARMED,
     DECK_SERIAL_VIEW_USB_TX,
@@ -103,6 +118,7 @@ typedef struct {
     char setup_ssid[DECK_M0_SETUP_SSID_CAPACITY];
     char setup_password[DECK_M0_SETUP_PASSWORD_CAPACITY];
     char setup_address[DECK_M0_SETUP_ADDRESS_CAPACITY];
+    deck_pairing_v2_view_model_t pairing_v2;
     uint32_t refresh_count;
     uint64_t uptime_seconds;
     uint32_t minimum_free_heap_bytes;

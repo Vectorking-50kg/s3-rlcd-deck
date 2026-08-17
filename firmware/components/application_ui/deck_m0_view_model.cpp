@@ -107,6 +107,59 @@ bool serial_page_visible(const deck_serial_view_model_t &serial)
            serial.state == DECK_SERIAL_VIEW_WEB_TX;
 }
 
+bool pairing_page_visible(const deck_pairing_v2_view_model_t &pairing)
+{
+    return pairing.state == DECK_PAIRING_V2_ACTIVE ||
+           pairing.state == DECK_PAIRING_V2_PROOF_VERIFIED;
+}
+
+bool pairing_equal(
+    const deck_pairing_v2_view_model_t &left,
+    const deck_pairing_v2_view_model_t &right
+)
+{
+    return left.state == right.state &&
+           memcmp(left.code, right.code, sizeof(left.code)) == 0 &&
+           left.remaining_seconds == right.remaining_seconds &&
+           left.proof_count == right.proof_count;
+}
+
+bool format_pairing_page(
+    const deck_pairing_v2_view_model_t &pairing,
+    char *buffer,
+    size_t buffer_size
+)
+{
+    if (!pairing_page_visible(pairing) || buffer == nullptr || buffer_size == 0 ||
+        strlen(pairing.code) != 6) {
+        return false;
+    }
+    const int size = snprintf(
+        buffer,
+        buffer_size,
+        "PAIRING V2       SAME LAN\n"
+        "--------------------------------\n"
+        "CODE\n"
+        "            %.3s %.3s\n"
+        "\n"
+        "Enter this code on your Mac\n"
+        "Companion > Pair a Deck\n"
+        "\n"
+        "%s\n"
+        "Expires in %" PRIu32 " s\n"
+        "SRP6a + AES-GCM / LOCAL ONLY\n"
+        "--------------------------------\n"
+        "TX DISARMED",
+        pairing.code,
+        pairing.code + 3,
+        pairing.state == DECK_PAIRING_V2_PROOF_VERIFIED
+            ? "SECURITY PROOF VERIFIED"
+            : "WAITING FOR CODE",
+        pairing.remaining_seconds
+    );
+    return size >= 0 && static_cast<size_t>(size) < buffer_size;
+}
+
 const char *serial_owner_name(deck_serial_view_state_t state)
 {
     return state == DECK_SERIAL_VIEW_WEB_TX ? "WEB TX" : "USB TX";
@@ -220,6 +273,12 @@ bool deck_m0_view_model_equal(const deck_m0_view_model_t *left, const deck_m0_vi
     if (left == nullptr || right == nullptr) {
         return left == right;
     }
+    const bool left_pairing_visible = pairing_page_visible(left->pairing_v2);
+    const bool right_pairing_visible = pairing_page_visible(right->pairing_v2);
+    if (left_pairing_visible || right_pairing_visible) {
+        return left_pairing_visible == right_pairing_visible &&
+               pairing_equal(left->pairing_v2, right->pairing_v2);
+    }
     const bool left_serial_visible = serial_page_visible(left->serial);
     const bool right_serial_visible = serial_page_visible(right->serial);
     if (left_serial_visible || right_serial_visible) {
@@ -255,6 +314,7 @@ bool deck_m0_view_model_equal(const deck_m0_view_model_t *left, const deck_m0_vi
            memcmp(left->setup_ssid, right->setup_ssid, sizeof(left->setup_ssid)) == 0 &&
            memcmp(left->setup_password, right->setup_password, sizeof(left->setup_password)) == 0 &&
            memcmp(left->setup_address, right->setup_address, sizeof(left->setup_address)) == 0 &&
+           pairing_equal(left->pairing_v2, right->pairing_v2) &&
            left->refresh_count == right->refresh_count &&
            left->uptime_seconds == right->uptime_seconds &&
            left->minimum_free_heap_bytes == right->minimum_free_heap_bytes;
@@ -407,6 +467,10 @@ bool deck_m0_view_model_format_active_page(
 {
     if (model == nullptr || ai_page_visible == nullptr) {
         return false;
+    }
+    if (pairing_page_visible(model->pairing_v2)) {
+        *ai_page_visible = false;
+        return format_pairing_page(model->pairing_v2, buffer, buffer_size);
     }
     if (serial_page_visible(model->serial)) {
         *ai_page_visible = false;
