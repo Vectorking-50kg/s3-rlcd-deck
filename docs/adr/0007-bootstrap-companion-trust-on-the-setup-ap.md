@@ -1,5 +1,7 @@
 # Bootstrap Companion trust on the random Setup AP
 
+**Status:** accepted for Pairing v1. [ADR 0026](0026-bootstrap-companion-trust-with-lan-discovery-and-deck-displayed-pake.md) is its proposed replacement and does not supersede this decision until Pairing v2 passes real-Deck acceptance and ships.
+
 Use the Deck's locally initiated, time-limited, random WPA2 Setup AP as the authorization
 channel for the first Companion certificate exchange. The browser submitting Pairing must
 be the Device Hub computer currently connected to that AP; firmware derives its peer IP

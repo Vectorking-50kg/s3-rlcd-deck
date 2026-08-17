@@ -93,6 +93,22 @@ _Avoid_: Primary server, current agent
 The user-authorized establishment of scoped trust between one Deck and one Companion. A successful Pairing creates a Companion Profile on the Deck.
 _Avoid_: Login, device discovery
 
+**Pairing Candidate**:
+A transient, untrusted observation of a Deck that is advertising availability for Pairing on a reachable local network. It never establishes identity or trust by itself.
+_Avoid_: Discovered device, nearby Deck, unpaired device
+
+**Pairing Window**:
+The bounded, locally authorized Deck state in which one Pairing Candidate may accept a Pairing Session. It is distinct from Setup Mode and does not expose device recovery settings.
+_Avoid_: Pairing mode, discovery mode, Setup session
+
+**Pairing Session**:
+The bounded, single-use user interaction that attempts to establish Pairing between one Pairing Candidate and one Companion. It succeeds only when both sides have committed trust and the authenticated Device Link is confirmed.
+_Avoid_: Login session, discovery session, code exchange
+
+**Provisional Trust**:
+Companion-owned trust material staged by one Pairing Session that grants no normal device capability until the matching Deck proves the resulting Device Link.
+_Avoid_: Temporary Token, pending device, partial Pairing
+
 **Companion Profile**:
 A Deck-owned record of one paired Companion's identity, trust material, connection location, preference, and last successful contact.
 _Avoid_: Server profile, account
