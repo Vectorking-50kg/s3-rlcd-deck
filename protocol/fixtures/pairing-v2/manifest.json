@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "protocol_version": 2,
+  "cases": [
+    {"file": "valid-credentials.json", "accepted": true, "type": "pairing.credentials"},
+    {"file": "valid-commit-ready.json", "accepted": true, "type": "pairing.commit_ready"},
+    {"file": "valid-commit.json", "accepted": true, "type": "pairing.commit"},
+    {"file": "valid-commit-receipt.json", "accepted": true, "type": "pairing.commit_receipt"},
+    {"file": "valid-status.json", "accepted": true, "type": "pairing.status"},
+    {"file": "invalid-duplicate-sequence.json", "accepted": false},
+    {"file": "invalid-extra-secret.json", "accepted": false},
+    {"file": "invalid-major.json", "accepted": false},
+    {"file": "invalid-certificate-mismatch.json", "accepted": false},
+    {"file": "invalid-commit-sequence.json", "accepted": false}
+  ]
+}

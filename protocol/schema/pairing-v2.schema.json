@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://s3-rlcd-deck.local/schema/pairing-v2.schema.json",
+  "title": "S3 RLCD Deck Pairing v2 authenticated transaction messages",
+  "oneOf": [
+    {"$ref": "#/$defs/credentials"},
+    {"$ref": "#/$defs/commit_ready"},
+    {"$ref": "#/$defs/commit"},
+    {"$ref": "#/$defs/commit_receipt"},
+    {"$ref": "#/$defs/status_request"},
+    {"$ref": "#/$defs/status"},
+    {"$ref": "#/$defs/cancel"},
+    {"$ref": "#/$defs/error"}
+  ],
+  "$defs": {
+    "session_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "transaction_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "nonce": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "common": {
+      "type": "object",
+      "required": ["type", "protocol_version", "session_id", "transaction_id", "sequence"],
+      "properties": {
+        "type": {"type": "string", "pattern": "^pairing\\.[a-z_]+$"},
+        "protocol_version": {"const": 2},
+        "session_id": {"$ref": "#/$defs/session_id"},
+        "transaction_id": {"$ref": "#/$defs/transaction_id"},
+        "sequence": {"type": "integer", "minimum": 1, "maximum": 4294967295}
+      }
+    },
+    "credentials": {
+      "allOf": [
+        {"$ref": "#/$defs/common"},
+        {
+          "type": "object",
+          "required": ["window_nonce", "companion_nonce", "hub_service", "hub_address", "token", "certificate_fingerprint", "certificate_der", "device_link_protocol"],
+          "properties": {
+            "type": {"const": "pairing.credentials"},
+            "protocol_version": {"const": 2},
+            "session_id": {"$ref": "#/$defs/session_id"},
+            "transaction_id": {"$ref": "#/$defs/transaction_id"},
+            "sequence": {"const": 1},
+            "window_nonce": {"$ref": "#/$defs/nonce"},
+            "companion_nonce": {"$ref": "#/$defs/nonce"},
+            "hub_service": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}\\._s3rlcd-hub\\._tcp\\.local\\.$"},
+            "hub_address": {"type": "string", "minLength": 9, "maxLength": 21},
+            "token": {"type": "string", "pattern": "^[A-Za-z0-9_-]{43}$"},
+            "certificate_fingerprint": {"$ref": "#/$defs/digest"},
+            "certificate_der": {"type": "string", "minLength": 4, "maxLength": 1368, "pattern": "^[A-Za-z0-9+/]+={0,2}$"},
+            "device_link_protocol": {"const": 1}
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "commit_ready": {
+      "type": "object",
+      "required": ["type", "protocol_version", "session_id", "transaction_id", "sequence", "window_nonce", "companion_nonce", "deck_nonce", "device_id", "device_identity", "profile_id", "transcript_sha256"],
+      "properties": {
+        "type": {"const": "pairing.commit_ready"},
+        "protocol_version": {"const": 2},
+        "session_id": {"$ref": "#/$defs/session_id"},
+        "transaction_id": {"$ref": "#/$defs/transaction_id"},
+        "sequence": {"const": 2},
+        "window_nonce": {"$ref": "#/$defs/nonce"},
+        "companion_nonce": {"$ref": "#/$defs/nonce"},
+        "deck_nonce": {"$ref": "#/$defs/nonce"},
+        "device_id": {"type": "string", "minLength": 8, "maxLength": 64, "pattern": "^[a-z0-9][a-z0-9_-]{7,63}$"},
+        "device_identity": {"type": "string", "minLength": 22, "maxLength": 683, "pattern": "^[A-Za-z0-9_-]+$"},
+        "profile_id": {"$ref": "#/$defs/digest"},
+        "transcript_sha256": {"$ref": "#/$defs/digest"}
+      },
+      "additionalProperties": false
+    },
+    "commit": {
+      "type": "object",
+      "required": ["type", "protocol_version", "session_id", "transaction_id", "sequence", "deck_nonce", "transcript_sha256"],
+      "properties": {
+        "type": {"const": "pairing.commit"},
+        "protocol_version": {"const": 2},
+        "session_id": {"$ref": "#/$defs/session_id"},
+        "transaction_id": {"$ref": "#/$defs/transaction_id"},
+        "sequence": {"const": 3},
+        "deck_nonce": {"$ref": "#/$defs/nonce"},
+        "transcript_sha256": {"$ref": "#/$defs/digest"}
+      },
+      "additionalProperties": false
+    },
+    "commit_receipt": {
+      "type": "object",
+      "required": ["type", "protocol_version", "session_id", "transaction_id", "sequence", "profile_id", "profile_generation", "transcript_sha256"],
+      "properties": {
+        "type": {"const": "pairing.commit_receipt"},
+        "protocol_version": {"const": 2},
+        "session_id": {"$ref": "#/$defs/session_id"},
+        "transaction_id": {"$ref": "#/$defs/transaction_id"},
+        "sequence": {"const": 4},
+        "profile_id": {"$ref": "#/$defs/digest"},
+        "profile_generation": {"type": "integer", "minimum": 1, "maximum": 4294967295},
+        "transcript_sha256": {"$ref": "#/$defs/digest"}
+      },
+      "additionalProperties": false
+    },
+    "status_request": {
+      "type": "object",
+      "required": ["type", "protocol_version", "session_id", "transaction_id", "sequence"],
+      "properties": {
+        "type": {"const": "pairing.status_request"},
+        "protocol_version": {"const": 2},
+        "session_id": {"$ref": "#/$defs/session_id"},
+        "transaction_id": {"$ref": "#/$defs/transaction_id"},
+        "sequence": {"type": "integer", "minimum": 5, "maximum": 4294967295}
+      },
+      "additionalProperties": false
+    },
+    "status": {
+      "type": "object",
+      "required": ["type", "protocol_version", "session_id", "transaction_id", "sequence", "state", "error_code", "transcript_sha256"],
+      "properties": {
+        "type": {"const": "pairing.status"},
+        "protocol_version": {"const": 2},
+        "session_id": {"$ref": "#/$defs/session_id"},
+        "transaction_id": {"$ref": "#/$defs/transaction_id"},
+        "sequence": {"type": "integer", "minimum": 5, "maximum": 4294967295},
+        "state": {"enum": ["staged", "committed", "connecting", "online", "failed", "cancelled", "expired"]},
+        "error_code": {"$ref": "#/$defs/error_code"},
+        "transcript_sha256": {"$ref": "#/$defs/digest"}
+      },
+      "additionalProperties": false
+    },
+    "cancel": {
+      "type": "object",
+      "required": ["type", "protocol_version", "session_id", "transaction_id", "sequence"],
+      "properties": {
+        "type": {"const": "pairing.cancel"},
+        "protocol_version": {"const": 2},
+        "session_id": {"$ref": "#/$defs/session_id"},
+        "transaction_id": {"$ref": "#/$defs/transaction_id"},
+        "sequence": {"type": "integer", "minimum": 1, "maximum": 4294967295}
+      },
+      "additionalProperties": false
+    },
+    "error_code": {
+      "enum": ["none", "busy", "expired", "rate_limited", "incompatible_protocol", "malformed", "authentication_failed", "storage_failure", "capacity_reached", "link_failed", "cancelled"]
+    },
+    "error": {
+      "type": "object",
+      "required": ["type", "protocol_version", "session_id", "transaction_id", "sequence", "code"],
+      "properties": {
+        "type": {"const": "pairing.error"},
+        "protocol_version": {"const": 2},
+        "session_id": {"$ref": "#/$defs/session_id"},
+        "transaction_id": {"$ref": "#/$defs/transaction_id"},
+        "sequence": {"type": "integer", "minimum": 1, "maximum": 4294967295},
+        "code": {"$ref": "#/$defs/error_code"}
+      },
+      "additionalProperties": false
+    }
+  }
+}
