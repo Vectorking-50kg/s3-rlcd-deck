@@ -376,7 +376,7 @@ void every_visual_preview_is_named_deterministic_and_panel_safe()
     assert(!deck_ui_preview_page_parse("unknown", &parsed));
     assert(!deck_ui_preview_page_parse(nullptr, &parsed));
     deck_ui_scene_t invalid{};
-    assert(!deck_ui_preview_scene(static_cast<deck_ui_preview_page_t>(99), &invalid));
+    assert(!deck_ui_preview_scene(DECK_UI_PREVIEW_COUNT, &invalid));
     assert(!deck_ui_preview_scene(DECK_UI_PREVIEW_BOARD, nullptr));
 }
 

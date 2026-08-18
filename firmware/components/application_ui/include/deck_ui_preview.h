@@ -26,6 +26,7 @@ typedef enum {
     DECK_UI_PREVIEW_SERIAL,
     DECK_UI_PREVIEW_OFFLINE,
     DECK_UI_PREVIEW_ERROR,
+    DECK_UI_PREVIEW_COUNT,
 } deck_ui_preview_page_t;
 
 /* Parses the stable ASCII page names accepted by the dev-only visual harness. */

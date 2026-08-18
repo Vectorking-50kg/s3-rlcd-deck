@@ -14,6 +14,7 @@ typedef enum {
     DECK_DIAGNOSTIC_LEVEL_INFO = 0,
     DECK_DIAGNOSTIC_LEVEL_WARNING,
     DECK_DIAGNOSTIC_LEVEL_ERROR,
+    DECK_DIAGNOSTIC_LEVEL_COUNT,
 } deck_diagnostic_level_t;
 
 typedef enum {

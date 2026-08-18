@@ -22,7 +22,7 @@ int main()
     require(
         !deck_diagnostic_ring_record(
             0,
-            static_cast<deck_diagnostic_level_t>(99),
+            DECK_DIAGNOSTIC_LEVEL_COUNT,
             DECK_DIAGNOSTIC_COMPONENT_SYSTEM,
             DECK_DIAGNOSTIC_CODE_BOOT,
             0

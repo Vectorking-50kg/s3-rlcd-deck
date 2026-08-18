@@ -1,5 +1,6 @@
 #include "deck_companion_profiles.h"
 
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <new>
