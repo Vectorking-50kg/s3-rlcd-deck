@@ -62,6 +62,13 @@ the committed certificate, Token, Device Identity, or protocol checks. Guest net
 filtering, and client isolation can still prevent discovery or connectivity and must produce an
 explicit unavailable result rather than weakening authentication.
 
+On macOS, Hub publication uses the system Bonjour `DNSServiceRegister` API and is scoped to the
+same selected physical LAN interface as the advertised address. A generic user-space mDNS server
+that opens its own UDP 5353 listener is rejected because it cannot reliably coexist with
+`mDNSResponder`. Pairing credentials remain local until Bonjour has delivered its asynchronous
+registration-success callback; startup, policy, name-conflict, or publication failures surface as
+Hub unavailable rather than being misreported as a post-staging Device Link failure.
+
 The external Companion PairingCoordinator Interface is limited to discovering candidates,
 starting a session, confirming the Deck-displayed code, observing status, and cancellation. Its
 Implementation owns DNS-SD, interface selection, PAKE, candidate/session expiry, Provisional Trust,

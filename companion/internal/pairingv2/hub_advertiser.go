@@ -2,22 +2,23 @@ package pairingv2
 
 import (
 	"errors"
-	"io"
-	"log"
 	"net"
 	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
-
-	mdns "github.com/hashicorp/mdns"
 )
+
+type hubAdvertisementBackend interface {
+	Close() error
+	Healthy() bool
+}
 
 // HubAdvertisement owns one interface-scoped DNS-SD publisher. Its records
 // carry locator data only; Device Link authority remains the pinned certificate
 // and per-Deck bearer Token.
 type HubAdvertisement struct {
-	server    *mdns.Server
+	backend   hubAdvertisementBackend
 	service   string
 	address   string
 	closeOnce sync.Once
@@ -49,27 +50,11 @@ func StartHubAdvertisement(service string, address string) (*HubAdvertisement, e
 	if instance == service || instance == "" {
 		return nil, errors.New("invalid Pairing v2 Hub instance")
 	}
-	zone, err := mdns.NewMDNSService(
-		instance,
-		HubService,
-		PairingDomain,
-		"",
-		port,
-		[]net.IP{net.ParseIP(ip.String())},
-		[]string{"pv=2"},
-	)
+	backend, err := startPlatformHubAdvertisement(instance, port, networkInterface, ip.Unmap())
 	if err != nil {
-		return nil, errors.New("create Pairing v2 Hub advertisement")
+		return nil, err
 	}
-	server, err := mdns.NewServer(&mdns.Config{
-		Zone:   zone,
-		Iface:  networkInterface,
-		Logger: log.New(io.Discard, "", 0),
-	})
-	if err != nil {
-		return nil, errors.New("start Pairing v2 Hub advertisement")
-	}
-	return &HubAdvertisement{server: server, service: service, address: address}, nil
+	return &HubAdvertisement{backend: backend, service: service, address: address}, nil
 }
 
 func (advertisement *HubAdvertisement) Service() string {
@@ -80,10 +65,14 @@ func (advertisement *HubAdvertisement) Service() string {
 }
 
 func (advertisement *HubAdvertisement) Address() string {
-	if advertisement == nil {
+	if advertisement == nil || !advertisement.Healthy() {
 		return ""
 	}
 	return advertisement.address
+}
+
+func (advertisement *HubAdvertisement) Healthy() bool {
+	return advertisement != nil && advertisement.backend != nil && advertisement.backend.Healthy()
 }
 
 func (advertisement *HubAdvertisement) Close() error {
@@ -91,7 +80,7 @@ func (advertisement *HubAdvertisement) Close() error {
 		return nil
 	}
 	advertisement.closeOnce.Do(func() {
-		advertisement.closeErr = advertisement.server.Shutdown()
+		advertisement.closeErr = advertisement.backend.Close()
 	})
 	return advertisement.closeErr
 }

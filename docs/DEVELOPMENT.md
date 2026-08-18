@@ -670,6 +670,9 @@ Companion 使用本地 SQLite 保存最近 90 天的小时级用量、余额和�
 4. 用户在认证后的 Companion Web 扫描并选择候选，Deck 生成并显示一次性六位码。
 5. 用户把该码输入 Companion Web；双方通过 Security2 PAKE 建立认证加密通道，交换独立
    Device Token、Companion 证书、固定指纹和 Device Hub DNS-SD identity。
+   macOS 的 Hub identity 必须通过所选物理局域网接口上的系统 Bonjour
+   `DNSServiceRegister` 发布，并收到成功回调后才允许凭据离开 Mac；不得另开 UDP 5353
+   listener 与 `mDNSResponder` 争用端口。
 6. Deck Profile 与 Companion Trust 先暂存；只有新 Profile 建立证书固定、Token 认证的
    WSS hello/heartbeat 后才同时提交并显示成功。任何失败保留原 Profile 与 Active Companion。
 7. 若断电启动后系统墙钟早于固件提交时间，Deck 只能用 PAKE 已认证或已提交的精确固定证书

@@ -43,7 +43,8 @@ test("countdown is monotonic and clamps at zero", () => {
 test("every stable backend failure has a local fail-closed explanation", () => {
   const expected = [
     "busy", "expired", "rate_limited", "incompatible_protocol", "malformed",
-    "authentication_failed", "storage_failure", "capacity_reached", "link_failed", "cancelled",
+	"authentication_failed", "storage_failure", "capacity_reached", "hub_unavailable",
+	"link_failed", "cancelled",
   ];
   for (const errorCode of expected) {
     const view = pairing.presentation({ state: "failed", error_code: errorCode });

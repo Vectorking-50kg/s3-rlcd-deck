@@ -40,7 +40,7 @@ func TestEmbeddedConsoleContainsCompleteChineseSchemeCWorkflows(t *testing.T) {
 		},
 		"/pairing-v2-ui.js": {
 			"S3DeckPairingV2UI", "awaiting_code", "proving_link", "committing", "paired",
-			"authentication_failed", "storage_failure", "link_failed", "validCode",
+			"authentication_failed", "storage_failure", "hub_unavailable", "link_failed", "validCode",
 		},
 		"/vendor/xterm/xterm.js":           {"Terminal", "Uint8Array", "dispose"},
 		"/vendor/xterm/addon-fit.js":       {"FitAddon"},

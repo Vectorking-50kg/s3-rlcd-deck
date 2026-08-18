@@ -28,6 +28,7 @@
     ["authentication_failed", "六位码不正确，或安全握手未通过。"],
     ["storage_failure", "Deck 无法安全保存新的 Companion Profile。"],
     ["capacity_reached", "Deck 已达到可保存的 Companion Profile 数量上限。"],
+	["hub_unavailable", "Mac 的 Device Hub 尚未在当前局域网准备完成；本次未向 Deck 发送凭据。"],
     ["link_failed", "凭据已暂存，但 Device Link 未能完成认证和心跳验证。"],
     ["cancelled", "本次配对已取消。"],
     ["pairing_failed", "配对事务失败。请确认两台设备仍在同一局域网，并重新打开配对窗口。"],

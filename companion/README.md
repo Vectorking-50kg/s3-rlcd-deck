@@ -243,6 +243,11 @@ Security2 PAKE channel after the user enters the code displayed on the Deck. Tru
 remain provisional until the exact new Device Link proves its pinned certificate, independent
 device Token, hello, and heartbeat. The Setup AP is not part of this flow.
 
+On macOS, Companion publishes `_s3rlcd-hub._tcp.local.` through the native Bonjour
+`DNSServiceRegister` API on the selected physical LAN interface. It does not open a second UDP
+5353 listener alongside `mDNSResponder`; registration must receive the system success callback
+before Pairing v2 credentials may leave the Mac.
+
 The Companion stores its certificate identity, token verifiers, and bounded redacted Pairing audit under the platform user-configuration directory. Files and their directory are protected with owner-only permissions. Override the location for development with `--data-directory`; neither Pairing codes nor device Tokens are stored in plaintext.
 
 Open <http://127.0.0.1:7777>. To inspect the build identity without starting a listener:

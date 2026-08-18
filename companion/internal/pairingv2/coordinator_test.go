@@ -290,6 +290,24 @@ func TestCoordinatorRejectsAlteredTranscriptBeforeTrustOrCommit(t *testing.T) {
 }
 
 func TestCoordinatorPreservesStableFailureCodes(t *testing.T) {
+	t.Run("Companion Hub is unavailable before credentials leave the Mac", func(t *testing.T) {
+		channel := newScriptedPairingChannel()
+		coordinator, _, session := newCoordinatorFixture(t, channel)
+		coordinator.hub = func(context.Context) (HubLocator, error) {
+			return HubLocator{}, errors.New("Hub advertisement unavailable")
+		}
+		view, err := coordinator.Confirm(context.Background(), session.Reference, "012345")
+		if !errors.Is(err, ErrPairingFailed) || view.State != SessionFailed ||
+			view.ErrorCode != "hub_unavailable" {
+			t.Fatalf("Confirm(Hub unavailable) = %#v, %v", view, err)
+		}
+		select {
+		case <-channel.credentialsReceived:
+			t.Fatal("credentials left the Mac without a registered Device Hub")
+		default:
+		}
+	})
+
 	t.Run("Security2 rejects a wrong code", func(t *testing.T) {
 		channel := newScriptedPairingChannel()
 		channel.connectError = errSecurity2Proof

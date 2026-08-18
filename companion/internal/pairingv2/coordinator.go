@@ -388,7 +388,7 @@ func (coordinator *Coordinator) confirm(
 	}
 	locator, err := coordinator.hub(ctx)
 	if err != nil {
-		coordinator.setFailureCode(record, "link_failed")
+		coordinator.setFailureCode(record, "hub_unavailable")
 		return err
 	}
 	channel, err := coordinator.connectRoutes(ctx, record.selection.Routes, code)
@@ -532,12 +532,16 @@ func (coordinator *Coordinator) confirm(
 }
 
 func (coordinator *Coordinator) setFailureCode(record *sessionRecord, code string) {
-	if code == "none" || !validErrorCode(code) {
+	if code == "none" || !validSessionErrorCode(code) {
 		return
 	}
 	coordinator.mutex.Lock()
 	record.view.ErrorCode = code
 	coordinator.mutex.Unlock()
+}
+
+func validSessionErrorCode(code string) bool {
+	return code == "hub_unavailable" || validErrorCode(code)
 }
 
 func (coordinator *Coordinator) remoteErrorMatches(
