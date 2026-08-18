@@ -38,10 +38,9 @@ With no committed Wi-Fi configuration, or after the committed network cannot be 
 the Deck starts a temporary Setup AP. A BOOT long press also starts a fresh session. Each
 session uses a new `S3-RLCD-XXXX` SSID and a readable WPA2 password shown only on the Deck
 screen. The ordinary HTTP page at `http://192.168.4.1/` exposes status, an explicit network
-scan, Wi-Fi and calibration forms, and Companion Profile management. Pairing accepts only
-an explicit `host:port` and a six-digit one-time code. The Setup HTTP peer must be the
-computer running that Device Hub on the current `192.168.4.0/24` Setup network; a remote
-address supplied by form data cannot redirect the one-time trust bootstrap. The same page can
+scan, Wi-Fi and calibration forms, and Companion Profile management. Its legacy Pairing page is
+available only at the explicit `/compat/pairing-v1` migration route for old firmware. New Pairing
+is performed on the normal LAN from the Companion Web and never asks the Mac to join this AP. The same page can
 transactionally select Active, revoke a Profile, or edit its integer failover priority (higher
 values are attempted first); every successful edit advances the Profile generation.
 
@@ -311,12 +310,17 @@ Setup responses never expose the Token or certificate bytes. A failed redeem, ma
 credential, capacity limit, NVS error, or interrupted write leaves the last committed
 Profile set and Wi-Fi configuration unchanged.
 
-The one-time certificate-discovery request is allowed only while the computer is connected
-to the Deck's fresh random WPA2 Setup AP. The Deck validates the returned certificate hash
-before committing it. A successful Pair response carries a random 128-bit, single-use ACK
-capability. Setup closes only after the same Setup client has received the 202 response and
-returned that capability; a missing, stale, replayed, or different-client ACK keeps the
-recovery surface active and reports `pair_response`. Normal operation never
+Pairing v2 keeps both peers on the same normal LAN. A bounded Pairing Window advertises only an
+anonymous `_s3rlcd-pair._tcp.local.` candidate; an unpaired Deck may open its first window
+automatically and an already paired Deck requires a short BOOT press. The Deck displays the random
+six-digit code and exchanges credentials only after the Security2 PAKE confirms both peers. Profile
+and Companion Trust are staged until the exact new certificate-pinned, Token-authenticated Device
+Link proves its first heartbeat. Failure or expiry clears provisional secrets and leaves the old
+Profile set and Active Companion unchanged. When a cold boot has no credible wall clock, the exact
+authenticated pinned certificate may seed TLS time only within its validity window and no earlier
+than the immutable firmware-build time; an already credible clock is never moved to admit a future
+or expired certificate. The first valid pinned-WSS heartbeat then supplies trusted UTC. Normal
+operation never
 uses discovery trust: the `companion_link` module initiates WSS with the exact stored
 certificate, device identity, and per-Deck Token. It sends `device.hello` first, accepts
 only strict version-1 heartbeat frames up to 16 KiB, marks the Companion offline after 30
@@ -336,11 +340,10 @@ the replacement transport starts. The ESP-IDF
 stock handshake error path prints custom headers; Deck-owned diagnostics remain redacted.
 All credentials remain private to the Profile and Device Link modules.
 
-Development builds expose only redacted M1 diagnostics: build identity, Setup access through
-the explicit HIL command, and Companion state/error counters. The acceptance controller keeps
-the Mac on its normal LAN and delegates the real recovery-page transaction to a separately
-wired, NetworkManager-managed Linux helper. Setup credentials are sent over SSH standard input,
-replaced by a fixed marker in evidence, and never compiled into release firmware.
+Development builds expose only redacted M1 diagnostics: build identity, Pairing v2 state without
+the code, Setup access through the explicit HIL command, and Companion state/error counters. The
+Pairing v2 acceptance controller keeps Mac and Deck on their normal LAN and requires the user to
+read the code from the physical display. Pairing codes and credentials never enter retained evidence.
 
 Release firmware also advertises the `diagnostics` capability. The `health` component owns one
 volatile 64-event `Deck Diagnostic Ring`; callers can record only fixed level/component/code enums,
@@ -363,8 +366,9 @@ boolean, or bounded integer fields. Host and firmware builds run the same fixtur
 `protocol/fixtures`.
 
 The `Snapshot Store` is the only stateful sink used by Companion Link for `snapshot.ai`.
-It replaces the in-memory document immediately after full validation, rejects future or
-regressing timestamps, and checkpoints through versioned candidate/two-slot records with
+It replaces the in-memory document immediately after full validation, allows at most five
+seconds of bounded queue/transport skew but rejects later future or regressing timestamps,
+and checkpoints through versioned candidate/two-slot records with
 length, CRC, readback verification, and an atomic active marker. The dedicated 128 KiB
 `snapshot_nvs` partition has room for three maximum 16 KiB records plus NVS replacement/GC
 overhead. A private worker owns Flash open, recovery reads, writes, and close, so Store creation

@@ -1,0 +1,1 @@
+{"type":"pairing.status","protocol_version":2,"session_id":"00112233445566778899aabbccddeeff","transaction_id":"ffeeddccbbaa99887766554433221100","sequence":5,"state":"connecting","error_code":"none","transcript_sha256":"sha256:ed73b99fc50c3d32bcb6404f42c11890585d2362af77b75578140dd1619d0493"}

@@ -5,6 +5,10 @@ const state = {
   editing: "", backup: null, ota: null, diagnostics: null, otaPreviewEpoch: 0, page: "overview", providerFilter: "all", deckIndex: 0,
   serialPresets: [], serialPresetEditing: "",
   serialPresetOperationEpoch: 0, serialPresetOperationController: new AbortController(),
+  pairingV2: {
+    epoch: 0, controller: new AbortController(), candidates: [], sessionRef: "", view: null,
+    pollTimer: null, countdownTimer: null, originPage: "",
+  },
   serial: {
     client: null, terminal: null, fit: null, search: null, resizeObserver: null,
     reconnectTimer: null, heartbeatTimer: null, mode: "text", paused: false,
@@ -58,7 +62,15 @@ const errorMessages = new Map([
   ["Provider operation unavailable", "Provider 操作暂时不可用。"],
   ["diagnostics unavailable", "脱敏诊断当前不可用。"],
   ["diagnostic bundle unavailable", "诊断包暂时无法生成。"],
+  ["Pairing v2 unavailable", "安全配对当前不可用。"],
+  ["Pairing v2 scan unavailable", "没有发现可用的 Deck；请确认两台设备在同一局域网，且路由器未隔离客户端或屏蔽 mDNS。"],
+  ["Pairing v2 candidate unavailable", "这个 Deck 候选已经过期，请重新扫描。"],
+  ["Pairing v2 session unavailable", "配对会话已经失效，请重新扫描。"],
+  ["Pairing v2 session state conflict", "配对会话当前不能执行这个操作，请刷新状态或重新开始。"],
+  ["malformed Pairing v2 request", "请输入 Deck 屏幕上显示的六位数字配对码。"],
 ]);
+
+const pairingV2SessionStorageKey = "s3deck.pairing-v2.session-ref";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
@@ -251,6 +263,10 @@ function openMobileNavigation() {
 }
 
 function navigate(page, updateHash = true) {
+  if ($("#pairing-v2-dialog")?.open && state.pairingV2.originPage &&
+      page !== state.pairingV2.originPage) {
+    void cancelPairingV2();
+  }
   if (page === "provider-editor" && !providerDataWritable()) {
     page = "providers";
     if (state.sync.providers.error) providerConfigurationIsFresh(true);
@@ -285,6 +301,7 @@ function navigate(page, updateHash = true) {
 }
 
 function scrubSensitiveState() {
+  resetPairingV2({ forget: true, close: true });
   state.console = null;
   state.providers = [];
   state.templates = [];
@@ -347,6 +364,8 @@ async function authenticate(csrf) {
   await Promise.all([loadConsole(), loadProviders()]);
   if (!state.authenticated) return;
   navigate(location.hash.slice(1) || "overview", false);
+  await resumePairingV2Session();
+  if (!state.authenticated) return;
   if (state.refreshTimer) window.clearInterval(state.refreshTimer);
   state.refreshTimer = window.setInterval(() => {
     if (!document.hidden && state.authenticated) loadConsole(true);
@@ -596,7 +615,7 @@ async function exportDiagnostics() {
 
 function updateCapabilityControls() {
   const capabilities = state.console?.capabilities || {};
-  $$('[data-action="pair-deck"], #pair-deck').forEach((button) => { button.disabled = !capabilities.pairing; });
+  $$('[data-action="pair-deck"], #pair-deck').forEach((button) => { button.disabled = !capabilities.pairing_v2; });
   $("#new-provider").disabled = !providerDataWritable();
   $("#history-enabled").disabled = !capabilities.history;
   $("#save-history").disabled = !capabilities.history;
@@ -1055,20 +1074,301 @@ function renderDeckPreview() {
   setText("#deck-provider-updated", `${formatTime(provider.updated_at)}（${formatRelative(provider.updated_at)}）`);
 }
 
-async function issuePairingCode() {
-  const operation = authenticatedOperation();
+function clearPairingV2Timers() {
+  if (state.pairingV2.pollTimer) window.clearTimeout(state.pairingV2.pollTimer);
+  if (state.pairingV2.countdownTimer) window.clearTimeout(state.pairingV2.countdownTimer);
+  state.pairingV2.pollTimer = null;
+  state.pairingV2.countdownTimer = null;
+}
+
+function rotatePairingV2Scope() {
+  clearPairingV2Timers();
+  state.pairingV2.controller.abort();
+  state.pairingV2.controller = new AbortController();
+  state.pairingV2.epoch += 1;
+}
+
+function pairingV2Operation() {
+  return {
+    authEpoch: state.authEpoch, epoch: state.pairingV2.epoch,
+    signal: state.pairingV2.controller.signal,
+  };
+}
+
+function pairingV2OperationIsCurrent(operation) {
+  return state.authenticated && operation.authEpoch === state.authEpoch &&
+    operation.epoch === state.pairingV2.epoch && !operation.signal.aborted;
+}
+
+function storePairingV2Session(reference = "") {
   try {
-    const response = await request("/api/v1/pairing/codes", { method: "POST", body: "{}", signal: operation.signal });
-    const issued = await response.json();
-    if (!operationIsCurrent(operation)) return;
-    const advertisedAddress = issued.device_hub_address;
-    if (!advertisedAddress) throw new Error("Device Hub 尚无可达公告地址；请配置明确的局域网地址后重试。");
-    const body = element("div");
-    body.append(element("p", "", "在 Deck 的 Setup 页面输入以下一次性配对码："), element("div", "pairing-code", issued.code),
-      element("p", "muted", `Device Hub：${advertisedAddress}`),
-      element("p", "muted", `有效期至：${formatTime(issued.expires_at)}`));
-    await showDialog({ eyebrow: "Deck Pairing", title: "一次性配对码", body, confirmText: "完成", informational: true });
-  } catch (error) { if (operationIsCurrent(operation)) toast("无法生成配对码", error.message, true); }
+    if (reference) sessionStorage.setItem(pairingV2SessionStorageKey, reference);
+    else sessionStorage.removeItem(pairingV2SessionStorageKey);
+  } catch (_) { /* private browsing may disable session storage; the live flow still works. */ }
+}
+
+function resetPairingV2({ forget = true, close = false } = {}) {
+  rotatePairingV2Scope();
+  state.pairingV2.candidates = [];
+  state.pairingV2.view = null;
+  if (forget) {
+    state.pairingV2.sessionRef = "";
+    storePairingV2Session();
+  }
+  const code = $("#pairing-v2-code");
+  if (code) code.value = "";
+  const candidates = $("#pairing-v2-candidates");
+  if (candidates) candidates.replaceChildren();
+  const form = $("#pairing-v2-code-form");
+  if (form) form.hidden = true;
+  const dialog = $("#pairing-v2-dialog");
+  if (close) {
+    state.pairingV2.originPage = "";
+    if (dialog?.open) dialog.close();
+  }
+}
+
+function setPairingV2Feedback(title, detail, kind = "neutral") {
+  setText("#pairing-v2-state", title);
+  setText("#pairing-v2-detail", detail);
+  const callout = $("#pairing-v2-feedback");
+  callout.className = `callout compact ${kind}`;
+}
+
+function renderPairingV2Candidates() {
+  if (!state.authenticated || state.pairingV2.sessionRef) return;
+  const candidates = window.S3DeckPairingV2UI.candidates(state.pairingV2.candidates);
+  const target = $("#pairing-v2-candidates");
+  target.replaceChildren();
+  if (!candidates.length) {
+    target.append(emptyState("没有可用的 Deck", "请确认 Deck 已打开配对窗口，并点击“重新扫描”。"));
+    setPairingV2Feedback("未发现设备", "同网不等于一定可互访；访客网络、客户端隔离或 mDNS 过滤会阻止发现。", "warning");
+    return;
+  }
+  setPairingV2Feedback("请选择 Deck", "候选是短期匿名记录；页面不会获得 IP、MAC、Device ID 或信任材料。", "info");
+  for (const candidate of candidates) {
+    const row = element("div", "pairing-candidate");
+    const copy = element("div");
+    copy.append(element("strong", "", candidate.label),
+      element("small", "", window.S3DeckPairingV2UI.candidateExpiryText(candidate.expiresAt)));
+    const button = element("button", "button primary", "选择并继续");
+    button.type = "button";
+    button.addEventListener("click", () => beginPairingV2Session(candidate.reference));
+    row.append(copy, button);
+    target.append(row);
+  }
+  state.pairingV2.countdownTimer = window.setTimeout(renderPairingV2Candidates, 1000);
+}
+
+function schedulePairingV2Poll(delay = 900) {
+  if (state.pairingV2.pollTimer) window.clearTimeout(state.pairingV2.pollTimer);
+  state.pairingV2.pollTimer = window.setTimeout(pollPairingV2Session, delay);
+}
+
+function renderPairingV2Session(view) {
+  state.pairingV2.view = view;
+  state.pairingV2.sessionRef = view.session_ref;
+  $("#pairing-v2-candidates").replaceChildren();
+  const presentation = window.S3DeckPairingV2UI.presentation(view);
+  setPairingV2Feedback(presentation.title, presentation.detail, presentation.kind);
+  const awaitingCode = presentation.state === "awaiting_code";
+  $("#pairing-v2-code-form").hidden = !awaitingCode;
+  $("#pairing-v2-rescan").hidden = !presentation.terminal;
+  $("#pairing-v2-cancel").textContent = presentation.terminal ? "关闭" : "取消配对";
+  $("#pairing-v2-countdown").textContent = window.S3DeckPairingV2UI.sessionExpiryText(view.expires_at);
+  if (awaitingCode) $("#pairing-v2-code").focus();
+  if (presentation.terminal) {
+    clearPairingV2Timers();
+    storePairingV2Session();
+    if (presentation.success) toast("Deck 配对完成", "新的 Device Link 已通过认证心跳并正式在线。");
+    return;
+  }
+  storePairingV2Session(view.session_ref);
+  state.pairingV2.countdownTimer = window.setTimeout(() => {
+    if (state.pairingV2.view?.session_ref === view.session_ref) {
+      $("#pairing-v2-countdown").textContent = window.S3DeckPairingV2UI.sessionExpiryText(view.expires_at);
+    }
+  }, 1000);
+  schedulePairingV2Poll();
+}
+
+async function scanPairingV2Candidates() {
+  if (!state.console?.capabilities?.pairing_v2) {
+    toast("安全配对不可用", "当前 Companion 未启用 Pairing v2。", true);
+    return;
+  }
+  resetPairingV2({ forget: true });
+  const operation = pairingV2Operation();
+  $("#pairing-v2-rescan").hidden = true;
+  $("#pairing-v2-cancel").textContent = "关闭";
+  setPairingV2Feedback("正在扫描", "Companion 正在默认局域网接口上查找已打开配对窗口的 Deck。", "info");
+  $("#pairing-v2-candidates").replaceChildren(element("span", "skeleton-line"), element("span", "skeleton-line"));
+  try {
+    const response = await request("/api/v1/pairing-v2/scan", {
+      method: "POST", body: "{}", signal: operation.signal,
+    });
+    const result = await response.json();
+    if (!pairingV2OperationIsCurrent(operation)) return;
+    state.pairingV2.candidates = result.candidates || [];
+    $("#pairing-v2-rescan").hidden = false;
+    renderPairingV2Candidates();
+  } catch (error) {
+    if (error?.name === "AbortError" || !pairingV2OperationIsCurrent(operation)) return;
+    state.pairingV2.candidates = [];
+    $("#pairing-v2-rescan").hidden = false;
+    $("#pairing-v2-candidates").replaceChildren(emptyState("扫描不可用", error.message));
+    setPairingV2Feedback("无法扫描", error.message, "danger");
+  }
+}
+
+async function beginPairingV2Session(candidateReference) {
+  const operation = pairingV2Operation();
+  clearPairingV2Timers();
+  setPairingV2Feedback("正在建立会话", "请保持 Deck 配对窗口开启。", "info");
+  $("#pairing-v2-candidates").replaceChildren(element("span", "skeleton-line"));
+  try {
+    const response = await request("/api/v1/pairing-v2/sessions", {
+      method: "POST", body: JSON.stringify({ candidate_ref: candidateReference }), signal: operation.signal,
+    });
+    const view = await response.json();
+    if (!pairingV2OperationIsCurrent(operation)) return;
+    renderPairingV2Session(view);
+  } catch (error) {
+    if (error?.name === "AbortError" || !pairingV2OperationIsCurrent(operation)) return;
+    setPairingV2Feedback("无法建立会话", error.message, "danger");
+    $("#pairing-v2-rescan").hidden = false;
+    $("#pairing-v2-candidates").replaceChildren(emptyState("候选已失效", "请重新扫描并再次选择 Deck。"));
+  }
+}
+
+async function confirmPairingV2(event) {
+  event.preventDefault();
+  if (!state.pairingV2.sessionRef || state.pairingV2.view?.state !== "awaiting_code") return;
+  const input = $("#pairing-v2-code");
+  let code = input.value;
+  if (!window.S3DeckPairingV2UI.validCode(code)) {
+    input.setCustomValidity("请输入六位数字配对码。");
+    input.reportValidity();
+    return;
+  }
+  input.setCustomValidity("");
+  let body = JSON.stringify({ code });
+  input.value = "";
+  const operation = pairingV2Operation();
+  state.pairingV2.view = { ...state.pairingV2.view, state: "authenticating" };
+  $("#pairing-v2-code-form").hidden = true;
+  setPairingV2Feedback("正在验证", "正在建立 PAKE 安全通道；请保持 Deck 在线。", "info");
+  try {
+    const reference = encodeURIComponent(state.pairingV2.sessionRef);
+    const response = await request(`/api/v1/pairing-v2/sessions/${reference}/confirm`, {
+      method: "POST", body, signal: operation.signal,
+    });
+    const view = await response.json();
+    if (!pairingV2OperationIsCurrent(operation)) return;
+    renderPairingV2Session(view);
+  } catch (error) {
+    if (error?.name !== "AbortError" && pairingV2OperationIsCurrent(operation)) {
+      setPairingV2Feedback("无法提交验证码", error.message, "danger");
+      $("#pairing-v2-code-form").hidden = false;
+    }
+  } finally {
+    code = "";
+    body = "";
+    input.value = "";
+  }
+}
+
+async function pollPairingV2Session() {
+  const reference = state.pairingV2.sessionRef;
+  if (!reference) return;
+  const operation = pairingV2Operation();
+  try {
+    const response = await request(`/api/v1/pairing-v2/sessions/${encodeURIComponent(reference)}`, {
+      signal: operation.signal,
+    });
+    const view = await response.json();
+    if (!pairingV2OperationIsCurrent(operation) || state.pairingV2.sessionRef !== reference) return;
+    renderPairingV2Session(view);
+  } catch (error) {
+    if (error?.name === "AbortError" || !pairingV2OperationIsCurrent(operation)) return;
+    if (state.pairingV2.view &&
+        window.S3DeckPairingV2UI.secondsRemaining(state.pairingV2.view.expires_at) === 0) {
+      renderPairingV2Session({
+        ...state.pairingV2.view, state: "expired", error_code: "expired",
+      });
+      return;
+    }
+    setPairingV2Feedback("连接状态暂不可用", `${error.message} Companion 会继续检查，且不会假定配对成功。`, "warning");
+    schedulePairingV2Poll(1500);
+  }
+}
+
+async function cancelPairingV2() {
+  const reference = state.pairingV2.sessionRef;
+  const terminal = window.S3DeckPairingV2UI.presentation(state.pairingV2.view).terminal;
+  $("#pairing-v2-code").value = "";
+  const dialog = $("#pairing-v2-dialog");
+  state.pairingV2.originPage = "";
+  if (dialog.open) dialog.close();
+  state.pairingV2.sessionRef = "";
+  state.pairingV2.view = null;
+  storePairingV2Session();
+  if (reference && !terminal) {
+    rotatePairingV2Scope();
+    const operation = pairingV2Operation();
+    try {
+      await request(`/api/v1/pairing-v2/sessions/${encodeURIComponent(reference)}`, {
+        method: "DELETE", signal: operation.signal,
+      });
+    } catch (error) {
+      if (error?.name !== "AbortError" && pairingV2OperationIsCurrent(operation)) {
+        toast("配对取消待过期", "Companion 暂时无法确认远端取消；临时会话仍会按截止时间自动清理。", true);
+      }
+    }
+  }
+  resetPairingV2({ forget: true, close: true });
+}
+
+async function openPairingV2Dialog() {
+  if (!state.console?.capabilities?.pairing_v2) {
+    toast("安全配对不可用", "当前 Companion 未启用 Pairing v2。", true);
+    return;
+  }
+  const dialog = $("#pairing-v2-dialog");
+  state.pairingV2.originPage = state.page;
+  if (!dialog.open) dialog.showModal();
+  if (state.pairingV2.sessionRef && state.pairingV2.view) {
+    renderPairingV2Session(state.pairingV2.view);
+    return;
+  }
+  await scanPairingV2Candidates();
+}
+
+async function resumePairingV2Session() {
+  let reference = "";
+  try { reference = sessionStorage.getItem(pairingV2SessionStorageKey) || ""; } catch (_) { return; }
+  if (!/^[A-Za-z0-9_-]{16,64}$/.test(reference)) {
+    storePairingV2Session();
+    return;
+  }
+  resetPairingV2({ forget: false });
+  state.pairingV2.sessionRef = reference;
+  const operation = pairingV2Operation();
+  try {
+    const response = await request(`/api/v1/pairing-v2/sessions/${encodeURIComponent(reference)}`, {
+      signal: operation.signal,
+    });
+    const view = await response.json();
+    if (!pairingV2OperationIsCurrent(operation)) return;
+    state.pairingV2.originPage = state.page;
+    $("#pairing-v2-dialog").showModal();
+    renderPairingV2Session(view);
+  } catch (error) {
+    if (error?.name === "AbortError" || !pairingV2OperationIsCurrent(operation)) return;
+    state.pairingV2.sessionRef = "";
+    storePairingV2Session();
+    toast("无法恢复配对会话", "会话已失效；请重新扫描 Deck。", true);
+  }
 }
 
 async function exportBackup() {
@@ -1934,7 +2234,15 @@ $("#mobile-backdrop").addEventListener("click", closeMobileNavigation);
 $$('[data-page]').forEach((button) => button.addEventListener("click", () => navigate(button.dataset.page)));
 $$('[data-action="refresh"]').forEach((button) => button.addEventListener("click", () => loadConsole()));
 $$('[data-action="logout"]').forEach((button) => button.addEventListener("click", logout));
-$$('[data-action="pair-deck"], #pair-deck').forEach((button) => button.addEventListener("click", issuePairingCode));
+$$('[data-action="pair-deck"], #pair-deck').forEach((button) => button.addEventListener("click", openPairingV2Dialog));
+$("#pairing-v2-code-form").addEventListener("submit", confirmPairingV2);
+$("#pairing-v2-rescan").addEventListener("click", scanPairingV2Candidates);
+$("#pairing-v2-cancel").addEventListener("click", cancelPairingV2);
+$("#pairing-v2-close").addEventListener("click", cancelPairingV2);
+$("#pairing-v2-dialog").addEventListener("cancel", (event) => {
+  event.preventDefault();
+  cancelPairingV2();
+});
 $$('[data-provider-filter]').forEach((button) => button.addEventListener("click", () => {
   state.providerFilter = button.dataset.providerFilter;
   $$('[data-provider-filter]').forEach((candidate) => candidate.classList.toggle("active", candidate === button));

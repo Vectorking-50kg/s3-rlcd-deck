@@ -108,3 +108,18 @@ func (store *MemoryStore) RevokeTrust(_ context.Context, deviceID string, _ time
 	delete(store.trusts, deviceID)
 	return nil
 }
+
+func (store *MemoryStore) CommitTrust(_ context.Context, trust StoredTrust) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if existing, found := store.trusts[trust.DeviceID]; found {
+		if existing.DeviceIdentityVerifier != trust.DeviceIdentityVerifier ||
+			existing.ProtocolVersion != trust.ProtocolVersion {
+			return ErrProvisionalConflict
+		}
+		trust.RotatedAt = trust.CreatedAt.UTC()
+		trust.CreatedAt = existing.CreatedAt
+	}
+	store.trusts[trust.DeviceID] = trust
+	return nil
+}

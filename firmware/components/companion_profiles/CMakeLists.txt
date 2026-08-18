@@ -1,5 +1,6 @@
 idf_component_register(
     SRCS
+        "deck_companion_identity.cpp"
         "deck_companion_profiles.cpp"
         "deck_companion_profiles_nvs.cpp"
         "deck_companion_pairing_esp.cpp"

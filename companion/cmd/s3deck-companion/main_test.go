@@ -39,6 +39,15 @@ func TestVersionFlagPrintsBuildIdentity(t *testing.T) {
 	}
 }
 
+func TestOpenConsoleRequiresNativeDesktopShell(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := run([]string{"--headless", "--open-console"}, &stdout, &stderr)
+	if exitCode != 2 || !bytes.Contains(stderr.Bytes(), []byte("requires the native desktop shell")) {
+		t.Fatalf("run() exit=%d stderr=%q", exitCode, stderr.String())
+	}
+}
+
 func TestRunFailsClosedWithMalformedPersistedManagementToken(t *testing.T) {
 	t.Setenv(managementTokenEnvironment, "not-a-valid-token")
 	directory := t.TempDir()

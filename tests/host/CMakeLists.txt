@@ -184,6 +184,13 @@ deck_add_host_test(
         ../../firmware/components/transaction_store/include
 )
 deck_add_host_test(
+    test_companion_identity
+    SOURCES
+        test_companion_identity.cpp
+        ../../firmware/components/companion_profiles/deck_companion_identity.cpp
+    INCLUDE_DIRS ../../firmware/components/companion_profiles/include
+)
+deck_add_host_test(
     test_device_protocol
     SOURCES
         test_device_protocol.cpp
@@ -222,6 +229,13 @@ deck_add_host_test(
         test_companion_link_timing.cpp
         ../../firmware/components/companion_link/deck_companion_link_timing.cpp
     INCLUDE_DIRS ../../firmware/components/companion_link/include
+)
+deck_add_host_test(
+    test_tls_clock_policy
+    SOURCES
+        test_tls_clock_policy.cpp
+        ../../firmware/components/tls_clock/deck_tls_clock_policy.cpp
+    INCLUDE_DIRS ../../firmware/components/tls_clock
 )
 deck_add_host_test(
     test_ota_transaction
@@ -311,6 +325,34 @@ deck_add_host_test(
         ../../firmware/components/setup_mode/deck_setup_response_barrier.cpp
     INCLUDE_DIRS ../../firmware/components/setup_mode/include
 )
+deck_add_host_test(
+    test_pairing_v2_contract
+    SOURCES
+        test_pairing_v2_contract.cpp
+        ../../firmware/components/lan_pairing/deck_pairing_v2_contract.cpp
+    INCLUDE_DIRS ../../firmware/components/lan_pairing/include
+)
+target_compile_definitions(
+    test_pairing_v2_contract
+    PRIVATE DECK_REPOSITORY_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../.."
+)
+deck_add_host_test(
+    test_pairing_v2_transaction
+    SOURCES
+        test_pairing_v2_transaction.cpp
+        ../../firmware/components/lan_pairing/deck_pairing_v2_contract.cpp
+        ../../firmware/components/lan_pairing/deck_pairing_v2_transaction.cpp
+        ../../firmware/components/companion_profiles/deck_companion_profiles.cpp
+        ../../firmware/components/transaction_store/deck_transaction_store.cpp
+    INCLUDE_DIRS
+        ../../firmware/components/lan_pairing/include
+        ../../firmware/components/companion_profiles/include
+        ../../firmware/components/transaction_store/include
+)
+target_compile_definitions(
+    test_pairing_v2_transaction
+    PRIVATE DECK_REPOSITORY_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../.."
+)
 
 add_test(
     NAME hil_boot_smoke_replay
@@ -347,6 +389,10 @@ add_test(
 add_test(
     NAME m1_setup_client_contract
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_m1_setup_client.py
+)
+add_test(
+    NAME pairing_v2_acceptance_contract
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pairing_v2_acceptance.py
 )
 add_test(
     NAME companion_native_smoke_contract

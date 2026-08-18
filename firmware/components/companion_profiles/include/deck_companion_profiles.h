@@ -19,6 +19,8 @@ extern "C" {
 #define DECK_COMPANION_FINGERPRINT_CAPACITY 72
 #define DECK_COMPANION_CERTIFICATE_DER_CAPACITY 1024
 #define DECK_COMPANION_PAIRING_CODE_CAPACITY 7
+#define DECK_COMPANION_PAIRING_V2_ID_CAPACITY 33
+#define DECK_COMPANION_HUB_SERVICE_CAPACITY 96
 
 typedef struct deck_companion_profiles deck_companion_profiles_t;
 
@@ -83,6 +85,7 @@ typedef struct {
 
 typedef struct {
     char profile_id[DECK_COMPANION_PROFILE_ID_CAPACITY];
+    char hub_service[DECK_COMPANION_HUB_SERVICE_CAPACITY];
     char hub_address[DECK_COMPANION_HUB_ADDRESS_CAPACITY];
     char token[DECK_COMPANION_TOKEN_CAPACITY];
     char certificate_fingerprint[DECK_COMPANION_FINGERPRINT_CAPACITY];
@@ -90,6 +93,35 @@ typedef struct {
     size_t certificate_der_size;
     uint8_t protocol_version;
 } deck_companion_profile_secret_t;
+
+typedef struct {
+    char session_id[DECK_COMPANION_PAIRING_V2_ID_CAPACITY];
+    char transaction_id[DECK_COMPANION_PAIRING_V2_ID_CAPACITY];
+    char hub_service[DECK_COMPANION_HUB_SERVICE_CAPACITY];
+    char hub_address[DECK_COMPANION_HUB_ADDRESS_CAPACITY];
+    char token[DECK_COMPANION_TOKEN_CAPACITY];
+    char certificate_fingerprint[DECK_COMPANION_FINGERPRINT_CAPACITY];
+    uint8_t certificate_der[DECK_COMPANION_CERTIFICATE_DER_CAPACITY];
+    size_t certificate_der_size;
+    uint8_t protocol_version;
+} deck_companion_profile_stage_request_t;
+
+typedef struct {
+    char session_id[DECK_COMPANION_PAIRING_V2_ID_CAPACITY];
+    char transaction_id[DECK_COMPANION_PAIRING_V2_ID_CAPACITY];
+    char profile_id[DECK_COMPANION_PROFILE_ID_CAPACITY];
+    uint32_t profile_generation;
+} deck_companion_profile_stage_ticket_t;
+
+typedef enum {
+    DECK_COMPANION_PROFILE_STAGE_UPDATED = 0,
+    DECK_COMPANION_PROFILE_STAGE_NOT_FOUND,
+    DECK_COMPANION_PROFILE_STAGE_INVALID_ARGUMENT,
+    DECK_COMPANION_PROFILE_STAGE_CONFLICT,
+    DECK_COMPANION_PROFILE_STAGE_STALE_GENERATION,
+    DECK_COMPANION_PROFILE_STAGE_CAPACITY_REACHED,
+    DECK_COMPANION_PROFILE_STAGE_STORAGE_FAILURE,
+} deck_companion_profile_stage_result_t;
 
 typedef enum {
     DECK_COMPANION_RECORD_EMPTY = 0,
@@ -177,6 +209,33 @@ bool deck_companion_profiles_secret_for(
     const char *profile_id,
     uint32_t expected_generation,
     deck_companion_profile_secret_t *secret
+);
+/*
+ * Stages one already-authenticated Pairing v2 credential in volatile memory.
+ * It is not visible as a Profile and cannot replace Active before commit.
+ */
+deck_companion_profile_stage_result_t deck_companion_profiles_stage_authenticated(
+    deck_companion_profiles_t *profiles,
+    const deck_companion_profile_stage_request_t *request,
+    deck_companion_profile_stage_ticket_t *ticket
+);
+/* Copies the exact staged secret only for its unguessable transaction ID. */
+bool deck_companion_profiles_staged_secret(
+    const deck_companion_profiles_t *profiles,
+    const deck_companion_profile_stage_ticket_t *ticket,
+    deck_companion_profile_secret_t *secret
+);
+/* Atomically publishes the staged Profile after the first pinned WSS proof. */
+deck_companion_profile_stage_result_t deck_companion_profiles_commit_staged(
+    deck_companion_profiles_t *profiles,
+    deck_companion_profile_stage_ticket_t *ticket,
+    uint64_t unix_ms
+);
+/* Cancels and clears one exact staged credential. */
+bool deck_companion_profiles_cancel_staged(
+    deck_companion_profiles_t *profiles,
+    const char *session_id,
+    const char *transaction_id
 );
 void deck_companion_profile_secret_clear(deck_companion_profile_secret_t *secret);
 bool deck_companion_hub_address_valid(const char *hub_address);

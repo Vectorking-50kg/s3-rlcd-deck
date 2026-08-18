@@ -21,12 +21,14 @@ import (
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/history"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/ota"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairingv2"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/protocol"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/serialhub"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/structuredprovider"
 )
 
 const shutdownTimeout = 5 * time.Second
+const pairingV2AdvertisementRefresh = 15 * time.Second
 
 var (
 	ErrAlreadyRun       = errors.New("companion runtime can only be run once")
@@ -62,28 +64,32 @@ type Status struct {
 type Runtime struct {
 	config Config
 
-	managementHandler       http.Handler
-	deviceHubHandler        http.Handler
-	shutdownTimeout         time.Duration
-	sessions                *managementSessions
-	consoleAccess           *consoleAccessGrants
-	pairing                 *pairing.Service
-	deviceLink              *devicelink.Hub
-	ota                     *ota.Service
-	serialHub               *serialhub.Service
-	serialObservers         serialObserverRegistry
-	codexCollector          CodexCollector
-	codexObserver           CodexObserver
-	cursorCollector         CursorCollector
-	structuredCollectors    []StructuredCollector
-	structuredService       *structuredprovider.Service
-	structuredProviderOrder []string
-	history                 *history.Store
-	backup                  BackupService
-	configuration           ConfigurationOwner
-	diagnostics             *diagnostics.Service
-	deviceProfileUpdates    chan configmodel.DeviceProfile
-	advertisedAddress       func(context.Context, string, string) string
+	managementHandler          http.Handler
+	deviceHubHandler           http.Handler
+	shutdownTimeout            time.Duration
+	sessions                   *managementSessions
+	consoleAccess              *consoleAccessGrants
+	pairing                    *pairing.Service
+	pairingV2                  pairingV2Coordinator
+	deviceLink                 *devicelink.Hub
+	ota                        *ota.Service
+	serialHub                  *serialhub.Service
+	serialObservers            serialObserverRegistry
+	codexCollector             CodexCollector
+	codexObserver              CodexObserver
+	cursorCollector            CursorCollector
+	structuredCollectors       []StructuredCollector
+	structuredService          *structuredprovider.Service
+	structuredProviderOrder    []string
+	history                    *history.Store
+	backup                     BackupService
+	configuration              ConfigurationOwner
+	diagnostics                *diagnostics.Service
+	deviceProfileUpdates       chan configmodel.DeviceProfile
+	advertisedAddress          func(context.Context, string, string) string
+	pairingV2AdvertisementMu   sync.Mutex
+	pairingV2Advertisement     *pairingv2.HubAdvertisement
+	pairingV2AdvertisingClosed bool
 
 	mu                  sync.RWMutex
 	snapshotMu          sync.Mutex
@@ -95,6 +101,16 @@ type Runtime struct {
 	cursorProvider      aisnapshot.Provider
 	hasCursorProvider   bool
 	structuredProviders map[string]aisnapshot.Provider
+}
+
+type pairingV2Coordinator interface {
+	Scan(context.Context) ([]pairingv2.Candidate, error)
+	Begin(string) (pairingv2.SessionView, error)
+	StartConfirm(string, string) (pairingv2.SessionView, error)
+	Status(string) (pairingv2.SessionView, error)
+	Cancel(string) (pairingv2.SessionView, error)
+	ObserveProvisionalHeartbeat(string, string) error
+	Close(context.Context) error
 }
 
 func New(config Config) (*Runtime, error) {
@@ -152,6 +168,7 @@ func New(config Config) (*Runtime, error) {
 		return nil, err
 	}
 	var otaService *ota.Service
+	var pairingV2Owner pairingV2Coordinator
 	deviceLink, err := devicelink.New(devicelink.Config{
 		Authenticator:         normalized.Pairing,
 		HeartbeatInterval:     normalized.DeviceHub.HeartbeatInterval,
@@ -192,6 +209,12 @@ func New(config Config) (*Runtime, error) {
 			accepted := result.Code == "applied" || result.Code == "no_change"
 			return serialService.ApplyOwnerResult(deviceID, ownerResult, accepted)
 		},
+		OnProvisionalHeartbeat: func(deviceID string, transactionID string) error {
+			if pairingV2Owner == nil {
+				return pairingv2.ErrSessionNotFound
+			}
+			return pairingV2Owner.ObserveProvisionalHeartbeat(deviceID, transactionID)
+		},
 		SerialHistoryCursor: func(deviceID string, sessionID uint64) (uint64, bool) {
 			status := serialService.Status()
 			if status.DeviceID != deviceID || status.SessionID != sessionID {
@@ -210,7 +233,7 @@ func New(config Config) (*Runtime, error) {
 		serialService.Close()
 		return nil, err
 	}
-	return &Runtime{
+	application := &Runtime{
 		config:               normalized,
 		shutdownTimeout:      shutdownTimeout,
 		sessions:             newManagementSessions(),
@@ -239,7 +262,35 @@ func New(config Config) (*Runtime, error) {
 		deviceProfileUpdates: deviceProfileUpdates,
 		structuredProviders:  make(map[string]aisnapshot.Provider),
 		status:               status,
-	}, nil
+	}
+	if normalized.PairingV2Discovery != nil {
+		coordinator, coordinatorErr := pairingv2.NewCoordinator(pairingv2.CoordinatorConfig{
+			Discovery: normalized.PairingV2Discovery,
+			Trust:     normalized.Pairing,
+			Hub: func(ctx context.Context) (pairingv2.HubLocator, error) {
+				address := application.deviceHubAdvertisedAddress(ctx)
+				if address == "" {
+					return pairingv2.HubLocator{}, errors.New("Pairing v2 Device Hub locator is unavailable")
+				}
+				if err := application.ensurePairingV2Advertisement(address); err != nil {
+					return pairingv2.HubLocator{}, err
+				}
+				return pairingv2.HubLocator{
+					Service: normalized.PairingV2HubService,
+					Address: address,
+				}, nil
+			},
+		})
+		if coordinatorErr != nil {
+			_ = otaService.CloseContext(context.Background())
+			deviceLink.Close()
+			serialService.Close()
+			return nil, coordinatorErr
+		}
+		application.pairingV2 = coordinator
+		pairingV2Owner = coordinator
+	}
+	return application, nil
 }
 
 // StructuredProviders returns configured-order, independently owned Provider
@@ -418,6 +469,13 @@ func (application *Runtime) Run(ctx context.Context) error {
 	}()
 	collectorContext, stopCollector := context.WithCancel(ctx)
 	collectorDone := make([]chan error, 0, 5+len(application.structuredCollectors))
+	if application.pairingV2 != nil {
+		done := make(chan error, 1)
+		collectorDone = append(collectorDone, done)
+		go func() {
+			done <- application.runPairingV2Advertisement(collectorContext)
+		}()
+	}
 	serialLeaseDone := make(chan error, 1)
 	collectorDone = append(collectorDone, serialLeaseDone)
 	go func() {
@@ -509,12 +567,19 @@ func (application *Runtime) Run(ctx context.Context) error {
 	observerShutdownError := application.closeSerialObservers(shutdownContext)
 	serialRevokeError := application.revokeSerialOwnerForShutdown(shutdownContext)
 	otaShutdownError := application.ota.CloseContext(shutdownContext)
+	var pairingV2ShutdownError error
+	if application.pairingV2 != nil {
+		pairingV2ShutdownError = application.pairingV2.Close(shutdownContext)
+	}
+	pairingV2AdvertisementError := application.closePairingV2Advertisement()
 	application.deviceLink.Close()
 	application.serialHub.Close()
 	shutdownErrors := errors.Join(
 		observerShutdownError,
 		serialRevokeError,
 		otaShutdownError,
+		pairingV2ShutdownError,
+		pairingV2AdvertisementError,
 		shutdownServers(shutdownContext, managementServer, deviceHubServer),
 	)
 	for _, done := range collectorDone {
@@ -538,6 +603,71 @@ func (application *Runtime) Run(ctx context.Context) error {
 		return fmt.Errorf("shut down Companion listeners: %w", shutdownErrors)
 	}
 	return nil
+}
+
+func (application *Runtime) runPairingV2Advertisement(ctx context.Context) error {
+	ticker := time.NewTicker(pairingV2AdvertisementRefresh)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+		}
+		address := application.deviceHubAdvertisedAddress(ctx)
+		if address != "" {
+			_ = application.ensurePairingV2Advertisement(address)
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+		}
+	}
+}
+
+func (application *Runtime) ensurePairingV2Advertisement(address string) error {
+	if application.pairingV2 == nil || address == "" {
+		return errors.New("Pairing v2 Hub advertisement is unavailable")
+	}
+	application.pairingV2AdvertisementMu.Lock()
+	defer application.pairingV2AdvertisementMu.Unlock()
+	if application.pairingV2AdvertisingClosed {
+		return errors.New("Pairing v2 Hub advertisement is closed")
+	}
+	if application.pairingV2Advertisement != nil &&
+		application.pairingV2Advertisement.Address() == address {
+		return nil
+	}
+	if application.pairingV2Advertisement != nil {
+		if err := application.pairingV2Advertisement.Close(); err != nil {
+			return err
+		}
+		application.pairingV2Advertisement = nil
+	}
+	advertisement, err := pairingv2.StartHubAdvertisement(
+		application.config.PairingV2HubService,
+		address,
+	)
+	if err != nil {
+		return err
+	}
+	application.pairingV2Advertisement = advertisement
+	return nil
+}
+
+func (application *Runtime) closePairingV2Advertisement() error {
+	application.pairingV2AdvertisementMu.Lock()
+	defer application.pairingV2AdvertisementMu.Unlock()
+	application.pairingV2AdvertisingClosed = true
+	if application.pairingV2Advertisement == nil {
+		return nil
+	}
+	err := application.pairingV2Advertisement.Close()
+	if err == nil {
+		application.pairingV2Advertisement = nil
+	}
+	return err
 }
 
 func (application *Runtime) recordDiagnostic(event diagnostics.Event) {

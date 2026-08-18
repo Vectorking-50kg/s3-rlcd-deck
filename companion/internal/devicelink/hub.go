@@ -33,6 +33,10 @@ type Authenticator interface {
 	Verify(context.Context, pairing.Authentication) (bool, error)
 }
 
+type provisionalAuthenticator interface {
+	VerifyProvisional(context.Context, pairing.Authentication) (string, bool, error)
+}
+
 type Config struct {
 	Authenticator         Authenticator
 	HeartbeatInterval     time.Duration
@@ -46,25 +50,30 @@ type Config struct {
 	OnDisconnect          func(deviceID string)
 	OnSerialOwnerResult   func(deviceID string, result SerialOwnerResult) error
 	OnOTAResult           func(deviceID string, result OTAResult) error
-	SerialHistoryCursor   func(deviceID string, sessionID uint64) (uint64, bool)
+	// OnProvisionalHeartbeat must not block. It receives proof only after an
+	// exact verifier match, valid hello, and valid first heartbeat. The probe
+	// never enters the normal Device Link session map.
+	OnProvisionalHeartbeat func(deviceID string, transactionID string) error
+	SerialHistoryCursor    func(deviceID string, sessionID uint64) (uint64, bool)
 }
 
 type Hub struct {
-	authenticator         Authenticator
-	heartbeatInterval     time.Duration
-	heartbeatTimeout      time.Duration
-	serverProtocolVersion int
-	now                   func() time.Time
-	elapsed               func() time.Duration
-	onDeviceProfile       func(configmodel.DeviceProfile)
-	onSerialState         func(deviceID string, sessionID uint64, state string) error
-	onSerialFrame         func(deviceID string, frame serialprotocol.Frame) error
-	onDisconnect          func(deviceID string)
-	onSerialOwnerResult   func(deviceID string, result SerialOwnerResult) error
-	onOTAResult           func(deviceID string, result OTAResult) error
-	serialHistoryCursor   func(deviceID string, sessionID uint64) (uint64, bool)
-	done                  chan struct{}
-	closeOnce             sync.Once
+	authenticator          Authenticator
+	heartbeatInterval      time.Duration
+	heartbeatTimeout       time.Duration
+	serverProtocolVersion  int
+	now                    func() time.Time
+	elapsed                func() time.Duration
+	onDeviceProfile        func(configmodel.DeviceProfile)
+	onSerialState          func(deviceID string, sessionID uint64, state string) error
+	onSerialFrame          func(deviceID string, frame serialprotocol.Frame) error
+	onDisconnect           func(deviceID string)
+	onSerialOwnerResult    func(deviceID string, result SerialOwnerResult) error
+	onOTAResult            func(deviceID string, result OTAResult) error
+	onProvisionalHeartbeat func(deviceID string, transactionID string) error
+	serialHistoryCursor    func(deviceID string, sessionID uint64) (uint64, bool)
+	done                   chan struct{}
+	closeOnce              sync.Once
 
 	mu                   sync.Mutex
 	closed               bool
@@ -143,26 +152,27 @@ func New(config Config) (*Hub, error) {
 		config.Elapsed = func() time.Duration { return time.Since(started) }
 	}
 	return &Hub{
-		authenticator:         config.Authenticator,
-		heartbeatInterval:     config.HeartbeatInterval,
-		heartbeatTimeout:      config.HeartbeatTimeout,
-		serverProtocolVersion: config.ServerProtocolVersion,
-		now:                   config.Now,
-		elapsed:               config.Elapsed,
-		onDeviceProfile:       config.OnDeviceProfile,
-		onSerialState:         config.OnSerialState,
-		onSerialFrame:         config.OnSerialFrame,
-		onDisconnect:          config.OnDisconnect,
-		onSerialOwnerResult:   config.OnSerialOwnerResult,
-		onOTAResult:           config.OnOTAResult,
-		serialHistoryCursor:   config.SerialHistoryCursor,
-		done:                  make(chan struct{}),
-		connections:           make(map[*websocket.Conn]struct{}),
-		sessions:              make(map[string]*websocket.Conn),
-		disconnecting:         make(map[string]*websocket.Conn),
-		snapshotSignals:       make(map[*websocket.Conn]chan struct{}),
-		diagnosticExpected:    make(map[*websocket.Conn]uint64),
-		diagnosticRings:       make(map[string]cachedDiagnostics),
+		authenticator:          config.Authenticator,
+		heartbeatInterval:      config.HeartbeatInterval,
+		heartbeatTimeout:       config.HeartbeatTimeout,
+		serverProtocolVersion:  config.ServerProtocolVersion,
+		now:                    config.Now,
+		elapsed:                config.Elapsed,
+		onDeviceProfile:        config.OnDeviceProfile,
+		onSerialState:          config.OnSerialState,
+		onSerialFrame:          config.OnSerialFrame,
+		onDisconnect:           config.OnDisconnect,
+		onSerialOwnerResult:    config.OnSerialOwnerResult,
+		onOTAResult:            config.OnOTAResult,
+		onProvisionalHeartbeat: config.OnProvisionalHeartbeat,
+		serialHistoryCursor:    config.SerialHistoryCursor,
+		done:                   make(chan struct{}),
+		connections:            make(map[*websocket.Conn]struct{}),
+		sessions:               make(map[string]*websocket.Conn),
+		disconnecting:          make(map[string]*websocket.Conn),
+		snapshotSignals:        make(map[*websocket.Conn]chan struct{}),
+		diagnosticExpected:     make(map[*websocket.Conn]uint64),
+		diagnosticRings:        make(map[string]cachedDiagnostics),
 	}, nil
 }
 
@@ -216,20 +226,40 @@ func (hub *Hub) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 		unauthorized(response)
 		return
 	}
-	verified, err := hub.authenticator.Verify(request.Context(), pairing.Authentication{
+	authenticationRequest := pairing.Authentication{
 		DeviceID:        authentication.deviceID,
 		Token:           authentication.token,
 		DeviceIdentity:  authentication.deviceIdentity,
 		ProtocolVersion: authentication.protocol,
-	})
+	}
+	verified, err := hub.authenticator.Verify(request.Context(), authenticationRequest)
 	if err != nil {
 		http.Error(response, "device trust unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	if !verified || hub.isClosed() {
-		if !verified {
-			hub.recordAuthenticationError()
+	provisionalTransaction := ""
+	if !verified {
+		if provisional, supported := hub.authenticator.(provisionalAuthenticator); supported {
+			var provisionalValid bool
+			provisionalTransaction, provisionalValid, err = provisional.VerifyProvisional(
+				request.Context(),
+				authenticationRequest,
+			)
+			if err != nil {
+				http.Error(response, "device trust unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			if !provisionalValid {
+				provisionalTransaction = ""
+			}
 		}
+		if provisionalTransaction == "" {
+			hub.recordAuthenticationError()
+			unauthorized(response)
+			return
+		}
+	}
+	if hub.isClosed() {
 		unauthorized(response)
 		return
 	}
@@ -249,7 +279,65 @@ func (hub *Hub) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 		_ = connection.CloseNow()
 	}()
 	connection.SetReadLimit(MaxControlMessageBytes)
+	if provisionalTransaction != "" {
+		hub.serveProvisionalConnection(
+			request.Context(),
+			connection,
+			authentication,
+			provisionalTransaction,
+		)
+		return
+	}
 	hub.serveConnection(request.Context(), connection, authentication)
+}
+
+func (hub *Hub) serveProvisionalConnection(
+	requestContext context.Context,
+	connection *websocket.Conn,
+	authentication authenticatedDeck,
+	transactionID string,
+) {
+	ctx, cancel := context.WithTimeout(requestContext, hub.heartbeatTimeout)
+	messageType, message, err := connection.Read(ctx)
+	cancel()
+	if err != nil {
+		clear(message)
+		return
+	}
+	if messageType != websocket.MessageText {
+		hub.recordProtocolError()
+		clear(message)
+		_ = connection.Close(websocket.StatusPolicyViolation, "device.hello must be text")
+		return
+	}
+	_, err = parseDeviceHello(message, authentication.deviceID)
+	clear(message)
+	if err != nil || !hub.writeHeartbeat(connection) {
+		hub.recordProtocolError()
+		_ = connection.Close(websocket.StatusPolicyViolation, "invalid provisional device.hello")
+		return
+	}
+
+	ctx, cancel = context.WithTimeout(requestContext, hub.heartbeatTimeout)
+	messageType, message, err = connection.Read(ctx)
+	cancel()
+	if err != nil {
+		clear(message)
+		return
+	}
+	if messageType != websocket.MessageText {
+		hub.recordProtocolError()
+		clear(message)
+		_ = connection.Close(websocket.StatusPolicyViolation, "device.heartbeat must be text")
+		return
+	}
+	_, err = parseHeartbeat(message, 0, false)
+	clear(message)
+	if err != nil || hub.onProvisionalHeartbeat == nil ||
+		hub.onProvisionalHeartbeat(authentication.deviceID, transactionID) != nil {
+		hub.recordProtocolError()
+		_ = connection.Close(websocket.StatusPolicyViolation, "invalid provisional device.heartbeat")
+	}
 }
 
 func (hub *Hub) Close() {

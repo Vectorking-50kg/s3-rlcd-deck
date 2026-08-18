@@ -19,7 +19,8 @@ Snapshot freshness is a Store policy rather than a UI convention. Data younger t
 Fresh while the Active Companion is online and Stale while it is offline. At 24 hours, with an
 invalid clock, or after a wall-clock rollback, the Store retains the
 bytes internally but no longer exposes the document or quota values. Invalid contracts, private
-data, future timestamps, regressing timestamps, and unknown schema majors never replace memory
+data, timestamps more than five seconds ahead of trusted UTC, regressing timestamps, and unknown
+schema majors never replace memory
 or Flash state. The Store keeps separate trusted-time high-water marks for authenticated
 Snapshot publication and display reads; either source moving backward hides the document until
 that source recovers its previous high-water mark.

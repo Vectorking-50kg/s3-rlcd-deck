@@ -17,6 +17,7 @@ import (
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/diagnostics"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/history"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairingv2"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/structuredprovider"
 )
 
@@ -37,6 +38,8 @@ type Config struct {
 	Management           ManagementConfig
 	DeviceHub            DeviceHubConfig
 	Pairing              *pairing.Service
+	PairingV2Discovery   *pairingv2.Discovery
+	PairingV2HubService  string
 	CodexCollector       CodexCollector
 	CodexObserver        CodexObserver
 	CursorCollector      CursorCollector
@@ -161,6 +164,12 @@ func normalizeConfig(config Config) (Config, error) {
 	}
 	if config.Pairing == nil {
 		return Config{}, errors.New("pairing service is required")
+	}
+	if (config.PairingV2Discovery == nil) != (config.PairingV2HubService == "") {
+		return Config{}, errors.New("Pairing v2 discovery and Hub service must be configured together")
+	}
+	if config.PairingV2HubService != "" && !pairingv2.ValidHubService(config.PairingV2HubService) {
+		return Config{}, errors.New("Pairing v2 Hub service is invalid")
 	}
 	managementIP, err := addressIP(config.Management.Address)
 	if err != nil {

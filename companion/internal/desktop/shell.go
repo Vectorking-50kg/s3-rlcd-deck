@@ -68,7 +68,7 @@ func (shell *Shell) Run() error {
 	if runtime.GOOS == "darwin" {
 		shell.tray.SetTemplateIcon(shell.icon)
 	}
-	shell.tray.OnOpenConsole(func() { go shell.openConsole() })
+	shell.tray.OnOpenConsole(func() { go shell.OpenConsole() })
 	shell.tray.OnToggleRunning(func() { go shell.toggleRuntime() })
 	shell.tray.OnQuit(func() { go shell.Close() })
 	shell.refresh()
@@ -122,7 +122,10 @@ func (shell *Shell) refresh() {
 	shell.tray.SetTooltip("S3 RLCD Deck Companion · " + visibleStatus)
 }
 
-func (shell *Shell) openConsole() {
+// OpenConsole opens a short-lived, one-time authorized management session.
+// It is safe to call after the Runtime is ready, including immediately before
+// entering the native tray loop.
+func (shell *Shell) OpenConsole() {
 	accessURL, err := shell.controller.ConsoleAccessURL(consoleAccessDuration)
 	if err != nil {
 		shell.showActionError(err)

@@ -30,9 +30,13 @@ fi
 
 cd "$companion_root"
 node --check web/dist/app.js
+node --check web/dist/pairing-v2-ui.js
 node --check web/dist/serial-terminal.js
+node --check web/pairing_v2_browser_test.mjs
 node --check web/serial_terminal_browser_test.mjs
+node --test web/pairing_v2_ui_test.mjs
 node --test web/serial_terminal_test.mjs
+node web/pairing_v2_browser_test.mjs
 node web/serial_terminal_browser_test.mjs
 go vet ./...
 # AI Snapshot contract tests read canonical fixtures outside the Go module.

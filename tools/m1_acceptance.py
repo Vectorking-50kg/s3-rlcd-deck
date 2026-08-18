@@ -49,6 +49,13 @@ LINK_SCHEMA = {
 }
 SETUP_ACCESS_SCHEMA = {"type": str, "ssid": str, "password": str, "address": str}
 BUILD_IDENTITY_SCHEMA = {"type": str, "firmware_commit": str}
+PAIRING_V2_SCHEMA = {
+    "type": str,
+    "state": str,
+    "remaining_seconds": int,
+    "proof_count": int,
+    "error_stage": str,
+}
 REQUIRED_CHECKS = (
     "builds_clean",
     "recovery_pairing",
@@ -138,7 +145,7 @@ class SensitiveValueTracker:
             self._recent_output.append(text[-4096:])
             if len(self._recent_output) > 256:
                 del self._recent_output[0]
-            leaked = self._bare_secret.search(text) is not None or any(
+            leaked = text_contains_bare_secret(text) or any(
                 value in text for value in self._values
             )
             self._observed = self._observed or leaked
@@ -151,6 +158,20 @@ class SensitiveValueTracker:
     def values(self) -> tuple[str, ...]:
         with self._lock:
             return tuple(self._values)
+
+
+def text_contains_bare_secret(text: str) -> bool:
+    for match in SensitiveValueTracker._bare_secret.finditer(text):
+        candidate = match.group(0)
+        prefix = text[max(0, match.start() - 11):match.start()]
+        # ESP-IDF 6.0.2 emits one 43-character CONFIG_* symbol in a deterministic
+        # Kconfig migration warning. It exists before any Pairing credential is
+        # generated and is not a base64url Token. Keep the generic bare-token
+        # boundary everywhere else instead of weakening it globally.
+        if re.fullmatch(r"CONFIG_[A-Z0-9_]+", candidate) and prefix.endswith("new target "):
+            continue
+        return True
+    return False
 
 
 def load_setup_client_command(path: pathlib.Path) -> list[str]:
@@ -573,7 +594,7 @@ def load_serial_module(environment: dict[str, str]) -> Any:
 def text_is_redacted(text: str, sensitive_values: tuple[str, ...] = ()) -> bool:
     lowered = text.lower()
     if any(value and value in text for value in sensitive_values) or \
-       SensitiveValueTracker._bare_secret.search(text) is not None:
+       text_contains_bare_secret(text):
         return False
     return not any(
         forbidden in lowered
@@ -657,6 +678,19 @@ def sanitize_serial_line(line: str) -> tuple[str, dict[str, Any] | None]:
     ):
         if re.fullmatch(r"[0-9a-f]{40}", event["firmware_commit"]) is not None:
             return json.dumps(event, separators=(",", ":"), sort_keys=True), event
+    if event_type == "pairing_v2" and set(event) == set(PAIRING_V2_SCHEMA) and all(
+        type(event[name]) is expected for name, expected in PAIRING_V2_SCHEMA.items()
+    ):
+        if (
+            event["state"] in {
+                "idle", "active", "authenticating", "proof_verified",
+                "paired", "expired", "error",
+            }
+            and 0 <= event["remaining_seconds"] <= 120
+            and event["proof_count"] >= 0
+            and re.fullmatch(r"[a-z0-9_]{0,31}", event["error_stage"]) is not None
+        ):
+            return json.dumps(event, separators=(",", ":"), sort_keys=True), event
     # Preserve only exact, known credential-free diagnostics used to prove boot.
     if event_type == "boot_ok" and set(event) == {
         "type", "firmware_version", "reset_reason", "uptime_ms", "minimum_free_heap_bytes"
@@ -677,12 +711,14 @@ class SerialEvidence:
         output: pathlib.Path,
         timeout: float,
         secrets: SensitiveValueTracker,
+        event_sink: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self._serial_exception = serial_module.SerialException
         self._connection = self.open_connection(serial_module, port, timeout)
         self._output = output.open("w", encoding="utf-8")
         self._stage_timeout = timeout
         self._secrets = secrets
+        self._event_sink = event_sink
 
     @staticmethod
     def open_connection(serial_module: Any, port: str, timeout: float) -> Any:
@@ -843,6 +879,8 @@ class SerialEvidence:
                 raise AcceptanceFailure(f"{stage}: fatal Deck log observed")
             if sanitized == "[REDACTED SECRET TARGET LINE]":
                 raise AcceptanceFailure(f"{stage}: credential appeared in Deck output")
+            if event is not None and self._event_sink is not None:
+                self._event_sink(event)
             if event is not None and predicate(event):
                 return event
         raise AcceptanceTimeout(f"{stage}: timed out waiting for Deck state")

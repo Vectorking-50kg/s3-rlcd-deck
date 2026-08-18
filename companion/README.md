@@ -14,7 +14,8 @@ The current M1 runtime provides:
   ambiguous, virtual, wildcard, loopback, reserved, and documentation addresses fail closed;
 - management login sessions with strict Origin/CSRF checks on writes;
 - bounded Device Hub headers, bodies, timeouts, concurrency, and per-IP request rate;
-- short-lived, one-time Pairing codes and revocable per-device trust;
+- same-LAN Pairing v2 discovery, Deck-displayed short-lived codes, Security2 PAKE, and revocable
+  per-device trust;
 - a persistent self-signed Device Hub identity with a stable SHA-256 fingerprint;
 - a token-authenticated, fingerprint-pinned WSS Device Link with strict `device.hello`,
   bidirectional heartbeat, duplicate-device rejection, revocation, and bounded frames;
@@ -234,12 +235,21 @@ arguments or the browser URL. Device Hub access is never authorized by this
 token: redeeming a six-digit one-time code produces an independent 256-bit token
 for exactly one Device ID.
 
-The Device Hub always uses the persistent Companion TLS identity when exposed beyond
-loopback. During Pairing, the computer running Companion must also be connected to the
-Deck's random WPA2 Setup AP. That isolated network authorizes one certificate-discovery
-redeem; the Deck verifies that the returned DER certificate hashes to the returned
-fingerprint before committing the Companion Profile. Every normal Device Link connection
-then requires the exact saved certificate plus the independently issued device Token.
+The Device Hub always uses the persistent Companion TLS identity when exposed beyond loopback.
+Pairing v2 keeps Mac and Deck on the same mutually reachable normal LAN. Companion browses the
+Deck's bounded `_s3rlcd-pair._tcp.local.` advertisement on the backend, exposes only opaque
+candidate/session references to the management Web, and submits credentials only through the
+Security2 PAKE channel after the user enters the code displayed on the Deck. Trust and Profile
+remain provisional until the exact new Device Link proves its pinned certificate, independent
+device Token, hello, and heartbeat. The Setup AP is not part of this flow.
+The browser's candidate countdown is only the lifetime of its opaque discovery reference, and the
+Companion session countdown is only a local upper bound. The Deck display is the authoritative
+Pairing Window and code deadline; the Web must never label either local timer as Deck time.
+
+On macOS, Companion publishes `_s3rlcd-hub._tcp.local.` through the native Bonjour
+`DNSServiceRegister` API on the selected physical LAN interface. It does not open a second UDP
+5353 listener alongside `mDNSResponder`; registration must receive the system success callback
+before Pairing v2 credentials may leave the Mac.
 
 The Companion stores its certificate identity, token verifiers, and bounded redacted Pairing audit under the platform user-configuration directory. Files and their directory are protected with owner-only permissions. Override the location for development with `--data-directory`; neither Pairing codes nor device Tokens are stored in plaintext.
 
@@ -276,7 +286,9 @@ snapshots and the owner-only Installation Journal restore the prior data and sta
 failure or process interruption.
 
 The authenticated management API lists redacted paired Decks at `GET /api/v1/devices`,
-issues codes at `POST /api/v1/pairing/codes`, issues a device-bound rotation code at
+exposes Pairing v2 scan/session operations below `/api/v1/pairing-v2`, and keeps the old
+`POST /api/v1/pairing/codes` endpoint only for the Deck Setup page's explicit
+`/compat/pairing-v1` migration flow. It issues a device-bound rotation code at
 `POST /api/v1/devices/{device_id}/rotate`, and revokes trust at
 `DELETE /api/v1/devices/{device_id}`. The list contains only Device ID, protocol version,
 and trust timestamps. Provider management uses `/api/v1/providers`,
@@ -284,11 +296,10 @@ and trust timestamps. Provider management uses `/api/v1/providers`,
 from `GET /api/v1/history`, exported from `GET /api/v1/history/export.csv`, enabled or
 disabled through `/api/v1/history/settings`, and cleared with `DELETE /api/v1/history`.
 Encrypted migration uses `/api/v1/backups/export`, `/api/v1/backups/preview`, and
-`/api/v1/backups/import`. A Deck redeems a code once at the rate-limited Device Hub route
-`POST /api/v1/pairing/redeem`. Management writes require the login session, exact Origin,
-and CSRF token described above; a successful redeem response is the only place a plaintext
-device Token is returned. Device requests authenticate the complete Device ID + Token +
-identity + protocol-version binding.
+`/api/v1/backups/import`. Pairing v2 management writes require the login session, exact Origin,
+CSRF token, and sensitive-operation rate limit. The browser never receives the device Token or
+certificate. Device requests authenticate the complete Device ID + Token + identity +
+protocol-version binding.
 
 The Device Link endpoint is `GET /api/v1/device/link` with WebSocket subprotocol
 `s3-rlcd-deck.v1`. An authenticated Deck must send `device.hello` first and continue with

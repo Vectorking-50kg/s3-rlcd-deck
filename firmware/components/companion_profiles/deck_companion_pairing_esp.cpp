@@ -1,4 +1,5 @@
 #include "deck_companion_pairing_esp.h"
+#include "deck_companion_identity.h"
 
 #include "sdkconfig.h"
 
@@ -282,27 +283,13 @@ bool deck_companion_device_identity(
     std::memcpy(source, kIdentityDomain, sizeof(kIdentityDomain) - 1);
     std::memcpy(source + sizeof(kIdentityDomain) - 1, mac, sizeof(mac));
     uint8_t digest[kDigestSize]{};
-    size_t encoded_size = 0;
     const bool encoded =
         id_size == 17 && sha256(source, sizeof(source), digest) &&
-        mbedtls_base64_encode(
-            reinterpret_cast<uint8_t *>(device_identity),
-            device_identity_capacity,
-            &encoded_size,
+        deck_companion_identity_from_digest(
             digest,
-            sizeof(digest)
-        ) == 0 &&
-        encoded_size == 44 && device_identity[43] == '=';
-    if (encoded) {
-        for (size_t index = 0; index < 43; ++index) {
-            if (device_identity[index] == '+') {
-                device_identity[index] = '-';
-            } else if (device_identity[index] == '/') {
-                device_identity[index] = '_';
-            }
-        }
-        device_identity[43] = '\0';
-    }
+            device_identity,
+            device_identity_capacity
+        );
     secure_clear(mac, sizeof(mac));
     secure_clear(source, sizeof(source));
     secure_clear(digest, sizeof(digest));

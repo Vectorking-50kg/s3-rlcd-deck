@@ -15,3 +15,10 @@ project(s3_rlcd_deck)
 # available and are deliberately redacted.
 idf_component_get_property(deck_tcp_transport tcp_transport COMPONENT_LIB)
 target_compile_definitions(${deck_tcp_transport} PRIVATE LOG_LOCAL_LEVEL=ESP_LOG_NONE)
+
+# protocomm Security2's upstream SRP implementation contains DEBUG log calls for
+# the username, clear passphrase, public keys, proofs, and session key. Runtime
+# tag filtering is not an adequate credential boundary, so remove those calls
+# from the firmware binary just as we do for tcp_transport above.
+idf_component_get_property(deck_protocomm protocomm COMPONENT_LIB)
+target_compile_definitions(${deck_protocomm} PRIVATE LOG_LOCAL_LEVEL=ESP_LOG_NONE)

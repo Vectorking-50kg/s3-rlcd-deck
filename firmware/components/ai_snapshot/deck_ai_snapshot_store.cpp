@@ -17,6 +17,10 @@ constexpr uint8_t kStorageSchemaVersion = 1;
 constexpr size_t kAttemptRecordSize = 28;
 constexpr size_t kWorkerStackBytes = 8 * 1'024;
 constexpr uint32_t kWorkerShutdownMs = 2'000;
+// Snapshot generation and heartbeat UTC originate from the same Companion,
+// but travel through independent queues. Allow bounded transport/scheduling
+// skew while still rejecting a materially future-dated document.
+constexpr uint64_t kMaximumFutureSkewMs = 5'000;
 
 enum class ClockObservation : uint8_t {
     valid,
@@ -834,7 +838,9 @@ deck_ai_snapshot_store_update_result_t deck_ai_snapshot_store_apply(
     if (clock == ClockObservation::rollback) {
         return DECK_AI_SNAPSHOT_STORE_TIME_ROLLBACK;
     }
-    if (candidate.generated_at_unix_ms > trusted_utc_ms) {
+    if (candidate.generated_at_unix_ms > trusted_utc_ms &&
+        candidate.generated_at_unix_ms - trusted_utc_ms >
+            kMaximumFutureSkewMs) {
         return DECK_AI_SNAPSHOT_STORE_INVALID_TIME;
     }
     if (store->has_snapshot &&

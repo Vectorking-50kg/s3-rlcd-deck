@@ -6,7 +6,7 @@ import (
 	"net/http"
 )
 
-//go:embed dist/index.html dist/app.css dist/app.js dist/serial-terminal.js dist/vendor/xterm/*
+//go:embed dist/index.html dist/app.css dist/app.js dist/pairing-v2-ui.js dist/serial-terminal.js dist/vendor/xterm/*
 var embeddedFiles embed.FS
 
 func Handler() http.Handler {

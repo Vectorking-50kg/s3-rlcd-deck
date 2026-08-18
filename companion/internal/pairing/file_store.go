@@ -203,6 +203,25 @@ func (store *FileStore) RevokeTrust(ctx context.Context, deviceID string, now ti
 	})
 }
 
+func (store *FileStore) CommitTrust(ctx context.Context, trust StoredTrust) error {
+	return store.update(ctx, func(state *fileStoreState) error {
+		committedAt := trust.CreatedAt.UTC()
+		if existing, found := state.Trusts[trust.DeviceID]; found {
+			if existing.DeviceIdentityVerifier != trust.DeviceIdentityVerifier ||
+				existing.ProtocolVersion != trust.ProtocolVersion {
+				return ErrProvisionalConflict
+			}
+			trust.RotatedAt = committedAt
+			trust.CreatedAt = existing.CreatedAt
+		} else if len(state.Trusts) >= maxStoredTrusts {
+			return errors.New("device trust capacity reached")
+		}
+		state.Trusts[trust.DeviceID] = trust
+		appendFileAudit(state, "pairing_v2_commit", "success", trust.DeviceID, committedAt)
+		return nil
+	})
+}
+
 func (store *FileStore) update(
 	ctx context.Context,
 	mutate func(*fileStoreState) error,

@@ -95,6 +95,33 @@ bool valid_fingerprint(const char *value)
     return true;
 }
 
+bool valid_pairing_v2_id(const char *value)
+{
+    if (!terminated(value, DECK_COMPANION_PAIRING_V2_ID_CAPACITY) ||
+        std::strlen(value) != DECK_COMPANION_PAIRING_V2_ID_CAPACITY - 1U) {
+        return false;
+    }
+    for (size_t index = 0; index < DECK_COMPANION_PAIRING_V2_ID_CAPACITY - 1U; ++index) {
+        const char byte = value[index];
+        if (!((byte >= '0' && byte <= '9') || (byte >= 'a' && byte <= 'f'))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool valid_hub_service(const char *value)
+{
+    constexpr char kSuffix[] = "._s3rlcd-hub._tcp.local.";
+    if (!safe_ascii(value, DECK_COMPANION_HUB_SERVICE_CAPACITY, false)) {
+        return false;
+    }
+    const size_t size = std::strlen(value);
+    const size_t suffix_size = sizeof(kSuffix) - 1U;
+    return size > suffix_size &&
+           std::memcmp(value + size - suffix_size, kSuffix, suffix_size) == 0;
+}
+
 bool valid_host_character(char byte, bool ipv6)
 {
     if ((byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z') ||
@@ -525,11 +552,110 @@ bool copy_secret(
     return copied;
 }
 
+struct StagedProfile {
+    bool present;
+    char session_id[DECK_COMPANION_PAIRING_V2_ID_CAPACITY];
+    char transaction_id[DECK_COMPANION_PAIRING_V2_ID_CAPACITY];
+    char hub_service[DECK_COMPANION_HUB_SERVICE_CAPACITY];
+    uint32_t baseline_generation;
+    StoredProfile profile;
+};
+
+void clear_staged(StagedProfile *staged)
+{
+    if (staged != nullptr) {
+        secure_clear(staged, sizeof(*staged));
+    }
+}
+
+bool stage_request_valid(const deck_companion_profile_stage_request_t *request)
+{
+    return request != nullptr && valid_pairing_v2_id(request->session_id) &&
+           valid_pairing_v2_id(request->transaction_id) &&
+           std::strcmp(request->session_id, request->transaction_id) != 0 &&
+           valid_hub_service(request->hub_service) && valid_address(request->hub_address) &&
+           terminated(request->token, sizeof(request->token)) &&
+           valid_base64url(request->token, 43) &&
+           terminated(
+               request->certificate_fingerprint,
+               sizeof(request->certificate_fingerprint)
+           ) &&
+           valid_fingerprint(request->certificate_fingerprint) &&
+           request->certificate_der_size != 0 &&
+           request->certificate_der_size <= sizeof(request->certificate_der) &&
+           request->protocol_version == kProtocolVersion;
+}
+
+bool staged_matches_request(
+    const StagedProfile &staged,
+    const deck_companion_profile_stage_request_t &request
+)
+{
+    return staged.present && std::strcmp(staged.session_id, request.session_id) == 0 &&
+           std::strcmp(staged.transaction_id, request.transaction_id) == 0 &&
+           std::strcmp(staged.hub_service, request.hub_service) == 0 &&
+           std::strcmp(staged.profile.hub_address, request.hub_address) == 0 &&
+           std::strcmp(staged.profile.token, request.token) == 0 &&
+           std::strcmp(
+               staged.profile.certificate_fingerprint,
+               request.certificate_fingerprint
+           ) == 0 &&
+           staged.profile.certificate_der_size == request.certificate_der_size &&
+           std::memcmp(
+               staged.profile.certificate_der,
+               request.certificate_der,
+               request.certificate_der_size
+           ) == 0;
+}
+
+bool copy_stage_ticket(
+    const StagedProfile &staged,
+    deck_companion_profile_stage_ticket_t *ticket
+)
+{
+    if (ticket == nullptr) {
+        return false;
+    }
+    *ticket = {};
+    const bool copied =
+        copy_string(ticket->session_id, sizeof(ticket->session_id), staged.session_id) &&
+        copy_string(
+            ticket->transaction_id,
+            sizeof(ticket->transaction_id),
+            staged.transaction_id
+        ) &&
+        copy_string(
+            ticket->profile_id,
+            sizeof(ticket->profile_id),
+            staged.profile.profile_id
+        );
+    if (copied) {
+        ticket->profile_generation = staged.baseline_generation;
+    }
+    return copied;
+}
+
+bool ticket_matches(
+    const StagedProfile &staged,
+    const deck_companion_profile_stage_ticket_t *ticket
+)
+{
+    return staged.present && ticket != nullptr &&
+           valid_pairing_v2_id(ticket->session_id) &&
+           valid_pairing_v2_id(ticket->transaction_id) &&
+           valid_profile_id_argument(ticket->profile_id) &&
+           std::strcmp(staged.session_id, ticket->session_id) == 0 &&
+           std::strcmp(staged.transaction_id, ticket->transaction_id) == 0 &&
+           std::strcmp(staged.profile.profile_id, ticket->profile_id) == 0 &&
+           staged.baseline_generation == ticket->profile_generation;
+}
+
 }  // namespace
 
 struct deck_companion_profiles {
     deck_transaction_store_t *store;
     deck_companion_pairing_adapter_t pairing;
+    StagedProfile staged;
     mutable std::mutex mutex;
 };
 
@@ -650,6 +776,7 @@ void deck_companion_profiles_destroy(deck_companion_profiles_t *profiles)
     if (profiles != nullptr) {
         deck_transaction_store_destroy(profiles->store);
         secure_clear(&profiles->pairing, sizeof(profiles->pairing));
+        clear_staged(&profiles->staged);
     }
     delete profiles;
 }
@@ -1002,6 +1129,220 @@ bool deck_companion_profiles_secret_for(
     secure_clear(&stored, sizeof(stored));
     secure_clear(set.get(), sizeof(*set));
     return copied;
+}
+
+deck_companion_profile_stage_result_t deck_companion_profiles_stage_authenticated(
+    deck_companion_profiles_t *profiles,
+    const deck_companion_profile_stage_request_t *request,
+    deck_companion_profile_stage_ticket_t *ticket
+)
+{
+    if (ticket != nullptr) {
+        *ticket = {};
+    }
+    if (profiles == nullptr || ticket == nullptr || !stage_request_valid(request)) {
+        return DECK_COMPANION_PROFILE_STAGE_INVALID_ARGUMENT;
+    }
+    const std::lock_guard<std::mutex> lock(profiles->mutex);
+    if (profiles->staged.present) {
+        return staged_matches_request(profiles->staged, *request) &&
+                       copy_stage_ticket(profiles->staged, ticket)
+                   ? DECK_COMPANION_PROFILE_STAGE_UPDATED
+                   : DECK_COMPANION_PROFILE_STAGE_CONFLICT;
+    }
+
+    deck_transaction_store_snapshot_t stored{};
+    std::unique_ptr<StoredSet> set(new (std::nothrow) StoredSet{});
+    if (set == nullptr || !load_set(profiles, &stored, set.get()) ||
+        stored.storage_faulted) {
+        secure_clear(&stored, sizeof(stored));
+        if (set != nullptr) {
+            secure_clear(set.get(), sizeof(*set));
+        }
+        return DECK_COMPANION_PROFILE_STAGE_STORAGE_FAILURE;
+    }
+    const int found = find_profile(*set, request->certificate_fingerprint);
+    if (found < 0 && set->count >= DECK_COMPANION_MAX_PROFILES) {
+        secure_clear(&stored, sizeof(stored));
+        secure_clear(set.get(), sizeof(*set));
+        return DECK_COMPANION_PROFILE_STAGE_CAPACITY_REACHED;
+    }
+
+    std::unique_ptr<StagedProfile> staged(new (std::nothrow) StagedProfile{});
+    if (staged == nullptr) {
+        secure_clear(&stored, sizeof(stored));
+        secure_clear(set.get(), sizeof(*set));
+        return DECK_COMPANION_PROFILE_STAGE_STORAGE_FAILURE;
+    }
+    staged->present = true;
+    staged->baseline_generation = stored.has_active ? stored.active.generation : 0;
+    staged->profile.profile_version = DECK_COMPANION_PROFILE_VERSION;
+    const bool copied =
+        copy_string(staged->session_id, sizeof(staged->session_id), request->session_id) &&
+        copy_string(
+            staged->transaction_id,
+            sizeof(staged->transaction_id),
+            request->transaction_id
+        ) &&
+        copy_string(
+            staged->hub_service,
+            sizeof(staged->hub_service),
+            request->hub_service
+        ) &&
+        copy_string(
+            staged->profile.profile_id,
+            sizeof(staged->profile.profile_id),
+            request->certificate_fingerprint
+        ) &&
+        copy_string(
+            staged->profile.display_name,
+            sizeof(staged->profile.display_name),
+            request->hub_service
+        ) &&
+        copy_string(
+            staged->profile.hub_address,
+            sizeof(staged->profile.hub_address),
+            request->hub_address
+        ) &&
+        copy_string(
+            staged->profile.token,
+            sizeof(staged->profile.token),
+            request->token
+        ) &&
+        copy_string(
+            staged->profile.certificate_fingerprint,
+            sizeof(staged->profile.certificate_fingerprint),
+            request->certificate_fingerprint
+        );
+    if (copied) {
+        staged->profile.certificate_der_size =
+            static_cast<uint16_t>(request->certificate_der_size);
+        std::memcpy(
+            staged->profile.certificate_der,
+            request->certificate_der,
+            request->certificate_der_size
+        );
+        profiles->staged = *staged;
+    }
+    const bool ticket_copied = copied && copy_stage_ticket(profiles->staged, ticket);
+    secure_clear(staged.get(), sizeof(*staged));
+    secure_clear(&stored, sizeof(stored));
+    secure_clear(set.get(), sizeof(*set));
+    if (!ticket_copied) {
+        clear_staged(&profiles->staged);
+        *ticket = {};
+        return DECK_COMPANION_PROFILE_STAGE_STORAGE_FAILURE;
+    }
+    return DECK_COMPANION_PROFILE_STAGE_UPDATED;
+}
+
+bool deck_companion_profiles_staged_secret(
+    const deck_companion_profiles_t *profiles,
+    const deck_companion_profile_stage_ticket_t *ticket,
+    deck_companion_profile_secret_t *secret
+)
+{
+    if (profiles == nullptr || secret == nullptr) {
+        return false;
+    }
+    const std::lock_guard<std::mutex> lock(profiles->mutex);
+    *secret = {};
+    if (!ticket_matches(profiles->staged, ticket) ||
+        !copy_secret(profiles->staged.profile, secret) ||
+        !copy_string(
+            secret->hub_service,
+            sizeof(secret->hub_service),
+            profiles->staged.hub_service
+        )) {
+        secure_clear(secret, sizeof(*secret));
+        return false;
+    }
+    return true;
+}
+
+deck_companion_profile_stage_result_t deck_companion_profiles_commit_staged(
+    deck_companion_profiles_t *profiles,
+    deck_companion_profile_stage_ticket_t *ticket,
+    uint64_t unix_ms
+)
+{
+    if (profiles == nullptr || ticket == nullptr || unix_ms == 0) {
+        return DECK_COMPANION_PROFILE_STAGE_INVALID_ARGUMENT;
+    }
+    const std::lock_guard<std::mutex> lock(profiles->mutex);
+    if (!ticket_matches(profiles->staged, ticket)) {
+        return DECK_COMPANION_PROFILE_STAGE_NOT_FOUND;
+    }
+    deck_transaction_store_snapshot_t stored{};
+    std::unique_ptr<StoredSet> set(new (std::nothrow) StoredSet{});
+    if (set == nullptr || !load_set(profiles, &stored, set.get()) ||
+        stored.storage_faulted) {
+        secure_clear(&stored, sizeof(stored));
+        if (set != nullptr) {
+            secure_clear(set.get(), sizeof(*set));
+        }
+        return DECK_COMPANION_PROFILE_STAGE_STORAGE_FAILURE;
+    }
+    const uint32_t generation = stored.has_active ? stored.active.generation : 0;
+    if (generation != profiles->staged.baseline_generation) {
+        secure_clear(&stored, sizeof(stored));
+        secure_clear(set.get(), sizeof(*set));
+        clear_staged(&profiles->staged);
+        return DECK_COMPANION_PROFILE_STAGE_STALE_GENERATION;
+    }
+    int found = find_profile(*set, profiles->staged.profile.profile_id);
+    if (found < 0 && set->count >= DECK_COMPANION_MAX_PROFILES) {
+        secure_clear(&stored, sizeof(stored));
+        secure_clear(set.get(), sizeof(*set));
+        clear_staged(&profiles->staged);
+        return DECK_COMPANION_PROFILE_STAGE_CAPACITY_REACHED;
+    }
+    if (found < 0) {
+        found = static_cast<int>(set->count);
+        ++set->count;
+    }
+    StoredProfile &destination = set->profiles[static_cast<size_t>(found)];
+    const int32_t priority = destination.priority;
+    const uint64_t previous_success = destination.last_success_unix_ms;
+    destination = profiles->staged.profile;
+    destination.priority = priority;
+    destination.last_success_unix_ms =
+        unix_ms > previous_success ? unix_ms : previous_success;
+    set->active_index = static_cast<uint8_t>(found);
+    if (!commit_set(profiles, *set)) {
+        secure_clear(&stored, sizeof(stored));
+        secure_clear(set.get(), sizeof(*set));
+        return DECK_COMPANION_PROFILE_STAGE_STORAGE_FAILURE;
+    }
+    uint32_t committed_generation = generation + 1U;
+    if (committed_generation == 0) {
+        committed_generation = 1;
+    }
+    ticket->profile_generation = committed_generation;
+    clear_staged(&profiles->staged);
+    secure_clear(&stored, sizeof(stored));
+    secure_clear(set.get(), sizeof(*set));
+    return DECK_COMPANION_PROFILE_STAGE_UPDATED;
+}
+
+bool deck_companion_profiles_cancel_staged(
+    deck_companion_profiles_t *profiles,
+    const char *session_id,
+    const char *transaction_id
+)
+{
+    if (profiles == nullptr || !valid_pairing_v2_id(session_id) ||
+        !valid_pairing_v2_id(transaction_id)) {
+        return false;
+    }
+    const std::lock_guard<std::mutex> lock(profiles->mutex);
+    if (!profiles->staged.present ||
+        std::strcmp(profiles->staged.session_id, session_id) != 0 ||
+        std::strcmp(profiles->staged.transaction_id, transaction_id) != 0) {
+        return false;
+    }
+    clear_staged(&profiles->staged);
+    return true;
 }
 
 void deck_companion_profile_secret_clear(deck_companion_profile_secret_t *secret)

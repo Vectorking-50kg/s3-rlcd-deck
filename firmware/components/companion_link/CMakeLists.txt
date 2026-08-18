@@ -21,6 +21,7 @@ idf_component_register(
         ota_service
         pthread
         serial_service
+        tls_clock
 )
 
 target_compile_features(${COMPONENT_LIB} PRIVATE cxx_std_17)

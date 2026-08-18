@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstring>
+#include <inttypes.h>
 #include <new>
 
 #include "deck_application_ui.h"
@@ -11,6 +12,7 @@
 #include "deck_companion_link.h"
 #include "deck_device_settings.h"
 #include "deck_display.h"
+#include "deck_lan_pairing.h"
 #include "deck_m0_view_model.h"
 #include "deck_ota_service.h"
 #include "deck_rlcd_panel.h"
@@ -38,6 +40,7 @@ deck_rlcd_panel_t *application_panel = nullptr;
 deck_display_service_t *application_display = nullptr;
 deck_peripherals_t *application_peripherals = nullptr;
 deck_setup_service_t *application_setup = nullptr;
+deck_lan_pairing_t *application_lan_pairing = nullptr;
 deck_serial_service_t *application_serial = nullptr;
 deck_companion_link_t *application_companion_link = nullptr;
 struct AiPageTaskContext {
@@ -209,6 +212,9 @@ constexpr EventBits_t kSerialViewTaskReadyBit = BIT0;
 constexpr EventBits_t kSerialViewTaskStoppedBit = BIT1;
 constexpr EventBits_t kApplicationUiReadyBit = BIT0;
 constexpr EventBits_t kApplicationUiFailedBit = BIT1;
+// Snapshot JSON projection exceeds 4 KiB on the real Xtensa call path even
+// though its large DTOs live in PSRAM. Keep the Wi-Fi-calling task internal.
+constexpr uint32_t kAiPageTaskStackBytes = 8'192;
 constexpr TickType_t kSerialViewPollTicks = pdMS_TO_TICKS(100);
 constexpr TickType_t kSerialViewLifecycleTicks = pdMS_TO_TICKS(2'000);
 
@@ -217,6 +223,12 @@ bool stop_serial_view_task();
 
 bool release_companion_resources()
 {
+    if (application_lan_pairing != nullptr) {
+        if (!deck_lan_pairing_stop(application_lan_pairing)) {
+            return false;
+        }
+        application_lan_pairing = nullptr;
+    }
     if (!stop_ai_page_task()) {
         return false;
     }
@@ -288,6 +300,8 @@ const char *companion_link_error_name(deck_companion_link_error_t error)
             return "transport";
         case DECK_COMPANION_LINK_ERROR_TLS_PIN_MISMATCH:
             return "tls_pin_mismatch";
+        case DECK_COMPANION_LINK_ERROR_TLS_TIME:
+            return "tls_time";
         case DECK_COMPANION_LINK_ERROR_AUTH_REJECTED:
             return "auth_rejected";
         case DECK_COMPANION_LINK_ERROR_PROTOCOL_MAJOR_REJECTED:
@@ -525,6 +539,8 @@ void peripheral_snapshot(void *, const deck_peripheral_snapshot_t *snapshot)
     bool enter_setup = false;
     bool enter_serial = false;
     bool exit_serial = false;
+    bool open_pairing = false;
+    bool cancel_pairing = false;
     uint32_t pending_boot_long_press_count = 0;
     uint32_t pending_boot_short_press_count = 0;
     uint32_t pending_key_long_press_count = 0;
@@ -573,8 +589,17 @@ void peripheral_snapshot(void *, const deck_peripheral_snapshot_t *snapshot)
         if (snapshot->boot_event == DECK_BUTTON_INPUT_SHORT_PRESS &&
             snapshot->boot_event_count > handled_boot_short_press_count) {
             pending_boot_short_press_count = snapshot->boot_event_count;
-            if (application_serial != nullptr) {
+            if (application_serial != nullptr && serial_active) {
                 exit_serial = true;
+            } else if (application_lan_pairing != nullptr &&
+                       application_model.wifi_state == DECK_WIFI_CONNECTED &&
+                       application_model.setup_state != DECK_SETUP_ACTIVE) {
+                const deck_pairing_v2_state_t pairing_state =
+                    application_model.pairing_v2.state;
+                cancel_pairing = pairing_state == DECK_PAIRING_V2_ACTIVE ||
+                                 pairing_state == DECK_PAIRING_V2_AUTHENTICATING ||
+                                 pairing_state == DECK_PAIRING_V2_PROOF_VERIFIED;
+                open_pairing = !cancel_pairing;
             } else {
                 handled_boot_short_press_count = pending_boot_short_press_count;
             }
@@ -599,6 +624,14 @@ void peripheral_snapshot(void *, const deck_peripheral_snapshot_t *snapshot)
     if (exit_serial && application_serial != nullptr &&
         deck_serial_service_exit(application_serial)) {
         application_serial_requested.store(false, std::memory_order_release);
+        handled_boot_short_press_count = pending_boot_short_press_count;
+    }
+    if (open_pairing && application_lan_pairing != nullptr &&
+        deck_lan_pairing_open(application_lan_pairing)) {
+        handled_boot_short_press_count = pending_boot_short_press_count;
+    }
+    if (cancel_pairing && application_lan_pairing != nullptr &&
+        deck_lan_pairing_cancel(application_lan_pairing)) {
         handled_boot_short_press_count = pending_boot_short_press_count;
     }
     if (enter_setup && application_setup != nullptr &&
@@ -859,7 +892,7 @@ AiPageTaskContext *start_ai_page_task(deck_companion_link_t *link)
         xTaskCreatePinnedToCore(
             ai_page_task,
             "ai_page_model",
-            4'096,
+            kAiPageTaskStackBytes,
             context,
             2,
             &context->task,
@@ -1044,6 +1077,25 @@ void handle_diagnostic_control_line(char *line)
         (void)deck_setup_service_enter_from_boot(application_setup);
         return;
     }
+    if (std::strcmp(line, "DECK_PAIRING_OPEN") == 0) {
+        bool allowed = false;
+        if (application_model_mutex != nullptr &&
+            xSemaphoreTake(application_model_mutex, portMAX_DELAY) == pdTRUE) {
+            allowed = application_model.wifi_state == DECK_WIFI_CONNECTED &&
+                      application_model.setup_state != DECK_SETUP_ACTIVE;
+            xSemaphoreGive(application_model_mutex);
+        }
+        if (allowed && application_lan_pairing != nullptr) {
+            (void)deck_lan_pairing_open(application_lan_pairing);
+        }
+        return;
+    }
+    if (std::strcmp(line, "DECK_PAIRING_CANCEL") == 0) {
+        if (application_lan_pairing != nullptr) {
+            (void)deck_lan_pairing_cancel(application_lan_pairing);
+        }
+        return;
+    }
     if (std::strcmp(line, "DECK_RESTART") == 0) {
         static constexpr char acknowledgement[] =
             "{\"type\":\"restart_ack\"}\n";
@@ -1169,6 +1221,14 @@ void setup_event(void *, const deck_setup_service_event_t *event)
             event->settings.temperature_offset_tenths_c
         );
     }
+    if ((event->setup.active || event->wifi.state != DECK_WIFI_CONFIG_ACTIVE) &&
+        application_lan_pairing != nullptr) {
+        (void)deck_lan_pairing_cancel(application_lan_pairing);
+    } else if (!event->setup.active &&
+               event->wifi.state == DECK_WIFI_CONFIG_ACTIVE &&
+               application_lan_pairing != nullptr) {
+        (void)deck_lan_pairing_open_if_unpaired(application_lan_pairing);
+    }
     (void)publish_application_model();
 #ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
     const deck_setup_diagnostic_info_t info = {
@@ -1199,6 +1259,76 @@ void setup_event(void *, const deck_setup_service_event_t *event)
 #endif
 }
 
+#ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
+const char *pairing_v2_state_name(deck_lan_pairing_state_t state)
+{
+    switch (state) {
+        case DECK_LAN_PAIRING_ACTIVE:
+            return "active";
+        case DECK_LAN_PAIRING_AUTHENTICATING:
+            return "authenticating";
+        case DECK_LAN_PAIRING_PROOF_VERIFIED:
+            return "proof_verified";
+        case DECK_LAN_PAIRING_PAIRED:
+            return "paired";
+        case DECK_LAN_PAIRING_EXPIRED:
+            return "expired";
+        case DECK_LAN_PAIRING_ERROR:
+            return "error";
+        case DECK_LAN_PAIRING_IDLE:
+        default:
+            return "idle";
+    }
+}
+#endif
+
+void pairing_v2_event(void *, const deck_lan_pairing_event_t *event)
+{
+    if (event == nullptr) {
+        return;
+    }
+    if (application_model_mutex != nullptr &&
+        xSemaphoreTake(application_model_mutex, portMAX_DELAY) == pdTRUE) {
+        application_model.pairing_v2.state =
+            static_cast<deck_pairing_v2_state_t>(event->state);
+        std::memset(
+            application_model.pairing_v2.code,
+            0,
+            sizeof(application_model.pairing_v2.code)
+        );
+        if (event->state == DECK_LAN_PAIRING_ACTIVE ||
+            event->state == DECK_LAN_PAIRING_AUTHENTICATING ||
+            event->state == DECK_LAN_PAIRING_PROOF_VERIFIED) {
+            std::memcpy(
+                application_model.pairing_v2.code,
+                event->code,
+                sizeof(application_model.pairing_v2.code)
+            );
+        }
+        application_model.pairing_v2.remaining_seconds = event->remaining_seconds;
+        application_model.pairing_v2.proof_count = event->proof_count;
+        xSemaphoreGive(application_model_mutex);
+    }
+    (void)publish_application_model();
+#ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
+    char diagnostic[192];
+    const int size = snprintf(
+        diagnostic,
+        sizeof(diagnostic),
+        "{\"type\":\"pairing_v2\",\"state\":\"%s\","
+        "\"remaining_seconds\":%" PRIu32 ",\"proof_count\":%" PRIu32 ","
+        "\"error_stage\":\"%s\"}\n",
+        pairing_v2_state_name(event->state),
+        event->remaining_seconds,
+        event->proof_count,
+        event->error_stage == nullptr ? "" : event->error_stage
+    );
+    if (size > 0 && static_cast<size_t>(size) < sizeof(diagnostic)) {
+        write_stdout(nullptr, diagnostic, static_cast<size_t>(size));
+    }
+#endif
+}
+
 void start_setup_after_ui_ready()
 {
     if (application_setup != nullptr) {
@@ -1207,12 +1337,33 @@ void start_setup_after_ui_ready()
     application_setup = deck_setup_service_start(setup_event, nullptr);
     if (application_setup != nullptr) {
         const esp_app_desc_t *app = esp_app_get_description();
-        application_companion_link = deck_companion_link_start(
-            deck_setup_service_wait_companion_profiles(application_setup, 10'000),
-            app->version
-        );
-        if (application_companion_link != nullptr) {
-            application_ai_page_task = start_ai_page_task(application_companion_link);
+        deck_companion_profiles_t *profiles =
+            deck_setup_service_wait_companion_profiles(application_setup, 10'000);
+        if (profiles != nullptr) {
+            application_lan_pairing = deck_lan_pairing_start(
+                profiles,
+                app->version,
+                pairing_v2_event,
+                nullptr
+            );
+            bool pairing_network_ready = false;
+            if (application_model_mutex != nullptr &&
+                xSemaphoreTake(application_model_mutex, portMAX_DELAY) == pdTRUE) {
+                pairing_network_ready =
+                    application_model.wifi_state == DECK_WIFI_CONNECTED &&
+                    application_model.setup_state != DECK_SETUP_ACTIVE;
+                xSemaphoreGive(application_model_mutex);
+            }
+            if (pairing_network_ready && application_lan_pairing != nullptr) {
+                (void)deck_lan_pairing_open_if_unpaired(application_lan_pairing);
+            }
+            application_companion_link = deck_companion_link_start(
+                profiles,
+                app->version
+            );
+            if (application_companion_link != nullptr) {
+                application_ai_page_task = start_ai_page_task(application_companion_link);
+            }
         }
     }
 #ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE

@@ -421,6 +421,22 @@ esp_err_t page_handler(httpd_req_t *request)
     return httpd_resp_send(request, page, HTTPD_RESP_USE_STRLEN);
 }
 
+esp_err_t legacy_pairing_page_handler(httpd_req_t *request)
+{
+    auto *service = static_cast<deck_setup_service_t *>(request->user_ctx);
+    if (!mark_activity(service)) {
+        httpd_resp_set_status(request, "503 Service Unavailable");
+        return send_json(request, "{\"error\":\"setup_inactive\"}");
+    }
+    const char *page = deck_setup_http_legacy_pairing_page();
+    if (page == nullptr) {
+        return httpd_resp_send_500(request);
+    }
+    httpd_resp_set_type(request, "text/html; charset=utf-8");
+    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    return httpd_resp_send(request, page, HTTPD_RESP_USE_STRLEN);
+}
+
 esp_err_t render_status(deck_setup_service_t *service, httpd_req_t *request)
 {
     deck_setup_snapshot_t snapshot{};
@@ -1001,6 +1017,8 @@ HttpHandler handler_for_route(deck_setup_http_route_t route)
     switch (route) {
         case DECK_SETUP_HTTP_PAGE:
             return page_handler;
+        case DECK_SETUP_HTTP_LEGACY_PAIRING_PAGE:
+            return legacy_pairing_page_handler;
         case DECK_SETUP_HTTP_STATUS:
             return status_handler;
         case DECK_SETUP_HTTP_SCAN:

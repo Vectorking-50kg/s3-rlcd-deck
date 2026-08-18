@@ -664,12 +664,28 @@ Companion 使用本地 SQLite 保存最近 90 天的小时级用量、余额和�
 
 ### 9.1 配对流程
 
-1. Companion 生成一次性六位配对码并启动 Device Hub。
-2. 用户长按 BOOT 打开开发板临时 AP/恢复页。
-3. 在恢复页输入 Companion 地址和一次性配对码。
-4. 双方交换独立设备 Token、Companion 证书指纹和设备 ID。
-5. ESP32 固定证书指纹，以后只连接匹配的 WSS 服务。
-6. 配对成功后关闭临时 AP。
+1. Deck 与 Companion 所在 Mac 保持连接同一个可互访的普通局域网；不切换到 Setup AP。
+2. 未配对 Deck 首次联网自动打开有界 Pairing Window；已配对 Deck 由用户短按 BOOT 打开。
+3. Deck 只在窗口内用 `_s3rlcd-pair._tcp.local.` 公告匿名、短期 Pairing Candidate。
+4. 用户在认证后的 Companion Web 扫描并选择候选，Deck 生成并显示一次性六位码。
+5. 用户把该码输入 Companion Web；双方通过 Security2 PAKE 建立认证加密通道，交换独立
+   Device Token、Companion 证书、固定指纹和 Device Hub DNS-SD identity。
+   macOS 的 Hub identity 必须通过所选物理局域网接口上的系统 Bonjour
+   `DNSServiceRegister` 发布，并收到成功回调后才允许凭据离开 Mac；不得另开 UDP 5353
+   listener 与 `mDNSResponder` 争用端口。
+6. Deck Profile 与 Companion Trust 先暂存；只有新 Profile 建立证书固定、Token 认证的
+   WSS hello/heartbeat 后才同时提交并显示成功。任何失败保留原 Profile 与 Active Companion。
+7. 若断电启动后系统墙钟早于固件提交时间，Deck 只能用 PAKE 已认证或已提交的精确固定证书
+   在其有效期内播种 TLS 临时时钟；已有可信墙钟不得为了未来或过期证书回拨。首个固定 WSS
+   心跳随后提供可信 UTC。
+
+浏览器只接触不透明候选/会话引用和用户当次输入的验证码。DNS-SD、日志、URL、诊断与持久
+存储均不得出现验证码或凭据。Pairing v1 的 Setup 恢复页流程只在一个兼容版本内通过显式
+`/compat/pairing-v1` 入口支持旧固件；不得回退成默认流程。完整决定见
+[ADR 0026](adr/0026-bootstrap-companion-trust-with-lan-discovery-and-deck-displayed-pake.md)。
+候选倒计时仅表示浏览器不透明引用的有效期，Companion Session 倒计时仅表示本地上限；
+Deck 屏幕是 Pairing Window 和验证码截止时间的唯一权威。Web 不得把任一本地计时器标成
+Deck 配对窗口剩余时间。
 
 每个 Companion 使用独立 Token 和证书，可单独撤销。
 
@@ -955,7 +971,8 @@ Web 修改 ESP32 配置时使用 write-through：只有收到设备确认才显�
   fail-closed 到已提交记录。关闭时在 2 秒预算内排空已排队
   checkpoint；驱动仍阻塞时保留完整 owner 并允许幂等重试关闭。
 - Companion Link 只通过统一 message dispatch 把完整校验通过的 `snapshot.ai`
-  发布给 Snapshot Store；解析失败、过大、隐私边界、未来时间、时间回退或未知 major
+  发布给 Snapshot Store；独立心跳/快照队列只允许 5 秒有界传输偏差，解析失败、过大、
+  隐私边界、超出偏差的未来时间、时间回退或未知 major
   都不能覆盖最后有效快照。
 - Companion 离线不足 24 小时时 Snapshot Store 允许读取旧文档并标 `STALE`；达到
   24 小时、时钟无效或任一可信时间源低于其 high-water mark 时不向 UI 暴露文档/额度，
@@ -975,7 +992,8 @@ Web 修改 ESP32 配置时使用 write-through：只有收到设备确认才显�
 - BOOT 长按 3 秒或首次启动时开启。
 - 每次生成随机热点密码并显示在屏幕上。
 - 10 分钟无操作自动关闭，配置成功立即关闭。
-- 恢复页只允许 Wi-Fi、Companion 配对、Active Companion 和基础硬件设置。
+- 恢复页只允许 Wi-Fi、Active Companion/Profile 恢复和基础硬件设置；正式首次配对使用
+  同一普通 LAN 的 Pairing v2。Pairing v1 只保留显式兼容入口。
 - 恢复页不能查看 Provider API Key。
 
 ### 13.7 OTA
@@ -1131,14 +1149,16 @@ s3-rlcd-deck/
 
 - Go 程序骨架、托盘/菜单栏、嵌入 SPA。
 - 管理入口与 Device Hub 分离。
-- 一次性码配对、证书指纹固定、WSS 心跳。
+- Pairing v2 同 LAN 匿名发现、Deck 显示一次性码、Security2 PAKE、证书指纹固定与 WSS 心跳。
 - 多 Profile 数据结构先落地，故障切换可在 M5 完成。
-- 实板验收时控制 Mac 始终保留在普通 LAN；由有线控制、Wi-Fi 加入 Setup AP 的
-  双网口 Linux 客户端访问真实恢复页并透明转发 Device Hub TLS。没有该物理客户端时
-  `recovery_pairing` 必须保持 BLOCKED，USB/Host seam 不得替代。
-- 任何会修改 Companion Profile 的 Pairing 前，控制端必须先通过独立事务取得并保存
+- Pairing v2 实板验收时 Mac 与 Deck 始终保留在同一普通 LAN，不需要 Linux helper、管理员
+  网络切换或 Setup AP。用户必须从 Deck 屏幕读取验证码并经正式 Web 流程完成；Host seam 不得替代。
+- Pairing v1 的双网口 Linux Setup-client 验收仅用于一个兼容版本的旧固件路径，在
+  Pairing v2 实板证据通过前保持独立 BLOCKED，不得设置 Pairing v2 的通过状态。
+- Pairing v1 兼容验收中，任何会修改 Companion Profile 的 Pairing 前，控制端必须先通过
+  独立事务取得并保存
   原 Profile 快照；SSH 返回或客户端网络清理失败不能丢失补偿依据。
-- Linux 客户端在切换 Wi-Fi 前只持久化非秘密 UUID 补偿日志；控制端每次事务后必须用
+- Pairing v1 兼容验收的 Linux 客户端在切换 Wi-Fi 前只持久化非秘密 UUID 补偿日志；控制端每次事务后必须用
   新 SSH 连接执行幂等 cleanup/verify，并以跨进程事务锁等待旧 primary 完全退出。SSH
   cleanup 还必须留下 cancellation fence，使尚未取得锁的迟到 primary 永久拒绝变更。
   控制口必须由 NetworkManager 明确识别为 Ethernet。每次请求都重新绑定受验 helper
