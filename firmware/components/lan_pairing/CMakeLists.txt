@@ -1,5 +1,7 @@
 idf_component_register(
-    SRCS "deck_lan_pairing.cpp"
+    SRCS
+        "deck_lan_pairing.cpp"
+        "deck_pairing_v2_contract.cpp"
     INCLUDE_DIRS "include"
     REQUIRES esp_hw_support freertos mdns protocomm
 )

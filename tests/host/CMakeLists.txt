@@ -311,6 +311,17 @@ deck_add_host_test(
         ../../firmware/components/setup_mode/deck_setup_response_barrier.cpp
     INCLUDE_DIRS ../../firmware/components/setup_mode/include
 )
+deck_add_host_test(
+    test_pairing_v2_contract
+    SOURCES
+        test_pairing_v2_contract.cpp
+        ../../firmware/components/lan_pairing/deck_pairing_v2_contract.cpp
+    INCLUDE_DIRS ../../firmware/components/lan_pairing/include
+)
+target_compile_definitions(
+    test_pairing_v2_contract
+    PRIVATE DECK_REPOSITORY_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../.."
+)
 
 add_test(
     NAME hil_boot_smoke_replay

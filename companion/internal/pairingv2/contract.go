@@ -1,6 +1,7 @@
 package pairingv2
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
@@ -139,7 +140,7 @@ func (Error) pairingV2Message()         {}
 
 func DecodeContractMessage(document []byte) (Message, error) {
 	var raw map[string]json.RawMessage
-	if len(document) == 0 || len(document) > MaximumContractMessage ||
+	if len(document) == 0 || len(document) > MaximumContractMessage || bytes.ContainsRune(document, '\\') ||
 		protocol.DecodeStrictDocumentLimit(document, MaximumContractMessage, &raw) != nil {
 		return nil, ErrMalformedContract
 	}
@@ -287,7 +288,8 @@ func validHubAddress(value string) bool {
 	}
 	address, err := netip.ParseAddr(host)
 	port, portErr := strconv.ParseUint(portText, 10, 16)
-	return err == nil && portErr == nil && port != 0 && usablePairingIPv4(address)
+	return err == nil && portErr == nil && port != 0 &&
+		(portText == "0" || portText[0] != '0') && usablePairingIPv4(address)
 }
 
 func validPairingState(value string) bool {

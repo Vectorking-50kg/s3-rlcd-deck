@@ -10,6 +10,23 @@ This directory is the cross-end source of truth for versioned messages exchanged
   (including signed OTA) reject unknown fields.
 - Unknown protocol major versions, duplicate object keys, trailing documents, malformed JSON, and oversized messages are rejected.
 
+## Pairing v2
+
+`schema/pairing-v2.schema.json` defines the authenticated documents exchanged only after the
+Deck-displayed PAKE has confirmed both peers. Pairing v2 documents are flat, ASCII JSON objects
+bounded to 4 KiB. Their field names and values use their canonical literal bytes: JSON string
+escapes are rejected even when they would decode to an otherwise permitted character. Integer
+fields use canonical unsigned decimal notation without leading zeroes.
+
+Session IDs, transaction IDs, and nonces are distinct 128-bit lowercase-hex values. Message
+sequence 1–4 is fixed as credentials → commit-ready → commit → commit-receipt; later status and
+cancel requests remain bound to the same session and transaction. Credential documents carry the
+43-character per-Deck Token and certificate only inside the Security2 channel, and both parsers
+independently verify that the decoded certificate matches its canonical SHA-256 fingerprint.
+Unknown fields, wrong sequence, replay, incompatible major, non-private Hub addresses, malformed
+base64, and unrecognized state/error values fail closed. The shared
+`fixtures/pairing-v2/manifest.json` is executed unchanged by Go and ESP-IDF Host tests.
+
 ## AI Snapshot v1
 
 `schema/ai-snapshot-v1.schema.json` is the normalized `snapshot.ai` wire contract. Percentages
