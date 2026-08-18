@@ -125,10 +125,33 @@ def wait_for_display_baseline(connection: Any, timeout_seconds: float) -> int:
     raise PreviewFailure("timed out waiting for a clean display baseline")
 
 
+def wait_for_preview_ack(connection: Any, page: str, timeout_seconds: float) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        event = read_json_event(connection, deadline)
+        if event is None or event.get("type") != "ui_preview":
+            continue
+        if not valid_preview_event(event, page):
+            raise PreviewFailure("Deck rejected or malformed the UI preview command")
+        return
+    raise PreviewFailure("timed out waiting for UI preview acknowledgement")
+
+
 def show_preview(connection: Any, page: str, timeout_seconds: float) -> int:
     if timeout_seconds <= 0:
         raise PreviewFailure("timeout must be greater than zero")
+
+    # A deterministic preview is intentionally static. Restore the live owner
+    # first so a second invocation can observe a fresh physical completion and
+    # prove that the requested page, rather than the prior frozen page, reached
+    # the panel.
+    connection.write(preview_command("clear"))
+    connection.flush()
+    wait_for_preview_ack(connection, "clear", timeout_seconds)
     baseline = wait_for_display_baseline(connection, timeout_seconds)
+    if page == "clear":
+        return baseline
+
     connection.write(preview_command(page))
     connection.flush()
 

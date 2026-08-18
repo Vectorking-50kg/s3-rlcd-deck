@@ -39,7 +39,19 @@ class PreviewConnection:
 
     def write(self, value: bytes) -> None:
         self.writes.append(value)
-        if value == MODULE.HIL_READY and not self.lines:
+        if value == MODULE.preview_command("clear"):
+            self.lines.append(
+                json.dumps(
+                    {
+                        "type": "ui_preview",
+                        "page": "live",
+                        "active": False,
+                        "accepted": True,
+                    }
+                ).encode()
+                + b"\n"
+            )
+        elif value == MODULE.HIL_READY and not self.lines:
             self.lines.append(json.dumps(display_event(7)).encode() + b"\n")
         elif value == MODULE.preview_command(self.page):
             event = {
@@ -122,8 +134,12 @@ class CaptureConnection:
 
 for page in MODULE.PAGES:
     connection = PreviewConnection(page)
-    assert MODULE.show_preview(connection, page, 0.25) == 8
-    assert connection.writes[:2] == [MODULE.HIL_READY, MODULE.preview_command(page)]
+    expected_frame = 7 if page == "clear" else 8
+    assert MODULE.show_preview(connection, page, 0.25) == expected_frame
+    expected_writes = [MODULE.preview_command("clear"), MODULE.HIL_READY]
+    if page != "clear":
+        expected_writes.append(MODULE.preview_command(page))
+    assert connection.writes == expected_writes
     assert connection.flushed
 
 try:
