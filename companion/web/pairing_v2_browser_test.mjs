@@ -265,9 +265,10 @@ async function main() {
       await new Promise(r=>setTimeout(r,30));}return null;})()`);
     assert.deepEqual(paired, { stored: null });
 
-    await evaluate(cdp, `(async()=>{document.querySelector('#pairing-v2-rescan').click();const end=Date.now()+10000;
-      while(Date.now()<end){const button=document.querySelector('.pairing-candidate button');if(button){button.click();break;}await new Promise(r=>setTimeout(r,30));}
-      while(document.querySelector('#pairing-v2-code-form').hidden)await new Promise(r=>setTimeout(r,30));
+    await evaluate(cdp, `(async()=>{const wait=async(name,fn)=>{const end=Date.now()+10000;while(Date.now()<end){const value=fn();if(value)return value;await new Promise(r=>setTimeout(r,30));}throw new Error('DOM timeout: '+name)};
+      document.querySelector('#pairing-v2-rescan').click();
+      const button=await wait('candidate after rescan',()=>document.querySelector('.pairing-candidate button'));button.click();
+      await wait('Pairing code form after rescan',()=>!document.querySelector('#pairing-v2-code-form').hidden);
       document.querySelector('#pairing-v2-code').value='654321';document.querySelector('#pairing-v2-close').click();
     })()`);
     const cancelled = await evaluate(cdp, `(async()=>{const end=Date.now()+10000;while(Date.now()<end){
