@@ -36,8 +36,28 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  verify:
-    name: Host contracts and ESP-IDF 6.0.2
+  host-contracts:
+    name: Host and UI contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out the tested commit
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: companion/go.mod
+          cache-dependency-path: companion/go.sum
+
+      - name: Run Host and UI contracts
+        run: ./tools/test_host.sh
+
+  firmware-builds:
+    name: ESP-IDF 6.0.2 dev and release
     runs-on: ubuntu-latest
     timeout-minutes: 45
     defaults:
@@ -55,11 +75,6 @@ jobs:
         run: |
           source "$IDF_PATH/export.sh" >/dev/null
           idf.py --version | grep -F "ESP-IDF v6.0.2"
-
-      - name: Run Host and UI contracts
-        run: |
-          source "$IDF_PATH/export.sh" >/dev/null
-          ./tools/test_host.sh
 
       - name: Build development firmware
         run: |
