@@ -25,9 +25,9 @@
 
 - LVGL 通过依赖锁固定为 9.4.0，组件记录的上游提交为 `c016f72d4c125098287be5e83c0f1abed4706ee5`；见[依赖锁](../../firmware/dependencies.lock)与本地 managed component 的 `idf_component.yml`。LVGL 本身使用 [MIT 许可证](https://github.com/lvgl/lvgl/blob/c016f72d4c125098287be5e83c0f1abed4706ee5/LICENCE.txt)。
 - [生成脚本](../../tools/generate_m0_font.sh)固定 `lv_font_conv@1.5.3`，使用 LVGL 依赖内的 `SourceHanSansSC-Normal.otf`，统一采用 1 bpp、ASCII `0x20–0x7e`、无 kerning；它已生成 **16/20 px CJK+ASCII** 和 **32 px ASCII-only** 三档。
-- [字形清单](../../firmware/components/application_ui/assets/m0_glyphs.txt)当前有 **206 个唯一 symbols：203 个基本区汉字，加 `°`、`·` 与 `、`**。16/20 px 各包含这 206 个 symbols 与 95 个可打印 ASCII，共 301 个有效 glyph、另一个保留 descriptor；32 px 只有 95 个 ASCII glyph。
-- [16 px 字体](../../firmware/components/application_ui/assets/lv_font_deck_m0_16.c)为 `line_height=19`、`base_line=5`、bitmap 6,154 B；[20 px 字体](../../firmware/components/application_ui/assets/lv_font_deck_ui_20.c)为 `line_height=23`、`base_line=6`、bitmap 9,571 B；[32 px ASCII 字体](../../firmware/components/application_ui/assets/lv_font_deck_ui_32.c)为 `line_height=37`、`base_line=9`、bitmap 3,574 B。
-- ESP-IDF 6.0.2 的 Xtensa object 实测三档只读字体数据分别为 **9,090 B、12,507 B、4,426 B，合计 26,023 B**。这里未把 debug section 或 C 源码文本大小当成固件 Flash 成本；release 构建应持续用 object/map 文件校验。
+- [字形清单](../../firmware/components/application_ui/assets/m0_glyphs.txt)当前有 **212 个唯一 symbols：208 个基本区汉字，加 `°`、`·`、`、` 与 `，`**。16/20 px 各包含这 212 个 symbols 与 95 个可打印 ASCII，共 307 个有效 glyph、另一个保留 descriptor；32 px 只有 95 个 ASCII glyph。
+- [16 px 字体](../../firmware/components/application_ui/assets/lv_font_deck_m0_16.c)为 `line_height=19`、`base_line=5`、bitmap 6,293 B；[20 px 字体](../../firmware/components/application_ui/assets/lv_font_deck_ui_20.c)为 `line_height=23`、`base_line=6`、bitmap 9,783 B；[32 px ASCII 字体](../../firmware/components/application_ui/assets/lv_font_deck_ui_32.c)为 `line_height=37`、`base_line=9`、bitmap 3,574 B。
+- ESP-IDF 6.0.2 的 Xtensa object 实测三档只读字体数据分别为 **9,289 B、12,779 B、4,426 B，合计 26,494 B**。这里未把 debug section 或 C 源码文本大小当成固件 Flash 成本；release 构建应持续用 object/map 文件校验。
 - [renderer](../../firmware/components/application_ui/deck_ui_renderer.cpp)让中文 hero 使用 20 px，而只有 `hero_is_code` 时使用 32 px；因此 32 px 不含中文是一个有意的资源边界，不是缺字遗漏。
 - Source Han Sans SC 使用 [SIL Open Font License 1.1](https://github.com/adobe-fonts/source-han-sans/blob/release/LICENSE.txt)；仓库已保留[对应许可证副本](../../firmware/components/application_ui/assets/SourceHanSansSC-OFL.txt)和 [NOTICE](../../firmware/NOTICE.md)。
 
@@ -64,17 +64,17 @@ LVGL 的通用文档指出压缩字体渲染约慢 30%，且越大、bpp 越高�
 
 ## 4. 12–20 px 的可读性与成本
 
-使用当时的 **202-symbol manifest**、同一个 OTF 和 `lv_font_conv@1.5.3`，只改变 `--size`，本次得到以下字号对照；当前生产清单已随新增页面扩展到 206 symbols：
+使用当时的 **202-symbol manifest**、同一个 OTF 和 `lv_font_conv@1.5.3`，只改变 `--size`，本次得到以下字号对照；当前生产清单已随新增页面扩展到 212 symbols，表内当前生产档位已按最新 object 更新：
 
 | `--size` | `line_height` | `base_line` | bitmap bytes | 估算静态字体数据 | 建议用途 |
 |---:|---:|---:|---:|---:|---|
 | 12 | 15 | 4 | 3,650 | 约 6,546 B | 数字、ASCII 缩写；避免一般中文正文 |
 | 14 | 16 | 4 | 4,779 | 约 7,675 B | 低笔画次要标签；高密度汉字需逐字验证 |
-| 16 | 19 | 5 | 6,154 | **9,090 B（当前 object 实测）** | 中文紧凑正文的最低默认值 |
+| 16 | 19 | 5 | 6,293 | **9,289 B（当前 object 实测）** | 中文紧凑正文的最低默认值 |
 | 18 | 21 | 5 | 7,493 | 约 10,389 B | 后续正文清晰度 A/B 候选 |
-| 20 | 23 | 6 | 9,571 | **12,507 B（当前 object 实测）** | 中文标题、告警、短状态 |
+| 20 | 23 | 6 | 9,783 | **12,779 B（当前 object 实测）** | 中文标题、告警、短状态 |
 
-当前 16/20 px object 包含 302 个 descriptor、两个 cmap、206 项 Unicode list 和 font descriptor；bitmap、`line_height` 与 `base_line` 直接来自对应生成物，并由当前 Xtensa object 精确复核。这里最重要的不是每档相差一两 KiB，而是 12–14 px 留给复杂汉字的有效像素网格太小。
+当前 16/20 px object 包含 308 个 descriptor、两个 cmap、212 项 Unicode list 和 font descriptor；bitmap、`line_height` 与 `base_line` 直接来自对应生成物，并由当前 Xtensa object 精确复核。这里最重要的不是每档相差一两 KiB，而是 12–14 px 留给复杂汉字的有效像素网格太小。
 
 建议建立一组“困难字”硬件样张，至少覆盖：
 
@@ -178,7 +178,7 @@ LVGL 的 `fallback` 会递归查找缺失 glyph，[官方文档](https://docs.lv
 
 ### 6.3 动态中文的产品边界
 
-当前 203 汉字 manifest 已覆盖固定 UI 文案，但仍不能保证任意会话名、设备名或远端内容。产品必须选择并记录一种策略：
+当前 208 汉字 manifest 已覆盖固定 UI 文案，但仍不能保证任意会话名、设备名或远端内容。产品必须选择并记录一种策略：
 
 1. **受限动态文本：** 协议只允许 manifest 内字符和 ASCII；接收时做 Unicode code-point 校验，并显示明确替代文案；
 2. **常用汉字 fallback：** 编译一个同源同尺寸的 3,000–7,000 字 fallback。按当前 16 px bitmap 与 descriptor 粗估为数百 KiB Flash、近零常驻 RAM，应由分区预算决定；
@@ -201,7 +201,7 @@ LVGL 的 `fallback` 会递归查找缺失 glyph，[官方文档](https://docs.lv
 
 1. 保留 16 px 作为密集正文/表格，20 px 作为中文标题、中文 hero 和短告警，32 px 只作为 ASCII/数字 code hero；不把中文补进 32 px。
 2. 12/14 px 组件不得承载未经审查的中文正文；若 16 px 实机不够清楚，再生成 18 px 与 16 px 做同文案 A/B，而不是预先替换当前 20 px 标题档。
-3. 目前 16/20 px 共用同一 206-symbol manifest，简单且合计约 21.1 KiB；若以后需要缩减 Flash，再从实际调用点自动生成独立 manifest，不能手工维护两份易漂移清单。
+3. 目前 16/20 px 共用同一 212-symbol manifest，简单且合计约 21.6 KiB；若以后需要缩减 Flash，再从实际调用点自动生成独立 manifest，不能手工维护两份易漂移清单。
 4. 布局测试使用生成字体的真实 `adv_w`、`line_height`、`base_line`，并覆盖 renderer 中 16/20/32 的实际 label 高度；不要用“一个汉字约等于字号”的估算代替。
 
 当前管线已经有两个正确的保护：host test 会检查两个生产文案源中的非 ASCII 字符都在 manifest 中，scene test 也覆盖配对码的 `hero_is_code`。但距离可发布的字体契约仍有以下差距：
@@ -209,7 +209,7 @@ LVGL 的 `fallback` 会递归查找缺失 glyph，[官方文档](https://docs.lv
 - coverage test 只证明“文案字符在 manifest”，还没有证明 checked-in 的 **16/20 字体 C 文件**与 manifest 同步；CI 应重新生成后 byte-compare，或直接解析 cmap 验证每个 code point；
 - 现有宽度测试只读取 16 px 的 ASCII advance；还需覆盖 20 px 中文标题、32 px code hero、renderer 的真实 label 高度，以及 32 px 路径只收到 ASCII 的不变量；
 - 生成脚本直接在线运行 `npx --yes`，虽固定版本但还没有 lockfile/tarball cache、输入/输出 hash、NFC/排序/去重检查；
-- 还没有针对三档字体的 object/map Flash 自动预算门；本文记录的 26,023 B 是当前 ESP-IDF 6.0.2 Xtensa object 实测值，后续 release 构建应持续验证；
+- 还没有针对三档字体的 object/map Flash 自动预算门；本文记录的 26,494 B 是当前 ESP-IDF 6.0.2 Xtensa object 实测值，后续 release 构建应持续验证；
 - 自动测试不能替代 400×300 RLCD 实机样张；16/20 正反白、困难字以及重复局刷后的可辨识度仍需成为硬件验收项。
 
 ### 阶段 C：只有实机不达标才评估 WQY BDF
@@ -249,4 +249,4 @@ LVGL 的 `fallback` 会递归查找缺失 glyph，[官方文档](https://docs.lv
 - **质量门：** code-point coverage、生成确定性、Flash 预算、混排 baseline、实机困难字样张；
 - **备选：** WQY BDF 仅在 Source Han 实机失败后进行受控 A/B，不先引入 U8g2 runtime。
 
-这条路线直接匹配当前 16/20 CJK + 32 ASCII 实现，三档合计约 25.4 KiB 只读数据；同时为 18 px 清晰度 A/B、按用途缩减 20 px manifest 和未来常用汉字 fallback 留出了清晰的演进边界。
+这条路线直接匹配当前 16/20 CJK + 32 ASCII 实现，三档合计约 25.9 KiB 只读数据；同时为 18 px 清晰度 A/B、按用途缩减 20 px manifest 和未来常用汉字 fallback 留出了清晰的演进边界。

@@ -149,8 +149,16 @@ Deck 是放在桌面上的本地技术仪表，不是串口日志窗口。用户
 source /Users/xiaowang/.espressif/v6.0.2/esp-idf/export.sh
 python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page board
 python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page pairing
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page pairing-authenticating
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page pairing-verified
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page pairing-success
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page pairing-expired
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page pairing-error
 python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page setup
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page setup-validating
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page setup-error
 python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page ai
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page ai-stale
 python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page provider
 python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page configuration
 python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page serial

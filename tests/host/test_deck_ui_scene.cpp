@@ -149,6 +149,35 @@ void pairing_failure_explains_that_existing_trust_is_preserved()
     assert_scene_fits_panel(scene);
 }
 
+void every_pairing_transition_has_distinct_chinese_feedback()
+{
+    struct PairingCase {
+        deck_pairing_v2_state_t state;
+        const char *hero;
+        const char *message;
+        const char *detail;
+    };
+    constexpr PairingCase cases[] = {
+        {DECK_PAIRING_V2_AUTHENTICATING, "123 456", "正在认证 Companion", "剩余 62 秒"},
+        {DECK_PAIRING_V2_PROOF_VERIFIED, "123 456", "安全证明已通过", "剩余 62 秒"},
+        {DECK_PAIRING_V2_PAIRED, "配对成功", "安全连接已经建立", "Companion Profile 已安全保存"},
+        {DECK_PAIRING_V2_EXPIRED, "验证码已过期", "没有修改任何信任配置", "请按 BOOT 重新开始配对"},
+        {DECK_PAIRING_V2_ERROR, "配对失败", "原有 Profile 保持不变", "请检查网络后按 BOOT 重试"},
+    };
+    for (const PairingCase &expected : cases) {
+        deck_m0_view_model_t model = base_model();
+        model.pairing_v2.state = expected.state;
+        std::strcpy(model.pairing_v2.code, "123456");
+        model.pairing_v2.remaining_seconds = 62U;
+        deck_ui_scene_t scene{};
+        assert(deck_ui_scene_project(&model, &scene));
+        assert(std::string(scene.hero) == expected.hero);
+        assert(std::string(scene.message) == expected.message);
+        assert(std::string(scene.detail) == expected.detail);
+        assert_scene_fits_panel(scene);
+    }
+}
+
 void setup_credentials_are_structured_as_ephemeral_rows()
 {
     deck_m0_view_model_t model = base_model();
@@ -163,6 +192,30 @@ void setup_credentials_are_structured_as_ephemeral_rows()
     assert(std::string(scene.metrics[0].value) == "S3-DECK-A17F");
     assert(std::string(scene.metrics[1].value) == "MINT-WAVE-7294");
     assert(std::string(scene.metrics[2].value) == "http://192.168.4.1");
+    assert_scene_fits_panel(scene);
+}
+
+void setup_validation_and_failure_keep_recovery_actions_obvious()
+{
+    deck_m0_view_model_t model = base_model();
+    model.setup_state = DECK_SETUP_ACTIVE;
+    std::strcpy(model.setup_ssid, "S3-DECK-A17F");
+    std::strcpy(model.setup_password, "MINT-WAVE-7294");
+    std::strcpy(model.setup_address, "192.168.4.1");
+    model.wifi_config_state = DECK_WIFI_CONFIG_VIEW_VALIDATING;
+    deck_ui_scene_t scene{};
+    assert(deck_ui_scene_project(&model, &scene));
+    assert(std::string(scene.badge) == "正在验证");
+    assert(std::string(scene.summary_title) == "正在验证家庭 Wi-Fi");
+    assert(std::string(scene.summary_detail) == "原配置保持不变，请稍候");
+    assert_scene_fits_panel(scene);
+
+    model.wifi_config_state = DECK_WIFI_CONFIG_VIEW_AUTH_FAILED;
+    assert(deck_ui_scene_project(&model, &scene));
+    assert(std::string(scene.badge) == "认证失败");
+    assert(std::string(scene.summary_title) == "Wi-Fi 认证失败");
+    assert(std::string(scene.summary_detail).find("原配置保持不变") != std::string::npos);
+    assert(scene.badge_style == DECK_UI_BADGE_ALERT);
     assert_scene_fits_panel(scene);
 }
 
@@ -198,6 +251,20 @@ void unavailable_ai_data_is_explicit_and_does_not_show_zeroes()
     assert(std::string(scene.hero) == "暂无 Codex 数据");
     assert(std::string(scene.message) == "Active Companion 当前离线");
     assert(scene.metric_count == 0U);
+    assert_scene_fits_panel(scene);
+}
+
+void stale_ai_snapshot_keeps_the_last_summary_but_marks_it_untrusted()
+{
+    deck_m0_view_model_t model = ai_model();
+    model.ai_page.snapshot_state = DECK_AI_PAGE_SNAPSHOT_STALE;
+    model.ai_page.companion_state = DECK_AI_PAGE_COMPANION_OFFLINE;
+    deck_ui_scene_t scene{};
+    assert(deck_ui_scene_project(&model, &scene));
+    assert(std::string(scene.badge) == "数据已过期");
+    assert(std::string(scene.status_companion) == "Companion 离线");
+    assert(scene.metric_count == 2U);
+    assert(std::string(scene.summary_title) == "Deck 中文界面开发");
     assert_scene_fits_panel(scene);
 }
 
@@ -276,8 +343,16 @@ void every_visual_preview_is_named_deterministic_and_panel_safe()
     constexpr PreviewCase cases[] = {
         {"board", DECK_UI_PREVIEW_BOARD},
         {"pairing", DECK_UI_PREVIEW_PAIRING},
+        {"pairing-authenticating", DECK_UI_PREVIEW_PAIRING_AUTHENTICATING},
+        {"pairing-verified", DECK_UI_PREVIEW_PAIRING_VERIFIED},
+        {"pairing-success", DECK_UI_PREVIEW_PAIRING_SUCCESS},
+        {"pairing-expired", DECK_UI_PREVIEW_PAIRING_EXPIRED},
+        {"pairing-error", DECK_UI_PREVIEW_PAIRING_ERROR},
         {"setup", DECK_UI_PREVIEW_SETUP},
+        {"setup-validating", DECK_UI_PREVIEW_SETUP_VALIDATING},
+        {"setup-error", DECK_UI_PREVIEW_SETUP_ERROR},
         {"ai", DECK_UI_PREVIEW_AI},
+        {"ai-stale", DECK_UI_PREVIEW_AI_STALE},
         {"provider", DECK_UI_PREVIEW_PROVIDER},
         {"configuration", DECK_UI_PREVIEW_CONFIGURATION},
         {"serial", DECK_UI_PREVIEW_SERIAL},
@@ -312,9 +387,12 @@ int main()
     board_is_a_visual_dashboard_instead_of_a_diagnostic_log();
     pairing_has_highest_priority_and_a_large_grouped_code();
     pairing_failure_explains_that_existing_trust_is_preserved();
+    every_pairing_transition_has_distinct_chinese_feedback();
     setup_credentials_are_structured_as_ephemeral_rows();
+    setup_validation_and_failure_keep_recovery_actions_obvious();
     codex_uses_chinese_labels_and_real_progress_metrics();
     unavailable_ai_data_is_explicit_and_does_not_show_zeroes();
+    stale_ai_snapshot_keeps_the_last_summary_but_marks_it_untrusted();
     unsupported_dynamic_chinese_never_renders_as_missing_glyph_boxes();
     serial_scene_keeps_payload_out_and_makes_the_owner_obvious();
     semantic_scene_equality_detects_visible_changes();

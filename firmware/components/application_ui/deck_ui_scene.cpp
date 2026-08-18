@@ -504,8 +504,25 @@ void project_setup(const deck_m0_view_model_t *model, deck_ui_scene_t *scene)
 {
     scene->kind = DECK_UI_SCENE_SETUP;
     (void)set_text(scene->title, "设置与恢复");
-    (void)set_text(scene->badge, "临时 AP");
-    scene->badge_style = DECK_UI_BADGE_SOLID;
+    if (model->wifi_config_state == DECK_WIFI_CONFIG_VIEW_VALIDATING) {
+        (void)set_text(scene->badge, "正在验证");
+        scene->badge_style = DECK_UI_BADGE_OUTLINE;
+    } else if (model->wifi_config_state == DECK_WIFI_CONFIG_VIEW_AUTH_FAILED) {
+        (void)set_text(scene->badge, "认证失败");
+        scene->badge_style = DECK_UI_BADGE_ALERT;
+    } else if (model->wifi_config_state == DECK_WIFI_CONFIG_VIEW_TIMED_OUT) {
+        (void)set_text(scene->badge, "验证超时");
+        scene->badge_style = DECK_UI_BADGE_ALERT;
+    } else if (model->wifi_config_state == DECK_WIFI_CONFIG_VIEW_CONNECTION_FAILED) {
+        (void)set_text(scene->badge, "连接失败");
+        scene->badge_style = DECK_UI_BADGE_ALERT;
+    } else if (model->wifi_config_state == DECK_WIFI_CONFIG_VIEW_STORAGE_ERROR) {
+        (void)set_text(scene->badge, "保存失败");
+        scene->badge_style = DECK_UI_BADGE_ALERT;
+    } else {
+        (void)set_text(scene->badge, "临时 AP");
+        scene->badge_style = DECK_UI_BADGE_SOLID;
+    }
     scene->metric_count = 3U;
     (void)set_text(scene->metrics[0].label, "网络");
     (void)set_text(scene->metrics[0].value, model->setup_ssid);
@@ -513,8 +530,25 @@ void project_setup(const deck_m0_view_model_t *model, deck_ui_scene_t *scene)
     (void)set_text(scene->metrics[1].value, model->setup_password);
     (void)set_text(scene->metrics[2].label, "访问地址");
     (void)format_text(scene->metrics[2].value, "http://%s", model->setup_address);
-    (void)set_text(scene->summary_title, "仅用于 Wi-Fi、校准与恢复");
-    (void)set_text(scene->summary_detail, "完成后临时网络会自动关闭");
+    if (model->wifi_config_state == DECK_WIFI_CONFIG_VIEW_VALIDATING) {
+        (void)set_text(scene->summary_title, "正在验证家庭 Wi-Fi");
+        (void)set_text(scene->summary_detail, "原配置保持不变，请稍候");
+    } else if (model->wifi_config_state == DECK_WIFI_CONFIG_VIEW_AUTH_FAILED) {
+        (void)set_text(scene->summary_title, "Wi-Fi 认证失败");
+        (void)set_text(scene->summary_detail, "请重新输入密码，原配置保持不变");
+    } else if (model->wifi_config_state == DECK_WIFI_CONFIG_VIEW_TIMED_OUT) {
+        (void)set_text(scene->summary_title, "Wi-Fi 验证超时");
+        (void)set_text(scene->summary_detail, "请检查网络后重试，原配置保持不变");
+    } else if (model->wifi_config_state == DECK_WIFI_CONFIG_VIEW_CONNECTION_FAILED) {
+        (void)set_text(scene->summary_title, "Wi-Fi 连接失败");
+        (void)set_text(scene->summary_detail, "临时 AP 保持开启，可重新提交");
+    } else if (model->wifi_config_state == DECK_WIFI_CONFIG_VIEW_STORAGE_ERROR) {
+        (void)set_text(scene->summary_title, "Wi-Fi 配置保存失败");
+        (void)set_text(scene->summary_detail, "原配置保持不变，请重新提交");
+    } else {
+        (void)set_text(scene->summary_title, "仅用于 Wi-Fi、校准与恢复");
+        (void)set_text(scene->summary_detail, "完成后临时网络会自动关闭");
+    }
     (void)set_text(scene->footer_left, "TX 未启用");
     (void)set_text(scene->footer_right, "BOOT 重启设置");
 }

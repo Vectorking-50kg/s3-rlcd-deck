@@ -53,8 +53,16 @@ bool deck_ui_preview_page_parse(const char *name, deck_ui_preview_page_t *page)
     constexpr PageName names[] = {
         {"board", DECK_UI_PREVIEW_BOARD},
         {"pairing", DECK_UI_PREVIEW_PAIRING},
+        {"pairing-authenticating", DECK_UI_PREVIEW_PAIRING_AUTHENTICATING},
+        {"pairing-verified", DECK_UI_PREVIEW_PAIRING_VERIFIED},
+        {"pairing-success", DECK_UI_PREVIEW_PAIRING_SUCCESS},
+        {"pairing-expired", DECK_UI_PREVIEW_PAIRING_EXPIRED},
+        {"pairing-error", DECK_UI_PREVIEW_PAIRING_ERROR},
         {"setup", DECK_UI_PREVIEW_SETUP},
+        {"setup-validating", DECK_UI_PREVIEW_SETUP_VALIDATING},
+        {"setup-error", DECK_UI_PREVIEW_SETUP_ERROR},
         {"ai", DECK_UI_PREVIEW_AI},
+        {"ai-stale", DECK_UI_PREVIEW_AI_STALE},
         {"provider", DECK_UI_PREVIEW_PROVIDER},
         {"configuration", DECK_UI_PREVIEW_CONFIGURATION},
         {"serial", DECK_UI_PREVIEW_SERIAL},
@@ -108,6 +116,61 @@ bool deck_ui_preview_scene(deck_ui_preview_page_t page, deck_ui_scene_t *scene)
             set_text(scene->detail, "剩余 87 秒");
             set_text(scene->footer_right, "BOOT 取消");
             return true;
+        case DECK_UI_PREVIEW_PAIRING_AUTHENTICATING:
+            scene->kind = DECK_UI_SCENE_PAIRING;
+            scene->centered = true;
+            scene->hero_is_code = true;
+            set_text(scene->title, "配对 Companion");
+            set_text(scene->badge, "同一局域网");
+            set_text(scene->hero, "123 456");
+            set_text(scene->message, "正在认证 Companion");
+            set_text(scene->detail, "剩余 62 秒");
+            set_text(scene->footer_right, "BOOT 取消");
+            return true;
+        case DECK_UI_PREVIEW_PAIRING_VERIFIED:
+            scene->kind = DECK_UI_SCENE_PAIRING;
+            scene->centered = true;
+            scene->hero_is_code = true;
+            set_text(scene->title, "配对 Companion");
+            set_text(scene->badge, "同一局域网");
+            set_text(scene->hero, "123 456");
+            set_text(scene->message, "安全证明已通过");
+            set_text(scene->detail, "剩余 41 秒");
+            set_text(scene->footer_right, "BOOT 取消");
+            return true;
+        case DECK_UI_PREVIEW_PAIRING_SUCCESS:
+            scene->kind = DECK_UI_SCENE_PAIRING;
+            scene->centered = true;
+            set_text(scene->title, "配对 Companion");
+            set_text(scene->badge, "同一局域网");
+            scene->badge_style = DECK_UI_BADGE_SOLID;
+            set_text(scene->hero, "配对成功");
+            set_text(scene->message, "安全连接已经建立");
+            set_text(scene->detail, "Companion Profile 已安全保存");
+            set_text(scene->footer_right, "即将返回主页");
+            return true;
+        case DECK_UI_PREVIEW_PAIRING_EXPIRED:
+            scene->kind = DECK_UI_SCENE_PAIRING;
+            scene->centered = true;
+            set_text(scene->title, "配对 Companion");
+            set_text(scene->badge, "同一局域网");
+            scene->badge_style = DECK_UI_BADGE_ALERT;
+            set_text(scene->hero, "验证码已过期");
+            set_text(scene->message, "没有修改任何信任配置");
+            set_text(scene->detail, "请按 BOOT 重新开始配对");
+            set_text(scene->footer_right, "BOOT 重试");
+            return true;
+        case DECK_UI_PREVIEW_PAIRING_ERROR:
+            scene->kind = DECK_UI_SCENE_PAIRING;
+            scene->centered = true;
+            set_text(scene->title, "配对 Companion");
+            set_text(scene->badge, "同一局域网");
+            scene->badge_style = DECK_UI_BADGE_ALERT;
+            set_text(scene->hero, "配对失败");
+            set_text(scene->message, "原有 Profile 保持不变");
+            set_text(scene->detail, "请检查网络后按 BOOT 重试");
+            set_text(scene->footer_right, "BOOT 重试");
+            return true;
         case DECK_UI_PREVIEW_SETUP:
             scene->kind = DECK_UI_SCENE_SETUP;
             set_text(scene->title, "设置与恢复");
@@ -124,11 +187,58 @@ bool deck_ui_preview_scene(deck_ui_preview_page_t page, deck_ui_scene_t *scene)
             set_text(scene->summary_detail, "完成后临时网络会自动关闭");
             set_text(scene->footer_right, "BOOT 重启设置");
             return true;
+        case DECK_UI_PREVIEW_SETUP_VALIDATING:
+            scene->kind = DECK_UI_SCENE_SETUP;
+            set_text(scene->title, "设置与恢复");
+            set_text(scene->badge, "正在验证");
+            scene->badge_style = DECK_UI_BADGE_OUTLINE;
+            scene->metric_count = 3U;
+            set_text(scene->metrics[0].label, "网络");
+            set_text(scene->metrics[0].value, "S3-DECK-A17F");
+            set_text(scene->metrics[1].label, "密码");
+            set_text(scene->metrics[1].value, "MINT-WAVE-7294");
+            set_text(scene->metrics[2].label, "访问地址");
+            set_text(scene->metrics[2].value, "http://192.168.4.1");
+            set_text(scene->summary_title, "正在验证家庭 Wi-Fi");
+            set_text(scene->summary_detail, "原配置保持不变，请稍候");
+            set_text(scene->footer_right, "BOOT 重启设置");
+            return true;
+        case DECK_UI_PREVIEW_SETUP_ERROR:
+            scene->kind = DECK_UI_SCENE_SETUP;
+            set_text(scene->title, "设置与恢复");
+            set_text(scene->badge, "认证失败");
+            scene->badge_style = DECK_UI_BADGE_ALERT;
+            scene->metric_count = 3U;
+            set_text(scene->metrics[0].label, "网络");
+            set_text(scene->metrics[0].value, "S3-DECK-A17F");
+            set_text(scene->metrics[1].label, "密码");
+            set_text(scene->metrics[1].value, "MINT-WAVE-7294");
+            set_text(scene->metrics[2].label, "访问地址");
+            set_text(scene->metrics[2].value, "http://192.168.4.1");
+            set_text(scene->summary_title, "Wi-Fi 认证失败");
+            set_text(scene->summary_detail, "请重新输入密码，原配置保持不变");
+            set_text(scene->footer_right, "BOOT 重启设置");
+            return true;
         case DECK_UI_PREVIEW_AI:
             scene->kind = DECK_UI_SCENE_AI;
             set_text(scene->title, "Codex");
             set_text(scene->badge, "已验证");
             scene->badge_style = DECK_UI_BADGE_SOLID;
+            scene->metric_count = 2U;
+            progress_metric(&scene->metrics[0], "主要额度", "剩余 62%", "2时30分后", 6'200U);
+            progress_metric(&scene->metrics[1], "每周额度", "已用 22%", "7天00时", 2'200U);
+            set_text(scene->summary_title, "Deck 中文界面开发");
+            set_text(scene->summary_value, "运行中");
+            set_text(scene->summary_detail, "18.4K Token · 上下文 41% · 另有 2 个会话");
+            set_text(scene->footer_center, "KEY 下一页");
+            set_text(scene->footer_right, "长按 进串口");
+            return true;
+        case DECK_UI_PREVIEW_AI_STALE:
+            scene->kind = DECK_UI_SCENE_AI;
+            set_text(scene->status_companion, "Companion 离线");
+            set_text(scene->title, "Codex");
+            set_text(scene->badge, "数据已过期");
+            scene->badge_style = DECK_UI_BADGE_ALERT;
             scene->metric_count = 2U;
             progress_metric(&scene->metrics[0], "主要额度", "剩余 62%", "2时30分后", 6'200U);
             progress_metric(&scene->metrics[1], "每周额度", "已用 22%", "7天00时", 2'200U);
