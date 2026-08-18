@@ -135,8 +135,18 @@ class CDPClient {
     this.socket = socket;
     this.nextID = 1;
     this.pending = new Map();
+    this.eventWaiters = new Map();
     socket.onmessage = (event) => {
       const message = JSON.parse(event.data);
+      if (message.method) {
+        const waiters = this.eventWaiters.get(message.method) || [];
+        this.eventWaiters.delete(message.method);
+        for (const waiter of waiters) {
+          clearTimeout(waiter.timer);
+          waiter.resolve(message.params);
+        }
+        return;
+      }
       const pending = this.pending.get(message.id);
       if (!pending) return;
       this.pending.delete(message.id);
@@ -149,6 +159,21 @@ class CDPClient {
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
       this.socket.send(JSON.stringify({ id, method, params }));
+    });
+  }
+  waitForEvent(method, timeout = 10000) {
+    return new Promise((resolve, reject) => {
+      const waiters = this.eventWaiters.get(method) || [];
+      const waiter = {
+        resolve,
+        timer: setTimeout(() => {
+          const active = this.eventWaiters.get(method) || [];
+          this.eventWaiters.set(method, active.filter((entry) => entry !== waiter));
+          reject(new Error(`browser event timed out: ${method}`));
+        }, timeout),
+      };
+      waiters.push(waiter);
+      this.eventWaiters.set(method, waiters);
     });
   }
 }
@@ -191,9 +216,13 @@ async function main() {
     const port = Number(activePort.split(/\r?\n/, 1)[0]);
     const address = server.address();
     const targetURL = `http://127.0.0.1:${address.port}/`;
-    const targetResponse = await fetch(`http://127.0.0.1:${port}/json/new?${encodeURIComponent(targetURL)}`, { method: "PUT" });
+    const targetResponse = await fetch(`http://127.0.0.1:${port}/json/new?about%3Ablank`, { method: "PUT" });
     const target = await targetResponse.json();
     const cdp = await connectCDP(target.webSocketDebuggerUrl);
+    await cdp.send("Page.enable");
+    const initialLoad = cdp.waitForEvent("Page.loadEventFired");
+    await cdp.send("Page.navigate", { url: targetURL });
+    await initialLoad;
     const phaseOne = await evaluate(cdp, `(async()=>{
       const wait=async(fn)=>{const end=Date.now()+10000;while(Date.now()<end){const value=fn();if(value)return value;await new Promise(r=>setTimeout(r,30));}throw new Error('DOM timeout')};
       await wait(()=>document.querySelector('#management-token'));
@@ -215,12 +244,13 @@ async function main() {
     assert.equal(browserState.confirmCalls, 1, "duplicate form submission reached PairingCoordinator twice");
     assert.equal(browserState.submittedCode, "123456");
 
+    const reloadFinished = cdp.waitForEvent("Page.loadEventFired");
     try {
       await cdp.send("Page.reload", { ignoreCache: true });
     } catch (error) {
       if (!String(error).includes("Execution context was destroyed")) throw error;
     }
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    await reloadFinished;
     const resumed = await evaluate(cdp, `(async()=>{const end=Date.now()+10000;while(Date.now()<end){
       if(document.querySelector('#pairing-v2-dialog')?.open&&document.querySelector('#pairing-v2-state')?.textContent==='正在验证连接')return true;
       await new Promise(r=>setTimeout(r,30));}return false;})()`);

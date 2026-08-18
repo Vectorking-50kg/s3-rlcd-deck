@@ -1315,6 +1315,9 @@ async function cancelPairingV2() {
   const dialog = $("#pairing-v2-dialog");
   state.pairingV2.originPage = "";
   if (dialog.open) dialog.close();
+  state.pairingV2.sessionRef = "";
+  state.pairingV2.view = null;
+  storePairingV2Session();
   if (reference && !terminal) {
     rotatePairingV2Scope();
     const operation = pairingV2Operation();
