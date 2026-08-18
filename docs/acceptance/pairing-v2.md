@@ -34,14 +34,16 @@ or raw Companion output.
      --wait-for-user
    ```
 
-4. Wait for the controller to finish the preflight. Once you are in front of the Mac and can see
-   the Deck screen, press Enter at the readiness prompt. This confirmation contains no code or
-   credential; it starts safe app-only programming, one fresh Deck boot, and Companion startup.
-   Keep the Mac on the same LAN for the entire run.
+4. Wait for the controller to finish the preflight and start the same-commit Companion. It opens
+   a new, already-authorized management-console tab before the readiness prompt. Navigate to
+   **Deck 清单** and select **扫描并配对**, but do not start a scan yet. Once you are in front of the
+   Mac and can see the Deck screen, press Enter at the readiness prompt. This confirmation contains
+   no code or credential; it starts safe app-only programming and one fresh Deck boot. Keep the Mac
+   on the same LAN for the entire run.
 5. If the Deck already has a Companion Profile, short-press BOOT once to open its Pairing Window.
    An unpaired Deck opens its first bounded window automatically after normal Wi-Fi is usable.
-6. The controller opens a new management-console tab through Companion's short-lived,
-   one-time desktop authorization. It must arrive already authenticated; do not browse to the
+6. Use the management-console tab opened before programming through Companion's short-lived,
+   one-time desktop authorization. It must remain authenticated; do not browse to the
    bare `http://127.0.0.1:7777` address or enter/copy the long-lived management Token. If the tab
    was closed, use **Open Console** from the Companion menu-bar item to issue another one-time tab.
 7. Open **Deck 清单** or **网络与信任**, select **扫描并配对**, choose the anonymous Deck candidate,

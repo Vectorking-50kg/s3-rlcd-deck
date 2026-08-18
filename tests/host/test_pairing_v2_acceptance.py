@@ -78,6 +78,7 @@ def test_user_readiness_gate_accepts_only_a_non_secret_enter() -> None:
     output = io.StringIO()
     pairing.wait_for_user_ready(io.StringIO("\n"), output)
     assert "按 Enter" in output.getvalue()
+    assert "已授权 Companion 管理页已经打开" in output.getvalue()
     assert "验证码只能输入 Companion 管理网页" in output.getvalue()
 
 

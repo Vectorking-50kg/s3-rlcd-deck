@@ -200,7 +200,8 @@ def write_summary(path: pathlib.Path, document: dict[str, Any]) -> None:
 
 def wait_for_user_ready(input_stream: Any, output_stream: Any) -> None:
     output_stream.write(
-        "Preflight 已完成。确认你已在 Mac 前、Deck 屏幕可见，然后按 Enter 开始烧录和限时配对。\n"
+        "Preflight 已完成，已授权 Companion 管理页已经打开。请先进入设备配对页，\n"
+        "确认你已在 Mac 前且 Deck 屏幕可见，然后按 Enter 开始烧录和限时配对。\n"
         "不要在此输入六位码；验证码只能输入 Companion 管理网页。\n"
     )
     output_stream.flush()
@@ -217,7 +218,10 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--wait-for-user",
         action="store_true",
-        help="pause after preflight; press Enter before app-only flash starts the bounded Pairing Window",
+        help=(
+            "start the authorized Companion console after preflight, then pause before app-only "
+            "flash starts the bounded Pairing Window"
+        ),
     )
     parser.add_argument(
         "--development",
@@ -259,15 +263,30 @@ def main() -> int:
         else:
             environment = m1.run_preflight(result_dir / "preflight.log")
             preflight_passed = True
-            if arguments.wait_for_user:
-                wait_for_user_ready(sys.stdin, sys.stdout)
-            m1.run_app_flash(arguments.port, result_dir / "app-flash.log", environment)
         executable = m1.companion_for_current_host(commit)
         companion_matches = companion_identity(executable, commit)
         if not companion_matches:
             raise m1.AcceptanceFailure("Companion artifact does not match the clean source commit")
         if not listener_is_free():
             raise m1.AcceptanceFailure("close the currently running Companion before formal acceptance")
+        companion_process = subprocess.Popen(
+            companion_command(executable),
+            cwd=REPOSITORY_ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        deadline = time.monotonic() + 10.0
+        while listener_is_free() and time.monotonic() < deadline:
+            if companion_process.poll() is not None:
+                raise m1.AcceptanceFailure("same-commit Companion exited before opening management Web")
+            time.sleep(0.1)
+        if listener_is_free():
+            raise m1.AcceptanceFailure("same-commit Companion did not open management Web")
+        if not arguments.development:
+            if arguments.wait_for_user:
+                wait_for_user_ready(sys.stdin, sys.stdout)
+            m1.run_app_flash(arguments.port, result_dir / "app-flash.log", environment)
         serial_module = m1.load_serial_module(environment)
         serial_evidence = m1.SerialEvidence(
             serial_module,
@@ -285,20 +304,6 @@ def main() -> int:
             "Deck build identity",
             5.0,
         )
-        companion_process = subprocess.Popen(
-            companion_command(executable),
-            cwd=REPOSITORY_ROOT,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        deadline = time.monotonic() + 10.0
-        while listener_is_free() and time.monotonic() < deadline:
-            if companion_process.poll() is not None:
-                raise m1.AcceptanceFailure("same-commit Companion exited before opening management Web")
-            time.sleep(0.1)
-        if listener_is_free():
-            raise m1.AcceptanceFailure("same-commit Companion did not open management Web")
         print("保持 Mac 在当前家庭局域网。若 Deck 已配对，请短按 BOOT 打开 Pairing Window。")
         serial_evidence.event(
             lambda event: event.get("type") == "pairing_v2" and event.get("state") == "active",
