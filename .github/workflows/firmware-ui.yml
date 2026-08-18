@@ -57,7 +57,9 @@ jobs:
           idf.py --version | grep -F "ESP-IDF v6.0.2"
 
       - name: Run Host and UI contracts
-        run: ./tools/test_host.sh
+        run: |
+          source "$IDF_PATH/export.sh" >/dev/null
+          ./tools/test_host.sh
 
       - name: Build development firmware
         run: |
