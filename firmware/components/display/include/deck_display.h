@@ -99,6 +99,17 @@ deck_display_result_t deck_display_service_submit(deck_display_service_t *displa
 deck_display_result_t deck_display_service_poll(deck_display_service_t *display, uint64_t now_ms);
 deck_display_metrics_t deck_display_service_metrics(const deck_display_service_t *display);
 
+/*
+ * Copies the last frame whose panel transfer completed successfully. This is
+ * an owner-thread operation: callers must serialize it with update/submit/poll.
+ * The initial all-white allocation is not exposed before the first completion.
+ */
+bool deck_display_service_copy_successful(
+    const deck_display_service_t *display,
+    uint8_t *output,
+    size_t output_size
+);
+
 #ifdef __cplusplus
 }
 #endif

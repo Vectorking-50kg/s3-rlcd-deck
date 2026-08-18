@@ -2,12 +2,23 @@
 
 import argparse
 import json
+import pathlib
+import re
+import struct
 import sys
 import time
+import zlib
 from typing import Any
 
 
 HIL_READY = b"DECK_HIL_READY\n"
+CAPTURE_COMMAND = b"DECK_UI_CAPTURE\n"
+DISPLAY_WIDTH = 400
+DISPLAY_HEIGHT = 300
+FRAME_BYTES = 15_000
+CAPTURE_CHUNK_BYTES = 256
+CAPTURE_CHUNKS = (FRAME_BYTES + CAPTURE_CHUNK_BYTES - 1) // CAPTURE_CHUNK_BYTES
+HEX_BYTES = re.compile(r"[0-9a-f]*")
 PAGES = (
     "board",
     "pairing",
@@ -141,6 +152,139 @@ def show_preview(connection: Any, page: str, timeout_seconds: float) -> int:
     raise PreviewFailure("UI preview was accepted but no completed display frame followed")
 
 
+def valid_capture_begin(event: dict[str, Any]) -> bool:
+    return (
+        set(event)
+        == {
+            "type",
+            "width",
+            "height",
+            "frame_bytes",
+            "chunk_bytes",
+            "chunks",
+            "crc32",
+        }
+        and event.get("type") == "ui_capture_begin"
+        and type(event.get("width")) is int
+        and event["width"] == DISPLAY_WIDTH
+        and type(event.get("height")) is int
+        and event["height"] == DISPLAY_HEIGHT
+        and type(event.get("frame_bytes")) is int
+        and event["frame_bytes"] == FRAME_BYTES
+        and type(event.get("chunk_bytes")) is int
+        and event["chunk_bytes"] == CAPTURE_CHUNK_BYTES
+        and type(event.get("chunks")) is int
+        and event["chunks"] == CAPTURE_CHUNKS
+        and type(event.get("crc32")) is int
+        and 0 <= event["crc32"] <= 0xFFFFFFFF
+    )
+
+
+def capture_preview_frame(connection: Any, timeout_seconds: float) -> bytes:
+    if timeout_seconds <= 0:
+        raise PreviewFailure("timeout must be greater than zero")
+    connection.write(CAPTURE_COMMAND)
+    connection.flush()
+    deadline = time.monotonic() + timeout_seconds
+    expected_crc: int | None = None
+    chunks: list[bytes] = []
+    while time.monotonic() < deadline:
+        event = read_json_event(connection, deadline)
+        if event is None:
+            continue
+        event_type = event.get("type")
+        if event_type == "ui_capture_error":
+            if set(event) != {"type", "reason"} or event.get("reason") not in {
+                "allocation_failed",
+                "preview_unavailable",
+                "encoding_failed",
+            }:
+                raise PreviewFailure("malformed UI capture error")
+            raise PreviewFailure(f"Deck UI capture failed: {event['reason']}")
+        if event_type == "ui_capture_begin":
+            if expected_crc is not None or not valid_capture_begin(event):
+                raise PreviewFailure("malformed or duplicate UI capture header")
+            expected_crc = event["crc32"]
+            continue
+        if event_type == "ui_capture_chunk":
+            if expected_crc is None or set(event) != {"type", "index", "data"}:
+                raise PreviewFailure("UI capture chunk arrived before a valid header")
+            index = event.get("index")
+            encoded = event.get("data")
+            expected_size = min(
+                CAPTURE_CHUNK_BYTES,
+                FRAME_BYTES - len(chunks) * CAPTURE_CHUNK_BYTES,
+            )
+            if (
+                type(index) is not int
+                or index != len(chunks)
+                or not isinstance(encoded, str)
+                or len(encoded) != expected_size * 2
+                or HEX_BYTES.fullmatch(encoded) is None
+            ):
+                raise PreviewFailure("malformed or out-of-order UI capture chunk")
+            chunks.append(bytes.fromhex(encoded))
+            continue
+        if event_type == "ui_capture_end":
+            if (
+                expected_crc is None
+                or set(event) != {"type", "chunks", "crc32"}
+                or type(event.get("chunks")) is not int
+                or event["chunks"] != CAPTURE_CHUNKS
+                or type(event.get("crc32")) is not int
+                or event["crc32"] != expected_crc
+                or len(chunks) != CAPTURE_CHUNKS
+            ):
+                raise PreviewFailure("malformed or premature UI capture trailer")
+            frame = b"".join(chunks)
+            if len(frame) != FRAME_BYTES or zlib.crc32(frame) & 0xFFFFFFFF != expected_crc:
+                raise PreviewFailure("UI capture checksum mismatch")
+            return frame
+        if isinstance(event_type, str) and event_type.startswith("ui_capture_"):
+            raise PreviewFailure("unknown UI capture event")
+    raise PreviewFailure("timed out waiting for a complete UI capture")
+
+
+def unpack_pixel(frame: bytes, x: int, y: int) -> int:
+    inverted_y = DISPLAY_HEIGHT - 1 - y
+    frame_index = (x // 2) * (DISPLAY_HEIGHT // 4) + inverted_y // 4
+    bit = 7 - ((inverted_y % 4) * 2 + x % 2)
+    return 255 if frame[frame_index] & (1 << bit) else 0
+
+
+def png_chunk(kind: bytes, payload: bytes) -> bytes:
+    return (
+        struct.pack(">I", len(payload))
+        + kind
+        + payload
+        + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+    )
+
+
+def encode_png(frame: bytes) -> bytes:
+    if len(frame) != FRAME_BYTES:
+        raise PreviewFailure("captured frame has the wrong size")
+    rows = bytearray()
+    for y in range(DISPLAY_HEIGHT):
+        rows.append(0)
+        rows.extend(unpack_pixel(frame, x, y) for x in range(DISPLAY_WIDTH))
+    header = struct.pack(">IIBBBBB", DISPLAY_WIDTH, DISPLAY_HEIGHT, 8, 0, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + png_chunk(b"IHDR", header)
+        + png_chunk(b"IDAT", zlib.compress(bytes(rows), level=9))
+        + png_chunk(b"IEND", b"")
+    )
+
+
+def write_png(path: pathlib.Path, frame: bytes, overwrite: bool) -> None:
+    if path.suffix.lower() != ".png":
+        raise PreviewFailure("capture output must use a .png extension")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb" if overwrite else "xb") as output:
+        output.write(encode_png(frame))
+
+
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Freeze a development Deck on one deterministic UI page for visual review."
@@ -148,11 +292,24 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--port", required=True, help="Deck USB serial port")
     parser.add_argument("--page", required=True, choices=PAGES)
     parser.add_argument("--timeout", type=float, default=12.0)
+    parser.add_argument(
+        "--output",
+        type=pathlib.Path,
+        help="Capture the deterministic panel framebuffer as a PNG after rendering",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace an existing --output file",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     arguments = parse_arguments()
+    if arguments.output is not None and arguments.page == "clear":
+        print("UI preview failed: live UI capture is forbidden", file=sys.stderr)
+        return 2
     try:
         import serial
     except ImportError:
@@ -166,11 +323,15 @@ def main() -> int:
             write_timeout=0.25,
         ) as connection:
             completed_frames = show_preview(connection, arguments.page, arguments.timeout)
+            if arguments.output is not None:
+                frame = capture_preview_frame(connection, arguments.timeout)
+                write_png(arguments.output, frame, arguments.overwrite)
     except (OSError, serial.SerialException, PreviewFailure) as error:
         print(f"UI preview failed: {error}", file=sys.stderr)
         return 1
     print(
         f"UI preview ready: page={arguments.page} completed_frames={completed_frames}"
+        + (f" output={arguments.output}" if arguments.output is not None else "")
     )
     return 0
 

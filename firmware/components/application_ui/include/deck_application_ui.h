@@ -1,6 +1,8 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
 #include "deck_display.h"
 #include "deck_m0_view_model.h"
@@ -39,6 +41,17 @@ bool deck_application_ui_preview(const deck_ui_scene_t *scene);
 
 /* Dev diagnostics only: clears the fixture and resumes the latest live model. */
 bool deck_application_ui_preview_clear(void);
+
+/*
+ * Dev diagnostics only: copies the completed 1bpp frame for the active,
+ * deterministic preview. Live UI frames are intentionally unavailable so
+ * credentials can never be exported through this seam.
+ */
+bool deck_application_ui_capture_preview_frame(
+    uint8_t *output,
+    size_t output_size,
+    uint32_t timeout_ms
+);
 
 #ifdef __cplusplus
 }

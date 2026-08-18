@@ -3,6 +3,8 @@
 import importlib.util
 import json
 import pathlib
+import struct
+import zlib
 
 
 MODULE_PATH = pathlib.Path(__file__).parents[2] / "tools" / "hil_ui_preview.py"
@@ -60,6 +62,64 @@ class PreviewConnection:
         return self.lines.pop(0) if self.lines else b""
 
 
+class CaptureConnection:
+    def __init__(self, frame: bytes, corrupt_crc: bool = False) -> None:
+        self.frame = frame
+        self.corrupt_crc = corrupt_crc
+        self.lines: list[bytes] = []
+        self.writes: list[bytes] = []
+        self.timeout = 0.0
+        self.flushed = False
+
+    def write(self, value: bytes) -> None:
+        self.writes.append(value)
+        if value != MODULE.CAPTURE_COMMAND:
+            return
+        checksum = zlib.crc32(self.frame) & 0xFFFFFFFF
+        self.lines.append(
+            json.dumps(
+                {
+                    "type": "ui_capture_begin",
+                    "width": 400,
+                    "height": 300,
+                    "frame_bytes": 15_000,
+                    "chunk_bytes": 256,
+                    "chunks": 59,
+                    "crc32": checksum,
+                }
+            ).encode()
+            + b"\n"
+        )
+        for index in range(59):
+            chunk = self.frame[index * 256 : (index + 1) * 256]
+            self.lines.append(
+                json.dumps(
+                    {
+                        "type": "ui_capture_chunk",
+                        "index": index,
+                        "data": chunk.hex(),
+                    }
+                ).encode()
+                + b"\n"
+            )
+        self.lines.append(
+            json.dumps(
+                {
+                    "type": "ui_capture_end",
+                    "chunks": 59,
+                    "crc32": checksum ^ (1 if self.corrupt_crc else 0),
+                }
+            ).encode()
+            + b"\n"
+        )
+
+    def flush(self) -> None:
+        self.flushed = True
+
+    def readline(self) -> bytes:
+        return self.lines.pop(0) if self.lines else b""
+
+
 for page in MODULE.PAGES:
     connection = PreviewConnection(page)
     assert MODULE.show_preview(connection, page, 0.25) == 8
@@ -83,3 +143,29 @@ else:
 failed_display = display_event(9)
 failed_display["transfer_timeouts"] = 1
 assert not MODULE.valid_display_event(failed_display)
+
+white_frame = b"\xff" * MODULE.FRAME_BYTES
+capture = CaptureConnection(white_frame)
+assert MODULE.capture_preview_frame(capture, 0.5) == white_frame
+assert capture.writes == [MODULE.CAPTURE_COMMAND]
+assert capture.flushed
+
+png = MODULE.encode_png(white_frame)
+assert png.startswith(b"\x89PNG\r\n\x1a\n")
+assert struct.unpack(">II", png[16:24]) == (400, 300)
+assert MODULE.unpack_pixel(white_frame, 0, 0) == 255
+assert MODULE.unpack_pixel(b"\x00" * MODULE.FRAME_BYTES, 399, 299) == 0
+
+try:
+    MODULE.capture_preview_frame(CaptureConnection(white_frame, corrupt_crc=True), 0.5)
+except MODULE.PreviewFailure as error:
+    assert "trailer" in str(error)
+else:
+    raise AssertionError("capture checksum mismatch must fail closed")
+
+try:
+    MODULE.encode_png(b"too short")
+except MODULE.PreviewFailure as error:
+    assert "wrong size" in str(error)
+else:
+    raise AssertionError("wrong-sized frames must fail closed")

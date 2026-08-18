@@ -11,7 +11,7 @@ idf_component_register(
         "assets/lv_font_deck_ui_20.c"
         "assets/lv_font_deck_ui_32.c"
     INCLUDE_DIRS "include"
-    REQUIRES ai_snapshot display esp_system esp_timer heap lvgl__lvgl
+    REQUIRES ai_snapshot display esp_common esp_system esp_timer heap lvgl__lvgl
 )
 
 set(DECK_M0_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")

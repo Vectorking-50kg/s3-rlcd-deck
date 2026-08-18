@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "esp_attr.h"
 #include "esp_heap_caps.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -39,6 +40,15 @@ static_assert(
 struct PreviewUpdate {
     bool active;
     deck_ui_scene_t scene;
+};
+
+enum class CaptureState : uint8_t {
+    idle,
+    claimed,
+    pending,
+    processing,
+    complete,
+    cancelled,
 };
 #endif
 
@@ -76,6 +86,10 @@ std::atomic<QueueHandle_t> active_preview_updates = nullptr;
 StaticQueue_t preview_update_queue_storage{};
 uint8_t preview_update_queue_buffer[sizeof(PreviewUpdate)]{};
 QueueHandle_t preview_update_queue = nullptr;
+std::atomic<CaptureState> capture_state{CaptureState::idle};
+StaticSemaphore_t capture_completion_storage{};
+SemaphoreHandle_t capture_completion = nullptr;
+EXT_RAM_BSS_ATTR uint8_t captured_preview_frame[DECK_DISPLAY_FRAME_BYTES];
 #endif
 
 uint64_t monotonic_ms()
@@ -100,6 +114,10 @@ void fail_task(UiContext *context)
     active_model_updates.store(nullptr, std::memory_order_release);
 #ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
     active_preview_updates.store(nullptr, std::memory_order_release);
+    capture_state.store(CaptureState::cancelled, std::memory_order_release);
+    if (capture_completion != nullptr) {
+        (void)xSemaphoreGive(capture_completion);
+    }
 #endif
     if (context->lv_display != nullptr) {
         deck_ui_renderer_destroy(context->renderer);
@@ -263,6 +281,38 @@ void receive_preview_update(UiContext *context)
     }
     memset(&context->preview_update, 0, sizeof(context->preview_update));
 }
+
+void process_capture_request(UiContext *context)
+{
+    CaptureState expected = CaptureState::pending;
+    if (!capture_state.compare_exchange_strong(
+            expected,
+            CaptureState::processing,
+            std::memory_order_acq_rel,
+            std::memory_order_acquire
+        )) {
+        return;
+    }
+
+    const bool copied = context->preview_active &&
+                        deck_display_service_copy_successful(
+                            context->display_service,
+                            captured_preview_frame,
+                            sizeof(captured_preview_frame)
+                        );
+    expected = CaptureState::processing;
+    if (!capture_state.compare_exchange_strong(
+            expected,
+            copied ? CaptureState::complete : CaptureState::cancelled,
+            std::memory_order_release,
+            std::memory_order_acquire
+        )) {
+        // A timed-out requester cancelled while this owner-thread copy ran.
+        capture_state.store(CaptureState::idle, std::memory_order_release);
+        return;
+    }
+    (void)xSemaphoreGive(capture_completion);
+}
 #endif
 
 bool initialize_lvgl(UiContext *context)
@@ -334,6 +384,7 @@ void ui_task(void *task_context)
         receive_model_update(context);
 #ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
         receive_preview_update(context);
+        process_capture_request(context);
 #endif
         update_model(context, static_cast<uint64_t>(now_us / 1'000'000));
         lv_timer_handler();
@@ -390,6 +441,18 @@ bool deck_application_ui_start(
         return false;
     }
 #ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
+    if (capture_completion == nullptr) {
+        capture_completion = xSemaphoreCreateBinaryStatic(&capture_completion_storage);
+    } else {
+        while (xSemaphoreTake(capture_completion, 0) == pdTRUE) {
+        }
+    }
+    if (capture_completion == nullptr) {
+        delete context;
+        ui_started.store(false, std::memory_order_release);
+        return false;
+    }
+    capture_state.store(CaptureState::idle, std::memory_order_release);
     if (preview_update_queue == nullptr) {
         preview_update_queue = xQueueCreateStatic(
             1,
@@ -466,6 +529,74 @@ bool deck_application_ui_preview_clear(void)
     memset(&update, 0, sizeof(update));
     return queued;
 #else
+    return false;
+#endif
+}
+
+bool deck_application_ui_capture_preview_frame(
+    uint8_t *output,
+    size_t output_size,
+    uint32_t timeout_ms
+)
+{
+#ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
+    if (output == nullptr || output_size != sizeof(captured_preview_frame) || timeout_ms == 0 ||
+        !ui_started.load(std::memory_order_acquire) || capture_completion == nullptr) {
+        return false;
+    }
+
+    CaptureState expected = CaptureState::idle;
+    if (!capture_state.compare_exchange_strong(
+            expected,
+            CaptureState::claimed,
+            std::memory_order_acq_rel,
+            std::memory_order_acquire
+        )) {
+        return false;
+    }
+    while (xSemaphoreTake(capture_completion, 0) == pdTRUE) {
+    }
+    capture_state.store(CaptureState::pending, std::memory_order_release);
+
+    const BaseType_t notified = xSemaphoreTake(capture_completion, pdMS_TO_TICKS(timeout_ms));
+    expected = CaptureState::complete;
+    if (notified == pdTRUE && capture_state.compare_exchange_strong(
+            expected,
+            CaptureState::claimed,
+            std::memory_order_acq_rel,
+            std::memory_order_acquire
+        )) {
+        memcpy(output, captured_preview_frame, sizeof(captured_preview_frame));
+        capture_state.store(CaptureState::idle, std::memory_order_release);
+        return true;
+    }
+
+    // Catch a completion that raced with the timeout boundary.
+    expected = CaptureState::complete;
+    if (capture_state.compare_exchange_strong(
+            expected,
+            CaptureState::claimed,
+            std::memory_order_acq_rel,
+            std::memory_order_acquire
+        )) {
+        memcpy(output, captured_preview_frame, sizeof(captured_preview_frame));
+        capture_state.store(CaptureState::idle, std::memory_order_release);
+        return true;
+    }
+
+    const CaptureState previous = capture_state.exchange(
+        CaptureState::cancelled,
+        std::memory_order_acq_rel
+    );
+    if (previous == CaptureState::pending || previous == CaptureState::claimed ||
+        previous == CaptureState::cancelled) {
+        capture_state.store(CaptureState::idle, std::memory_order_release);
+    }
+    return false;
+#else
+    (void)output;
+    (void)output_size;
+    (void)timeout_ms;
     return false;
 #endif
 }

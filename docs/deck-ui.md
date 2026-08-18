@@ -159,4 +159,11 @@ python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page error
 python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page clear
 ```
 
-`clear` 恢复实时页面。该命令、确认事件和预览队列只存在于启用诊断控制台的开发版；release 固件不得包含入口或额外预览状态。
+增加 `--output /absolute/path/page.png` 可以把该固定页面最后一次成功送屏的
+15,000 字节 1bpp 帧解包为 400×300 PNG；文件已存在时必须显式加
+`--overwrite`。工具逐块校验顺序、长度与 CRC32，不能用串口确认代替真实完成帧。
+抓图接口只在固定预览处于活动状态时开放，拒绝实时页面，避免把真实 SSID、
+配对码或其他凭据导出。
+
+`clear` 恢复实时页面。预览、抓图、确认事件和队列只存在于启用诊断控制台的
+开发版；release 固件不得包含入口或额外预览/抓图状态。
