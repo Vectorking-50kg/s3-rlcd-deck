@@ -156,6 +156,48 @@ deck_companion_pair_request_t request(unsigned index)
     return value;
 }
 
+deck_companion_profile_stage_request_t stage_request(unsigned index)
+{
+    FakePairing pairing;
+    set_credential(&pairing, index);
+    deck_companion_profile_stage_request_t value{};
+    copy_string(
+        value.session_id,
+        sizeof(value.session_id),
+        std::string(31, '0') + static_cast<char>('1' + index)
+    );
+    copy_string(
+        value.transaction_id,
+        sizeof(value.transaction_id),
+        std::string(31, 'a') + static_cast<char>('0' + index)
+    );
+    copy_string(
+        value.hub_service,
+        sizeof(value.hub_service),
+        "s3deck-companion-" + std::to_string(index) +
+            "._s3rlcd-hub._tcp.local."
+    );
+    copy_string(
+        value.hub_address,
+        sizeof(value.hub_address),
+        "192.168.31." + std::to_string(index + 2U) + ":7780"
+    );
+    copy_string(value.token, sizeof(value.token), pairing.next.token);
+    copy_string(
+        value.certificate_fingerprint,
+        sizeof(value.certificate_fingerprint),
+        pairing.next.certificate_fingerprint
+    );
+    std::memcpy(
+        value.certificate_der,
+        pairing.next.certificate_der,
+        pairing.next.certificate_der_size
+    );
+    value.certificate_der_size = pairing.next.certificate_der_size;
+    value.protocol_version = pairing.next.protocol_version;
+    return value;
+}
+
 void successful_pairing_commits_a_redacted_active_profile()
 {
     FakeStorage storage;
@@ -514,6 +556,160 @@ void failed_candidate_commit_preserves_the_active_and_other_profile_secrets()
     deck_companion_profiles_destroy(profiles);
 }
 
+void authenticated_stage_is_invisible_cancelable_and_volatile()
+{
+    FakeStorage storage;
+    FakePairing pairing;
+    set_credential(&pairing, 1);
+    deck_companion_profiles_t *profiles = create_profiles(&storage, &pairing);
+    const deck_companion_pair_request_t existing = request(1);
+    assert(deck_companion_profiles_pair(profiles, &existing) ==
+           DECK_COMPANION_PAIR_PAIRED);
+    const deck_companion_profiles_snapshot_t before = snapshot(profiles);
+    const auto storage_before = storage.values;
+
+    const deck_companion_profile_stage_request_t staged_request = stage_request(2);
+    deck_companion_profile_stage_ticket_t ticket{};
+    assert(deck_companion_profiles_stage_authenticated(
+               profiles,
+               &staged_request,
+               &ticket
+           ) == DECK_COMPANION_PROFILE_STAGE_UPDATED);
+    assert(ticket.profile_generation == before.generation);
+    assert(std::string(ticket.profile_id) ==
+           staged_request.certificate_fingerprint);
+    assert(storage.values == storage_before);
+    const deck_companion_profiles_snapshot_t during = snapshot(profiles);
+    assert(during.count == before.count);
+    assert(std::string(during.active_profile_id) == before.active_profile_id);
+
+    deck_companion_profile_secret_t candidate{};
+    assert(deck_companion_profiles_staged_secret(profiles, &ticket, &candidate));
+    assert(std::string(candidate.profile_id) == staged_request.certificate_fingerprint);
+    assert(std::string(candidate.hub_service) == staged_request.hub_service);
+    assert(std::string(candidate.hub_address) == staged_request.hub_address);
+    assert(std::string(candidate.token) == staged_request.token);
+    deck_companion_profile_secret_clear(&candidate);
+
+    deck_companion_profile_stage_ticket_t replay{};
+    assert(deck_companion_profiles_stage_authenticated(
+               profiles,
+               &staged_request,
+               &replay
+           ) == DECK_COMPANION_PROFILE_STAGE_UPDATED);
+    assert(std::memcmp(&ticket, &replay, sizeof(ticket)) == 0);
+    deck_companion_profile_stage_request_t conflict = stage_request(3);
+    assert(deck_companion_profiles_stage_authenticated(
+               profiles,
+               &conflict,
+               &replay
+           ) == DECK_COMPANION_PROFILE_STAGE_CONFLICT);
+    assert(deck_companion_profiles_cancel_staged(
+        profiles,
+        staged_request.session_id,
+        staged_request.transaction_id
+    ));
+    assert(!deck_companion_profiles_staged_secret(profiles, &ticket, &candidate));
+
+    assert(deck_companion_profiles_stage_authenticated(
+               profiles,
+               &staged_request,
+               &ticket
+           ) == DECK_COMPANION_PROFILE_STAGE_UPDATED);
+    deck_companion_profiles_destroy(profiles);
+    profiles = create_profiles(&storage, &pairing);
+    assert(profiles != nullptr);
+    assert(!deck_companion_profiles_staged_secret(profiles, &ticket, &candidate));
+    const deck_companion_profiles_snapshot_t restarted = snapshot(profiles);
+    assert(restarted.count == before.count);
+    assert(std::string(restarted.active_profile_id) == before.active_profile_id);
+    deck_companion_profiles_destroy(profiles);
+}
+
+void first_link_proof_commits_the_exact_staged_profile_atomically()
+{
+    FakeStorage storage;
+    FakePairing pairing;
+    set_credential(&pairing, 1);
+    deck_companion_profiles_t *profiles = create_profiles(&storage, &pairing);
+    const deck_companion_pair_request_t existing = request(1);
+    assert(deck_companion_profiles_pair(profiles, &existing) ==
+           DECK_COMPANION_PAIR_PAIRED);
+    const std::string old_profile = snapshot(profiles).active_profile_id;
+
+    const deck_companion_profile_stage_request_t request = stage_request(2);
+    deck_companion_profile_stage_ticket_t ticket{};
+    assert(deck_companion_profiles_stage_authenticated(profiles, &request, &ticket) ==
+           DECK_COMPANION_PROFILE_STAGE_UPDATED);
+    const uint32_t baseline = ticket.profile_generation;
+    assert(deck_companion_profiles_commit_staged(profiles, &ticket, 123'456U) ==
+           DECK_COMPANION_PROFILE_STAGE_UPDATED);
+    assert(ticket.profile_generation > baseline);
+    const deck_companion_profiles_snapshot_t committed = snapshot(profiles);
+    assert(committed.count == 2);
+    assert(committed.generation == ticket.profile_generation);
+    assert(std::string(committed.active_profile_id) == request.certificate_fingerprint);
+    assert(std::string(committed.active_profile_id) != old_profile);
+    bool saw_committed = false;
+    for (size_t index = 0; index < committed.count; ++index) {
+        if (std::string(committed.profiles[index].profile_id) ==
+            request.certificate_fingerprint) {
+            assert(committed.profiles[index].last_success_unix_ms == 123'456U);
+            saw_committed = true;
+        }
+    }
+    assert(saw_committed);
+    deck_companion_profile_secret_t candidate{};
+    assert(!deck_companion_profiles_staged_secret(profiles, &ticket, &candidate));
+
+    deck_companion_profiles_destroy(profiles);
+    profiles = create_profiles(&storage, &pairing);
+    assert(profiles != nullptr);
+    assert(std::string(snapshot(profiles).active_profile_id) ==
+           request.certificate_fingerprint);
+    deck_companion_profiles_destroy(profiles);
+}
+
+void staged_commit_cannot_overwrite_newer_profile_state_or_storage_failure()
+{
+    FakeStorage storage;
+    FakePairing pairing;
+    set_credential(&pairing, 1);
+    deck_companion_profiles_t *profiles = create_profiles(&storage, &pairing);
+    const deck_companion_pair_request_t existing = request(1);
+    assert(deck_companion_profiles_pair(profiles, &existing) ==
+           DECK_COMPANION_PAIR_PAIRED);
+    const std::string old_profile = snapshot(profiles).active_profile_id;
+
+    deck_companion_profile_stage_request_t request = stage_request(2);
+    deck_companion_profile_stage_ticket_t ticket{};
+    assert(deck_companion_profiles_stage_authenticated(profiles, &request, &ticket) ==
+           DECK_COMPANION_PROFILE_STAGE_UPDATED);
+    assert(deck_companion_profiles_set_priority(profiles, old_profile.c_str(), 9) ==
+           DECK_COMPANION_PROFILE_UPDATED);
+    assert(deck_companion_profiles_commit_staged(profiles, &ticket, 555U) ==
+           DECK_COMPANION_PROFILE_STAGE_STALE_GENERATION);
+    assert(std::string(snapshot(profiles).active_profile_id) == old_profile);
+    deck_companion_profile_secret_t secret{};
+    assert(!deck_companion_profiles_staged_secret(profiles, &ticket, &secret));
+
+    request = stage_request(3);
+    assert(deck_companion_profiles_stage_authenticated(profiles, &request, &ticket) ==
+           DECK_COMPANION_PROFILE_STAGE_UPDATED);
+    storage.fail_write = DECK_COMPANION_STORAGE_ACTIVE_MARKER;
+    assert(deck_companion_profiles_commit_staged(profiles, &ticket, 777U) ==
+           DECK_COMPANION_PROFILE_STAGE_STORAGE_FAILURE);
+    assert(std::string(snapshot(profiles).active_profile_id) == old_profile);
+    assert(deck_companion_profiles_staged_secret(profiles, &ticket, &secret));
+    deck_companion_profile_secret_clear(&secret);
+    assert(deck_companion_profiles_cancel_staged(
+        profiles,
+        request.session_id,
+        request.transaction_id
+    ));
+    deck_companion_profiles_destroy(profiles);
+}
+
 }  // namespace
 
 int main()
@@ -525,5 +721,8 @@ int main()
     concurrent_setup_submissions_serialize_duplicate_profile_updates();
     candidate_success_is_atomic_and_cannot_override_a_newer_manual_selection();
     failed_candidate_commit_preserves_the_active_and_other_profile_secrets();
+    authenticated_stage_is_invisible_cancelable_and_volatile();
+    first_link_proof_commits_the_exact_staged_profile_atomically();
+    staged_commit_cannot_overwrite_newer_profile_state_or_storage_failure();
     return 0;
 }

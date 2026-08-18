@@ -14,18 +14,21 @@ import (
 	"math/big"
 	"regexp"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/protocol"
 )
 
 const (
-	ProtocolVersion   = int(protocol.CurrentVersion)
-	defaultCodeTTL    = 5 * time.Minute
-	pairingCodeSpace  = 1_000_000
-	deviceTokenBytes  = 32
-	maxCertificateDER = 1024
-	maxCodeCollisions = 8
+	ProtocolVersion       = int(protocol.CurrentVersion)
+	defaultCodeTTL        = 5 * time.Minute
+	pairingCodeSpace      = 1_000_000
+	deviceTokenBytes      = 32
+	maxCertificateDER     = 1024
+	maxCodeCollisions     = 8
+	maxProvisionalTrusts  = 16
+	maximumProvisionalTTL = 5 * time.Minute
 )
 
 var (
@@ -34,12 +37,17 @@ var (
 	ErrInvalidRequest      = errors.New("invalid pairing request")
 	ErrTrustNotFound       = errors.New("device trust not found")
 	ErrCodeConflict        = errors.New("pairing code already exists")
+	ErrProvisionalConflict = errors.New("provisional trust conflicts with an active transaction")
+	ErrProvisionalNotFound = errors.New("provisional trust not found")
+	ErrProvisionalCapacity = errors.New("provisional trust capacity reached")
 )
 
 var (
-	deviceIDPattern    = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{7,63}$`)
-	fingerprintPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
-	pairingCodePattern = regexp.MustCompile(`^[0-9]{6}$`)
+	deviceIDPattern      = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{7,63}$`)
+	fingerprintPattern   = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	pairingCodePattern   = regexp.MustCompile(`^[0-9]{6}$`)
+	transactionIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
+	deviceTokenPattern   = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
 )
 
 type Clock interface {
@@ -58,6 +66,7 @@ type Store interface {
 	LookupTrust(context.Context, string) (StoredTrust, error)
 	ListTrusts(context.Context) ([]StoredTrust, error)
 	RevokeTrust(context.Context, string, time.Time) error
+	CommitTrust(context.Context, StoredTrust) error
 }
 
 func sortedTrusts(source map[string]StoredTrust) []StoredTrust {
@@ -102,6 +111,28 @@ type Service struct {
 	fingerprint    string
 	certificateDER string
 	codePepper     []byte
+	provisionalMu  sync.Mutex
+	provisional    map[string]provisionalTrust
+}
+
+type provisionalTrust struct {
+	sessionID     string
+	transactionID string
+	trust         StoredTrust
+	expiresAt     time.Time
+}
+
+// ProvisionalTrustRequest contains only one Pairing Session's authenticated
+// result. The raw Token and Device Identity are reduced to verifiers before
+// StageProvisional returns and are never written to the normal trust Store.
+type ProvisionalTrustRequest struct {
+	SessionID       string
+	TransactionID   string
+	DeviceID        string
+	DeviceIdentity  string
+	Token           string
+	ProtocolVersion int
+	ExpiresAt       time.Time
 }
 
 type IssuedCode struct {
@@ -223,7 +254,177 @@ func New(config Config) (*Service, error) {
 		fingerprint:    config.CertificateFingerprint,
 		certificateDER: base64.StdEncoding.EncodeToString(config.CertificateDER),
 		codePepper:     append([]byte(nil), config.CodePepper...),
+		provisional:    make(map[string]provisionalTrust),
 	}, nil
+}
+
+// StageProvisional installs verifier-only trust for the dedicated Pairing v2
+// Device Link probe. Verify deliberately does not consult this map, so staged
+// trust grants no normal Device Hub capability.
+func (service *Service) StageProvisional(ctx context.Context, request ProvisionalTrustRequest) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	now := service.clock.Now().UTC()
+	identity, err := validateProvisionalRequest(request, now)
+	if err != nil {
+		return err
+	}
+	staged := provisionalTrust{
+		sessionID: request.SessionID, transactionID: request.TransactionID,
+		trust: StoredTrust{
+			DeviceID:               request.DeviceID,
+			DeviceIdentityVerifier: verifierBytes(identity),
+			TokenVerifier:          verifier(request.Token),
+			ProtocolVersion:        request.ProtocolVersion,
+			CreatedAt:              now,
+		},
+		expiresAt: request.ExpiresAt.UTC(),
+	}
+	clear(identity)
+
+	service.provisionalMu.Lock()
+	defer service.provisionalMu.Unlock()
+	service.pruneProvisionalLocked(now)
+	if existing, found := service.provisional[request.TransactionID]; found {
+		if provisionalEqual(existing, staged) {
+			return nil
+		}
+		return ErrProvisionalConflict
+	}
+	for _, existing := range service.provisional {
+		if existing.trust.DeviceID == request.DeviceID || existing.sessionID == request.SessionID {
+			return ErrProvisionalConflict
+		}
+	}
+	if len(service.provisional) >= maxProvisionalTrusts {
+		return ErrProvisionalCapacity
+	}
+	service.provisional[request.TransactionID] = staged
+	return nil
+}
+
+// VerifyProvisional is the only verifier for the restricted first-link probe.
+// It returns the exact transaction capability that authenticated the Deck.
+func (service *Service) VerifyProvisional(
+	ctx context.Context,
+	authentication Authentication,
+) (string, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return "", false, err
+	}
+	if !deviceIDPattern.MatchString(authentication.DeviceID) ||
+		!deviceTokenPattern.MatchString(authentication.Token) ||
+		authentication.ProtocolVersion != ProtocolVersion {
+		return "", false, nil
+	}
+	identity, err := base64.RawURLEncoding.DecodeString(authentication.DeviceIdentity)
+	if err != nil || len(identity) < 16 || len(identity) > 512 {
+		clear(identity)
+		return "", false, nil
+	}
+	actualToken := sha256.Sum256([]byte(authentication.Token))
+	actualIdentity := sha256.Sum256(identity)
+	clear(identity)
+
+	now := service.clock.Now().UTC()
+	service.provisionalMu.Lock()
+	defer service.provisionalMu.Unlock()
+	service.pruneProvisionalLocked(now)
+	for transactionID, staged := range service.provisional {
+		if staged.trust.DeviceID != authentication.DeviceID {
+			continue
+		}
+		expectedToken, tokenErr := decodeVerifier(staged.trust.TokenVerifier)
+		expectedIdentity, identityErr := decodeVerifier(staged.trust.DeviceIdentityVerifier)
+		if tokenErr != nil || identityErr != nil {
+			clear(expectedToken)
+			clear(expectedIdentity)
+			return "", false, errors.New("provisional trust verifier is invalid")
+		}
+		matches := subtle.ConstantTimeCompare(expectedToken, actualToken[:]) &
+			subtle.ConstantTimeCompare(expectedIdentity, actualIdentity[:]) &
+			subtle.ConstantTimeEq(int32(staged.trust.ProtocolVersion), int32(authentication.ProtocolVersion))
+		clear(expectedToken)
+		clear(expectedIdentity)
+		return transactionID, matches == 1, nil
+	}
+	return "", false, nil
+}
+
+// CommitProvisional atomically publishes one exact staged verifier set to the
+// durable normal Trust Store. A storage failure keeps the provisional entry so
+// the bounded coordinator can retry or cancel it.
+func (service *Service) CommitProvisional(
+	ctx context.Context,
+	transactionID string,
+	deviceID string,
+) error {
+	if !transactionIDPattern.MatchString(transactionID) || !deviceIDPattern.MatchString(deviceID) {
+		return ErrInvalidRequest
+	}
+	now := service.clock.Now().UTC()
+	service.provisionalMu.Lock()
+	defer service.provisionalMu.Unlock()
+	service.pruneProvisionalLocked(now)
+	staged, found := service.provisional[transactionID]
+	if !found || staged.trust.DeviceID != deviceID {
+		return ErrProvisionalNotFound
+	}
+	if err := service.store.CommitTrust(ctx, staged.trust); err != nil {
+		return fmt.Errorf("commit provisional device trust: %w", err)
+	}
+	delete(service.provisional, transactionID)
+	service.audit("pairing_v2_commit", "success", deviceID, now)
+	return nil
+}
+
+func (service *Service) CancelProvisional(transactionID string) bool {
+	if !transactionIDPattern.MatchString(transactionID) {
+		return false
+	}
+	service.provisionalMu.Lock()
+	defer service.provisionalMu.Unlock()
+	if _, found := service.provisional[transactionID]; !found {
+		return false
+	}
+	delete(service.provisional, transactionID)
+	return true
+}
+
+func (service *Service) pruneProvisionalLocked(now time.Time) {
+	for transactionID, staged := range service.provisional {
+		if !now.Before(staged.expiresAt) {
+			delete(service.provisional, transactionID)
+		}
+	}
+}
+
+func validateProvisionalRequest(request ProvisionalTrustRequest, now time.Time) ([]byte, error) {
+	if !transactionIDPattern.MatchString(request.SessionID) ||
+		!transactionIDPattern.MatchString(request.TransactionID) ||
+		request.SessionID == request.TransactionID ||
+		!deviceIDPattern.MatchString(request.DeviceID) ||
+		!deviceTokenPattern.MatchString(request.Token) ||
+		request.ProtocolVersion != ProtocolVersion {
+		return nil, ErrInvalidRequest
+	}
+	identity, err := base64.RawURLEncoding.DecodeString(request.DeviceIdentity)
+	if err != nil || len(identity) < 16 || len(identity) > 512 {
+		clear(identity)
+		return nil, ErrInvalidRequest
+	}
+	expiresAt := request.ExpiresAt.UTC()
+	if !expiresAt.After(now) || expiresAt.After(now.Add(maximumProvisionalTTL)) {
+		clear(identity)
+		return nil, ErrInvalidRequest
+	}
+	return identity, nil
+}
+
+func provisionalEqual(left, right provisionalTrust) bool {
+	return left.sessionID == right.sessionID && left.transactionID == right.transactionID &&
+		left.trust == right.trust && left.expiresAt.Equal(right.expiresAt)
 }
 
 func (service *Service) Issue(ctx context.Context) (IssuedCode, error) {
