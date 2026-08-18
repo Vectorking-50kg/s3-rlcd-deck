@@ -376,6 +376,10 @@ add_test(
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_hil_ui_preview.py
 )
 add_test(
+    NAME deck_ui_frame_evidence_contract
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_deck_ui_frame_evidence.py
+)
+add_test(
     NAME ai_page_font_layout_contract
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_ai_page_font_layout.py
 )
