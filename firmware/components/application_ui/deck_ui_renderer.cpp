@@ -1,5 +1,7 @@
 #include "deck_ui_renderer.h"
 
+#include "deck_ui_layout.h"
+
 #include <cstring>
 #include <new>
 
@@ -78,6 +80,12 @@ void set_visible(lv_obj_t *object, bool visible)
     } else {
         lv_obj_add_flag(object, LV_OBJ_FLAG_HIDDEN);
     }
+}
+
+void set_rect(lv_obj_t *object, deck_ui_rect_t rectangle)
+{
+    lv_obj_set_pos(object, rectangle.x, rectangle.y);
+    lv_obj_set_size(object, rectangle.width, rectangle.height);
 }
 
 bool has_text(const char *text)
@@ -263,6 +271,10 @@ bool deck_ui_renderer_present(deck_ui_renderer_t *renderer, const deck_ui_scene_
     if (renderer == nullptr || scene == nullptr) {
         return false;
     }
+    deck_ui_layout_t layout{};
+    if (!deck_ui_layout_plan(scene, &layout)) {
+        return false;
+    }
     set_label(renderer->status_time, scene->status_time);
     set_label(renderer->status_temperature, scene->status_temperature);
     set_label(renderer->status_wifi, scene->status_wifi);
@@ -302,47 +314,36 @@ bool deck_ui_renderer_present(deck_ui_renderer_t *renderer, const deck_ui_scene_
         LV_PART_MAIN
     );
 
-    int32_t metric_y = 82;
+    set_rect(renderer->hero, layout.hero);
+    set_rect(renderer->message, layout.message);
+    set_rect(renderer->detail, layout.detail);
     if (scene->centered) {
-        lv_obj_set_pos(renderer->hero, 8, 91);
-        lv_obj_set_size(renderer->hero, 384, 44);
         lv_obj_set_style_text_align(renderer->hero, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-        lv_obj_set_pos(renderer->message, 8, 150);
         lv_obj_set_style_text_align(renderer->message, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-        lv_obj_set_pos(renderer->detail, 8, 181);
         lv_obj_set_style_text_align(renderer->detail, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-        metric_y = 214;
     } else if (has_text(scene->hero)) {
-        lv_obj_set_pos(renderer->hero, 8, 81);
-        lv_obj_set_size(renderer->hero, 208, 42);
         lv_obj_set_style_text_align(renderer->hero, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
-        lv_obj_set_pos(renderer->message, 222, 91);
-        lv_obj_set_size(renderer->message, 170, 22);
         lv_obj_set_style_text_align(renderer->message, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
-        lv_obj_set_pos(renderer->detail, 222, 113);
-        lv_obj_set_size(renderer->detail, 170, 22);
         lv_obj_set_style_text_align(renderer->detail, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
-        metric_y = 130;
     } else {
-        lv_obj_set_pos(renderer->hero, 8, 82);
         lv_obj_set_style_text_align(renderer->hero, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
-        lv_obj_set_pos(renderer->message, 8, 135);
-        lv_obj_set_size(renderer->message, 384, 24);
         lv_obj_set_style_text_align(renderer->message, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
-        lv_obj_set_pos(renderer->detail, 8, 166);
-        lv_obj_set_size(renderer->detail, 384, 24);
         lv_obj_set_style_text_align(renderer->detail, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
     }
 
     for (size_t index = 0; index < DECK_UI_SCENE_MAX_METRICS; ++index) {
         MetricWidgets &widgets = renderer->metrics[index];
-        const bool visible = index < scene->metric_count;
+        const bool visible = layout.metric_visible[index];
         set_visible(widgets.row, visible);
         if (!visible) {
+            set_label(widgets.label, "");
+            set_label(widgets.value, "");
+            set_label(widgets.detail, "");
+            set_visible(widgets.bar, false);
             continue;
         }
         const deck_ui_scene_metric_t &metric = scene->metrics[index];
-        lv_obj_set_pos(widgets.row, 8, metric_y + static_cast<int32_t>(index) * 30);
+        set_rect(widgets.row, layout.metric_rows[index]);
         set_label(widgets.label, metric.label);
         set_label(widgets.value, metric.value);
         set_label(widgets.detail, metric.detail);
@@ -361,24 +362,13 @@ bool deck_ui_renderer_present(deck_ui_renderer_t *renderer, const deck_ui_scene_
         }
     }
 
-    const bool summary_visible = has_text(scene->summary_title) ||
-                                 has_text(scene->summary_value) ||
-                                 has_text(scene->summary_detail);
-    set_visible(renderer->summary, summary_visible);
-    if (summary_visible) {
-        const int32_t summary_y = metric_y + static_cast<int32_t>(scene->metric_count) * 30 + 4;
-        const int32_t available_height = kFooterDividerY - summary_y - 6;
-        const int32_t summary_height = available_height > 50 ? 50 : available_height;
-        if (summary_height < 24) {
-            set_visible(renderer->summary, false);
-        } else {
-            lv_obj_set_pos(renderer->summary, 8, summary_y);
-            lv_obj_set_size(renderer->summary, 384, summary_height);
-            set_label(renderer->summary_title, scene->summary_title);
-            set_label(renderer->summary_value, scene->summary_value);
-            set_label(renderer->summary_detail, scene->summary_detail);
-            set_visible(renderer->summary_detail, summary_height >= 48 && has_text(scene->summary_detail));
-        }
+    set_label(renderer->summary_title, layout.summary_visible ? scene->summary_title : "");
+    set_label(renderer->summary_value, layout.summary_visible ? scene->summary_value : "");
+    set_label(renderer->summary_detail, layout.summary_visible ? scene->summary_detail : "");
+    set_visible(renderer->summary, layout.summary_visible);
+    if (layout.summary_visible) {
+        set_rect(renderer->summary, layout.summary);
+        set_visible(renderer->summary_detail, layout.summary_detail_visible);
     }
 
     set_label(renderer->footer_left, scene->footer_left);

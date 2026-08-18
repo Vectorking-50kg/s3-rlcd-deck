@@ -1,10 +1,43 @@
 #include "deck_ui_scene.h"
+#include "deck_ui_layout.h"
 
 #include <cassert>
 #include <cstring>
 #include <string>
 
 namespace {
+
+constexpr int32_t kFooterDividerY = 258;
+
+int32_t bottom(deck_ui_rect_t rectangle)
+{
+    return static_cast<int32_t>(rectangle.y) + rectangle.height;
+}
+
+void assert_scene_fits_panel(const deck_ui_scene_t &scene)
+{
+    deck_ui_layout_t layout{};
+    assert(deck_ui_layout_plan(&scene, &layout));
+    assert(deck_ui_rect_within_display(layout.hero));
+    assert(deck_ui_rect_within_display(layout.message));
+    assert(deck_ui_rect_within_display(layout.detail));
+
+    int32_t previous_bottom = -1;
+    for (size_t index = 0U; index < DECK_UI_SCENE_MAX_METRICS; ++index) {
+        if (!layout.metric_visible[index]) {
+            continue;
+        }
+        assert(deck_ui_rect_within_display(layout.metric_rows[index]));
+        assert(layout.metric_rows[index].y >= previous_bottom);
+        assert(bottom(layout.metric_rows[index]) <= kFooterDividerY);
+        previous_bottom = bottom(layout.metric_rows[index]);
+    }
+    if (layout.summary_visible) {
+        assert(deck_ui_rect_within_display(layout.summary));
+        assert(layout.summary.y >= previous_bottom);
+        assert(bottom(layout.summary) <= kFooterDividerY);
+    }
+}
 
 deck_m0_view_model_t base_model()
 {
@@ -80,6 +113,7 @@ void board_is_a_visual_dashboard_instead_of_a_diagnostic_log()
     assert(std::string(scene.metrics[0].value) == "53.0%");
     assert(std::string(scene.footer_left) == "TX 未启用");
     assert(std::string(scene.summary_detail).find("最低堆") != std::string::npos);
+    assert_scene_fits_panel(scene);
 }
 
 void pairing_has_highest_priority_and_a_large_grouped_code()
@@ -99,6 +133,7 @@ void pairing_has_highest_priority_and_a_large_grouped_code()
     assert(std::string(scene.message) == "请在 Mac 配对页输入验证码");
     assert(std::string(scene.detail) == "剩余 87 秒");
     assert(std::string(scene.footer_right) == "BOOT 取消");
+    assert_scene_fits_panel(scene);
 }
 
 void pairing_failure_explains_that_existing_trust_is_preserved()
@@ -110,6 +145,7 @@ void pairing_failure_explains_that_existing_trust_is_preserved()
     assert(std::string(scene.hero) == "配对失败");
     assert(std::string(scene.message) == "原有 Profile 保持不变");
     assert(scene.badge_style == DECK_UI_BADGE_ALERT);
+    assert_scene_fits_panel(scene);
 }
 
 void setup_credentials_are_structured_as_ephemeral_rows()
@@ -126,6 +162,7 @@ void setup_credentials_are_structured_as_ephemeral_rows()
     assert(std::string(scene.metrics[0].value) == "S3-DECK-A17F");
     assert(std::string(scene.metrics[1].value) == "MINT-WAVE-7294");
     assert(std::string(scene.metrics[2].value) == "http://192.168.4.1");
+    assert_scene_fits_panel(scene);
 }
 
 void codex_uses_chinese_labels_and_real_progress_metrics()
@@ -146,6 +183,7 @@ void codex_uses_chinese_labels_and_real_progress_metrics()
     assert(std::string(scene.summary_value) == "运行中");
     assert(std::string(scene.summary_detail).find("上下文 41%") != std::string::npos);
     assert(std::string(scene.footer_left) == "TX 未启用");
+    assert_scene_fits_panel(scene);
 }
 
 void unavailable_ai_data_is_explicit_and_does_not_show_zeroes()
@@ -159,6 +197,7 @@ void unavailable_ai_data_is_explicit_and_does_not_show_zeroes()
     assert(std::string(scene.hero) == "暂无 Codex 数据");
     assert(std::string(scene.message) == "Active Companion 当前离线");
     assert(scene.metric_count == 0U);
+    assert_scene_fits_panel(scene);
 }
 
 void serial_scene_keeps_payload_out_and_makes_the_owner_obvious()
@@ -177,6 +216,7 @@ void serial_scene_keeps_payload_out_and_makes_the_owner_obvious()
     assert(std::string(scene.footer_left) == "Web TX");
     assert(scene.metric_count == 4U);
     assert(std::string(scene.metrics[0].value) == "#7");
+    assert_scene_fits_panel(scene);
 }
 
 void semantic_scene_equality_detects_visible_changes()
@@ -193,6 +233,16 @@ void semantic_scene_equality_detects_visible_changes()
     assert(!deck_ui_scene_equal(&left, &right));
 }
 
+void layout_rejects_dense_centered_content_instead_of_covering_the_footer()
+{
+    deck_ui_scene_t scene{};
+    scene.centered = true;
+    std::strcpy(scene.hero, "123 456");
+    scene.metric_count = 2U;
+    deck_ui_layout_t layout{};
+    assert(!deck_ui_layout_plan(&scene, &layout));
+}
+
 }  // namespace
 
 int main()
@@ -205,5 +255,6 @@ int main()
     unavailable_ai_data_is_explicit_and_does_not_show_zeroes();
     serial_scene_keeps_payload_out_and_makes_the_owner_obvious();
     semantic_scene_equality_detects_visible_changes();
+    layout_rejects_dense_centered_content_instead_of_covering_the_footer();
     return 0;
 }

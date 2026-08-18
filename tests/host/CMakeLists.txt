@@ -76,6 +76,7 @@ deck_add_host_test(
     SOURCES
         test_deck_ui_scene.cpp
         ../../firmware/components/application_ui/deck_ai_page_view_model.cpp
+        ../../firmware/components/application_ui/deck_ui_layout.cpp
         ../../firmware/components/application_ui/deck_ui_scene.cpp
     INCLUDE_DIRS
         ../../firmware/components/ai_snapshot/include

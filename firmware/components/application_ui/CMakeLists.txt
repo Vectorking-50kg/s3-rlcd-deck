@@ -3,6 +3,7 @@ idf_component_register(
         "deck_application_ui.cpp"
         "deck_ai_page_view_model.cpp"
         "deck_m0_view_model.cpp"
+        "deck_ui_layout.cpp"
         "deck_ui_renderer.cpp"
         "deck_ui_scene.cpp"
         "assets/lv_font_deck_m0_16.c"
@@ -25,6 +26,7 @@ set_source_files_properties(
     deck_application_ui.cpp
     deck_ai_page_view_model.cpp
     deck_m0_view_model.cpp
+    deck_ui_layout.cpp
     deck_ui_renderer.cpp
     deck_ui_scene.cpp
     PROPERTIES COMPILE_OPTIONS "-Wall;-Wextra;-Werror;-Wconversion;-Wsign-conversion"
