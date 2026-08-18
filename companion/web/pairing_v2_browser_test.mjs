@@ -45,6 +45,9 @@ async function startServer() {
       const route = requestURL.pathname;
       if (route === "/api/v1/bootstrap") return json(response, { version: "test", login_required: true, lan_management_enabled: false });
       if (route === "/api/v1/session/refresh") {
+        // Exercise the real startup ordering: the initial session probe must settle
+        // before a user can submit the management token.
+        if (!browserState.authenticated) await new Promise((resolve) => setTimeout(resolve, 100));
         return browserState.authenticated ? json(response, { csrf_token: "test-csrf" }) : json(response, {}, 401);
       }
       if (route === "/api/v1/login") {
@@ -224,18 +227,18 @@ async function main() {
     await cdp.send("Page.navigate", { url: targetURL });
     await initialLoad;
     const phaseOne = await evaluate(cdp, `(async()=>{
-      const wait=async(fn)=>{const end=Date.now()+10000;while(Date.now()<end){const value=fn();if(value)return value;await new Promise(r=>setTimeout(r,30));}throw new Error('DOM timeout')};
-      await wait(()=>document.querySelector('#management-token'));
+      const wait=async(name,fn)=>{const end=Date.now()+10000;while(Date.now()<end){const value=fn();if(value)return value;await new Promise(r=>setTimeout(r,30));}throw new Error('DOM timeout: '+name)};
+      await wait('initial session probe',()=>document.querySelector('#management-token')&&document.querySelector('#session-resume').hidden&&!document.querySelector('#login-view').hidden);
       document.querySelector('#management-token').value='local-test-token';document.querySelector('#login-form').requestSubmit();
-      await wait(()=>!document.querySelector('#application').hidden);
+      await wait('authenticated application',()=>!document.querySelector('#application').hidden);
       document.querySelector('#pair-deck').click();
-      await wait(()=>document.querySelectorAll('.pairing-candidate').length===2);
+      await wait('Pairing candidates',()=>document.querySelectorAll('.pairing-candidate').length===2);
       const labels=[...document.querySelectorAll('.pairing-candidate strong')].map(node=>node.textContent);
       document.querySelector('.pairing-candidate button').click();
-      await wait(()=>!document.querySelector('#pairing-v2-code-form').hidden);
+      await wait('Pairing code form',()=>!document.querySelector('#pairing-v2-code-form').hidden);
       const input=document.querySelector('#pairing-v2-code');input.value='123456';
       document.querySelector('#pairing-v2-code-form').requestSubmit();document.querySelector('#pairing-v2-code-form').requestSubmit();
-      await wait(()=>document.querySelector('#pairing-v2-state').textContent==='正在验证连接');
+      await wait('Pairing proof state',()=>document.querySelector('#pairing-v2-state').textContent==='正在验证连接');
       return {labels,codeCleared:input.value==='',stored:sessionStorage.getItem('s3deck.pairing-v2.session-ref')};
     })()`);
     assert.deepEqual(phaseOne.labels, ["S3 RLCD Deck · 同名设备 1", "S3 RLCD Deck · 同名设备 2"]);
