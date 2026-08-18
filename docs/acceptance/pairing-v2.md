@@ -30,11 +30,14 @@ or raw Companion output.
    ```bash
    python tools/pairing_v2_acceptance.py \
      --port /dev/cu.usbmodemXXXX \
-     --result-dir .hil-results/pairing-v2-YYYYMMDD-HHMM
+     --result-dir .hil-results/pairing-v2-YYYYMMDD-HHMM \
+     --wait-for-user
    ```
 
-4. Wait for the controller to finish builds, safe app-only programming, one fresh Deck boot, and
-   Companion startup. Keep the Mac on the same LAN for the entire run.
+4. Wait for the controller to finish the preflight. Once you are in front of the Mac and can see
+   the Deck screen, press Enter at the readiness prompt. This confirmation contains no code or
+   credential; it starts safe app-only programming, one fresh Deck boot, and Companion startup.
+   Keep the Mac on the same LAN for the entire run.
 5. If the Deck already has a Companion Profile, short-press BOOT once to open its Pairing Window.
    An unpaired Deck opens its first bounded window automatically after normal Wi-Fi is usable.
 6. Open the management console from the Companion menu-bar item. If needed, browse to

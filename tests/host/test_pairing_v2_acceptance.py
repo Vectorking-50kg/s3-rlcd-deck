@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import importlib.util
+import io
 import json
 import pathlib
 
@@ -47,6 +48,19 @@ def test_online_before_commit_and_setup_mode_fail_closed() -> None:
     assert not checks["setup_mode_not_entered"]
 
 
+def test_expired_window_preserves_partial_evidence_without_claiming_pairing() -> None:
+    value = pairing.PairingObservation()
+    value.observe({"type": "boot_ok", "minimum_free_heap_bytes": 8000000})
+    value.observe({"type": "deck_build_identity", "firmware_commit": "a" * 40})
+    value.observe({"type": "pairing_v2", "state": "active"})
+    value.observe({"type": "pairing_v2", "state": "expired"})
+    checks = value.checks("a" * 40, True, True, True, True, True)
+    assert checks["pairing_window_observed"]
+    assert not checks["authentication_observed"]
+    assert not checks["device_link_proof_observed"]
+    assert not checks["transaction_committed"]
+
+
 def test_pairing_diagnostic_is_strict_and_secret_free() -> None:
     safe = (
         '{"type":"pairing_v2","state":"proof_verified",'
@@ -60,7 +74,26 @@ def test_pairing_diagnostic_is_strict_and_secret_free() -> None:
     assert sanitized == pairing.m1.REDACTED_NON_DIAGNOSTIC
 
 
+def test_user_readiness_gate_accepts_only_a_non_secret_enter() -> None:
+    output = io.StringIO()
+    pairing.wait_for_user_ready(io.StringIO("\n"), output)
+    assert "按 Enter" in output.getvalue()
+    assert "验证码只能输入 Companion 管理网页" in output.getvalue()
+
+
+def test_user_readiness_gate_fails_closed_without_a_terminal() -> None:
+    try:
+        pairing.wait_for_user_ready(io.StringIO(""), io.StringIO())
+    except pairing.m1.AcceptanceFailure as error:
+        assert "readiness confirmation" in str(error)
+    else:
+        raise AssertionError("missing user readiness input was accepted")
+
+
 if __name__ == "__main__":
     test_complete_same_lan_transaction_passes()
     test_online_before_commit_and_setup_mode_fail_closed()
+    test_expired_window_preserves_partial_evidence_without_claiming_pairing()
     test_pairing_diagnostic_is_strict_and_secret_free()
+    test_user_readiness_gate_accepts_only_a_non_secret_enter()
+    test_user_readiness_gate_fails_closed_without_a_terminal()

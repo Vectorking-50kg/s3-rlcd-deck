@@ -90,10 +90,13 @@ class PairingObservation:
         for index, (event_type, state) in enumerate(self.events):
             if event_type == "pairing_v2" and state in PAIRING_STATES and state not in positions:
                 positions[state] = index
-        ordered = all(state in positions for state in PAIRING_STATES) and all(
-            positions[left] < positions[right]
-            for left, right in zip(PAIRING_STATES, PAIRING_STATES[1:])
-        )
+        active_observed = "active" in positions
+        authentication_observed = active_observed and "authenticating" in positions and \
+            positions["active"] < positions["authenticating"]
+        proof_observed = authentication_observed and "proof_verified" in positions and \
+            positions["authenticating"] < positions["proof_verified"]
+        committed = proof_observed and "paired" in positions and \
+            positions["proof_verified"] < positions["paired"]
         paired_at = positions.get("paired", len(self.events))
         online_after_pairing = any(
             index > paired_at and event_type == "companion_link_state" and state == "online"
@@ -107,10 +110,10 @@ class PairingObservation:
             "single_expected_boot": self.boot_count == 1 and self.minimum_free_heap_bytes > 0,
             "mac_normal_lan_unchanged": network_unchanged,
             "setup_mode_not_entered": not self.setup_entered,
-            "pairing_window_observed": ordered and "active" in positions,
-            "authentication_observed": ordered and "authenticating" in positions,
-            "device_link_proof_observed": ordered and "proof_verified" in positions,
-            "transaction_committed": ordered and "paired" in positions,
+            "pairing_window_observed": active_observed,
+            "authentication_observed": authentication_observed,
+            "device_link_proof_observed": proof_observed,
+            "transaction_committed": committed,
             "device_link_online": online_after_pairing,
             "credentials_absent_from_evidence": evidence_clean,
         }
@@ -188,12 +191,27 @@ def write_summary(path: pathlib.Path, document: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
+def wait_for_user_ready(input_stream: Any, output_stream: Any) -> None:
+    output_stream.write(
+        "Preflight 已完成。确认你已在 Mac 前、Deck 屏幕可见，然后按 Enter 开始烧录和限时配对。\n"
+        "不要在此输入六位码；验证码只能输入 Companion 管理网页。\n"
+    )
+    output_stream.flush()
+    if input_stream.readline() == "":
+        raise m1.AcceptanceFailure("user readiness confirmation was unavailable before app flash")
+
+
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", required=True, help="explicit Deck /dev/cu.usbmodem... port")
     parser.add_argument("--result-dir", required=True, type=pathlib.Path)
     parser.add_argument("--interface", default="en0")
     parser.add_argument("--timeout", type=float, default=240.0)
+    parser.add_argument(
+        "--wait-for-user",
+        action="store_true",
+        help="pause after preflight; press Enter before app-only flash starts the bounded Pairing Window",
+    )
     parser.add_argument(
         "--development",
         action="store_true",
@@ -217,6 +235,11 @@ def main() -> int:
     companion_process: subprocess.Popen[bytes] | None = None
     summary: dict[str, Any] = {}
     summary_write_failed = False
+    clean_source = False
+    preflight_passed = False
+    companion_matches = False
+    initial_network = ""
+    final_network = ""
     try:
         commit = m1.command_output(["git", "rev-parse", "HEAD"])
         clean_source = m1.source_tree_clean()
@@ -229,9 +252,12 @@ def main() -> int:
         else:
             environment = m1.run_preflight(result_dir / "preflight.log")
             preflight_passed = True
+            if arguments.wait_for_user:
+                wait_for_user_ready(sys.stdin, sys.stdout)
             m1.run_app_flash(arguments.port, result_dir / "app-flash.log", environment)
         executable = m1.companion_for_current_host(commit)
-        if not companion_identity(executable, commit):
+        companion_matches = companion_identity(executable, commit)
+        if not companion_matches:
             raise m1.AcceptanceFailure("Companion artifact does not match the clean source commit")
         if not listener_is_free():
             raise m1.AcceptanceFailure("close the currently running Companion before formal acceptance")
@@ -281,22 +307,8 @@ def main() -> int:
             30.0,
         )
         final_network = network_fingerprint(arguments.interface)
-        evidence_clean = secrets.clean() and m1.evidence_directory_is_redacted(
-            result_dir,
-            secrets.values(),
-        )
-        checks = observation.checks(
-            commit,
-            clean_source,
-            preflight_passed,
-            True,
-            initial_network == final_network,
-            evidence_clean,
-        )
         if arguments.development:
             errors.append("development mode cannot satisfy the formal preflight/flash gate")
-        elif not all(checks.values()):
-            errors.append("one or more Pairing v2 evidence gates were not satisfied")
     except (m1.AcceptanceFailure, OSError, subprocess.SubprocessError) as error:
         errors.append(str(error))
     finally:
@@ -316,6 +328,25 @@ def main() -> int:
                     errors.append("Companion required forced shutdown")
             except (OSError, subprocess.SubprocessError):
                 errors.append("Companion shutdown failed")
+        if initial_network and not final_network:
+            try:
+                final_network = network_fingerprint(arguments.interface)
+            except m1.AcceptanceFailure:
+                pass
+        evidence_clean = secrets.clean() and m1.evidence_directory_is_redacted(
+            result_dir,
+            secrets.values(),
+        )
+        checks = observation.checks(
+            commit,
+            clean_source,
+            preflight_passed,
+            companion_matches,
+            bool(initial_network) and initial_network == final_network,
+            evidence_clean,
+        )
+        if not arguments.development and not errors and not all(checks.values()):
+            errors.append("one or more Pairing v2 evidence gates were not satisfied")
         summary = {
             "schema_version": 1,
             "issue": 91,

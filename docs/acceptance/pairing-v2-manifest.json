@@ -7,7 +7,7 @@
     "companion": "./tools/test_companion.sh",
     "firmware_dev": "./tools/idf.sh dev build",
     "firmware_release": "./tools/idf.sh release build",
-    "real_pairing": "python tools/pairing_v2_acceptance.py --port <Deck> --result-dir .hil-results/<run>"
+    "real_pairing": "python tools/pairing_v2_acceptance.py --port <Deck> --result-dir .hil-results/<run> --wait-for-user"
   },
   "summary": null
 }
