@@ -37,8 +37,8 @@ concurrency:
 
 jobs:
   host-contracts:
-    name: Host and UI contracts
-    runs-on: ubuntu-latest
+    name: macOS Host and UI contracts
+    runs-on: macos-15
     timeout-minutes: 20
     defaults:
       run:
