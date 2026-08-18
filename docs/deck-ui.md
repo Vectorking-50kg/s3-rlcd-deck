@@ -1,0 +1,185 @@
+# Deck 400×300 中文单色 UI
+
+本文件是 Deck 实体屏的生产设计基线。`docs/ui-prototype` 中的方案 C 提供视觉方向；本文件把该方向收紧为 400×300、1bpp、无触摸、KEY/BOOT 两键设备可以直接实现和测试的规则。
+
+跟踪目标：[GitHub Issue #93](https://github.com/Vectorking-50kg/s3-rlcd-deck/issues/93)。
+
+## 1. 产品表达
+
+Deck 是放在桌面上的本地技术仪表，不是串口日志窗口。用户在三秒内应该看清：
+
+1. 设备当前是否正常；
+2. 最重要的数据或当前任务是什么；
+3. 数据是否可信、过期或不可用；
+4. KEY / BOOT 此刻能做什么；
+5. TX 当前是否启用、由谁持有。
+
+页面文案以中文为主。只保留 Wi‑Fi、Codex、Provider、Token、Serial、USB、Web、TX、OTA 等必要专用名词，并放在中文语境中。错误码可以保留稳定英文标识，但必须同时显示中文影响范围。
+
+## 2. 物理与渲染约束
+
+- 画布固定为横屏 `400 × 300`，不响应式缩放。
+- 最终像素只有黑、白两种；不使用灰色、透明度、渐变、阴影或抗锯齿来表达层级。
+- 使用实色反白、1/2 px 边框、虚线/斜纹和留白表达状态。
+- 页面切换为瞬时整帧更新；不做淡入、位移、闪烁或循环动画。
+- 屏幕没有触摸。KEY 用于页面/子视图切换，BOOT 用于取消、退出或进入恢复；操作含义固定显示在底栏。
+- 动态文本一律单行、显式裁剪。禁止依赖 LVGL 自动换行。
+- 任何可选数值缺失时折叠或显示 `--`，绝不显示为 `0`。
+
+## 3. 网格与版面
+
+使用 4 px 微网格和 8 px 主网格。
+
+| 区域 | 坐标/尺寸 | 说明 |
+| --- | --- | --- |
+| 安全边距 | `8 px` | 所有内容不得越过 |
+| 顶部状态栏 | `x=8, y=6, w=384, h=32` | 时间、温度、Wi‑Fi、Companion |
+| 顶部分隔线 | `y=39, h=2` | 黑色实线 |
+| 主内容区 | `x=8, y=46, w=384, h=204` | 页面标题、主数据和辅助数据 |
+| 底部分隔线 | `y=257, h=2` | 黑色实线 |
+| 固定操作栏 | `x=8, y=264, w=384, h=28` | TX 与 KEY/BOOT 操作 |
+
+主内容以 8 px 间距组织。描边卡片边框为 1 px；当前关键状态可使用黑底白字。圆角最多 2 px，避免 1bpp 下产生破碎边缘。
+
+## 4. 字体系统
+
+### 4.1 角色
+
+| 角色 | 目标像素 | 用途 |
+| --- | --- | --- |
+| `Caption` | 12–14 px | 辅助标签、倒计时单位；若可读性不足则统一升为 16 px |
+| `Body` | 16 px / 19 px 行高 | 中文正文、状态栏、底栏 |
+| `Title` | 20–22 px | 页面标题、重要状态 |
+| `Metric` | 24–28 px | 额度、温度、速率等主数值 |
+| `Code` | 36–42 px | 六位配对码 |
+
+中文正文优先使用经过 1bpp 转换和实板核验的开源 CJK 字体子集；ASCII 数字可以使用配套的窄体或等宽子集。所有字体必须随仓库锁定、记录许可证并由脚本可重复生成。
+
+### 4.2 字形规则
+
+- 字库只包含生产文案与严格受限的动态字符范围，不打包完整 CJK。Provider、额度窗口、会话名和错误码在投影时按 UTF-8 code point 校验；超出字形清单时显示明确中文替代文案，禁止把缺字方框当作降级。
+- 生成时使用 `1 bpp`，不让 RGB565 阈值临时决定笔画。
+- 中文标题不靠极细字重或字间距制造层级，优先用字号、反白和留白。
+- 动态英文名、SSID、Provider 名和会话名按真实 glyph advance 截断；混排必须保持 UTF‑8 边界。
+- 任何新增中文文案都必须同时进入 glyph manifest 与字体覆盖测试。
+
+## 5. 组件
+
+### 状态栏
+
+固定四段：`本地时间`、`校准温度`、`Wi‑Fi`、`Companion`。未知时显示 `--:--`、`--.-°`、`Wi‑Fi --` 或 `未连接`。状态栏只给结论，不显示 IP、版本和错误计数。
+
+### 状态徽章
+
+- 正常/已验证：黑底白字，例如 `已验证`。
+- 过期/恢复中：白底黑边，并加 `过期 47分`、`重连中` 等明确文字。
+- 失败/不可用：2 px 黑边或斜纹，并显示 `失败`、`不可用`；不能只靠图案。
+
+### 数据条
+
+额度、使用率和进度使用描边矩形，内部用整像素黑色填充。条形旁始终显示数值，未知比例时整行隐藏。
+
+### 信息卡片
+
+卡片只承载一个语义组。标题在左上，关键值放大；附属状态在右上或下一行。禁止把十几个诊断字段堆进同一张卡片。
+
+### 固定底栏
+
+左侧永远显示 `TX 未启用`、`USB TX` 或 `Web TX`。右侧显示当前有效的 KEY/BOOT 行为，例如 `KEY 下一页`、`长按 进入串口`、`BOOT 取消`。无行为时不显示虚构提示。
+
+## 6. 页面清单
+
+### 6.1 板级主页
+
+用于未获得 AI Snapshot 或 Setup 关闭后的基础状态。主卡显示校准温度和湿度；次卡显示 Wi‑Fi、Companion 与传感器健康。固件版本、刷新计数、最低堆和错误累计进入“诊断”子页，不占主页。
+
+### 6.2 Codex / Provider
+
+标题行显示 Provider 与可信度。最多四个额度行，每行包含名称、1bpp 数据条、百分比和重置倒计时。其后显示一个脱敏会话摘要及 Token/上下文/其他会话数量。页面必须保留 `TX 未启用`。
+
+### 6.3 Pairing v2
+
+标题为 `配对 Companion`。六位码是页面最大视觉元素，按 `123 456` 分组；同时显示“同一局域网”、剩余时间和当前阶段：等待输入、正在认证、安全链路已验证、配对成功、已过期或失败。失败文案必须说明“原配置未改变”。
+
+### 6.4 Setup / Recovery
+
+标题为 `设置与恢复`。分别以卡片显示临时 AP 名称、密码和访问地址，并给出会话剩余时间。凭据只在 Setup 有效期内显示；Setup 结束后对应 LVGL label 和本地缓冲必须清空。
+
+### 6.5 Serial
+
+标题行突出唯一 TX Owner。主卡显示波特率和会话时长；四个统计卡显示 RX/TX 总量或当前流量、错误/覆盖。页面不显示串口正文。退出后立即回到 AI 页面并清空临时显示数据。
+
+### 6.6 离线、过期与错误
+
+离线但快照未超过 24 小时时保留最后可信摘要并明确显示时间；达到 24 小时后隐藏额度。局部错误保留其他健康区域。错误页面至少包含：发生了什么、哪些数据仍可信、用户下一步做什么。
+
+### 6.7 OTA / 回滚
+
+仅在真实 OTA 状态已接入时显示。包括签名状态、目标版本、1bpp 进度条和“不要断电”。回滚显示恢复到的版本以及 Web 查看详情入口。
+
+## 7. 实现边界
+
+- `deck_m0_view_model_t` 和 AI Snapshot 投影继续作为领域事实，不把视觉状态反向写回领域模型。
+- 新增纯投影层把领域 ViewModel 转为有界 `DeckUiScene`；Host 测试直接检查 Scene，而不是解析 LVGL 对象。
+- LVGL owner 只负责把 Scene 映射为固定对象树。状态更新复用对象，不在每帧重复创建/删除。
+- 字体、图标、条形和边框由统一主题模块提供；页面不得各自散落样式常量。
+- Setup、Pairing 和 Serial 的优先级继续由既有领域状态决定，UI 不自行推断。
+
+## 8. 验收矩阵
+
+自动验证：
+
+- 每种领域状态映射到唯一页面和明确中文状态。
+- 所有动态行按真实字体像素宽度不超过对象宽度。
+- 所有页面对象坐标保持在 400×300 安全区内。
+- 字形清单覆盖生产 UI 的全部中文 code point。
+- Host 测试、dev/release 构建和 `git diff --check` 全部通过。
+
+实板验证：
+
+- 横屏、纯黑白、无镜像、无裁切、无随机花屏。
+- 板级主页、Codex 正常、AI 过期/不可用、Pairing 全阶段、Setup、Serial、错误/恢复至少各拍一张 400×300 实物照片。
+- 在正常桌面距离和常见室内光线下，中文正文、六位码、百分比和底栏均可直接辨认。
+
+### 8.1 开发版逐页冻结
+
+开发版固件提供只读视觉预览命令，用固定、无凭据的样例数据冻结页面。工具会先取得显示帧基线，发送预览命令，再等待命令确认和后续完整帧；仅收到串口确认但屏幕没有完成刷新时会失败。
+
+```sh
+source /Users/xiaowang/.espressif/v6.0.2/esp-idf/export.sh
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --gallery --hold-seconds 4
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page board
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page pairing
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page pairing-authenticating
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page pairing-verified
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page pairing-success
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page pairing-expired
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page pairing-error
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page setup
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page setup-validating
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page setup-error
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page ai
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page ai-stale
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page provider
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page configuration
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page serial
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page offline
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page error
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page clear
+```
+
+实体屏光学验收优先使用 `--gallery`：开始录像后运行一次命令，工具会按上表顺序
+轮播全部 17 个状态，每页默认停留 4 秒，并在终端逐页输出完成帧号。轮播结束后
+最后一个错误页保持冻结，便于补拍；运行 `--page clear` 恢复实时界面。
+`--hold-seconds` 必须大于 0 且不超过 60 秒。
+
+增加 `--output /absolute/path/page.png` 可以把该固定页面最后一次成功送屏的
+15,000 字节 1bpp 帧解包为 400×300 PNG；文件已存在时必须显式加
+`--overwrite`。工具逐块校验顺序、长度与 CRC32，不能用串口确认代替真实完成帧。
+抓图接口只在固定预览处于活动状态时开放，拒绝实时页面，避免把真实 SSID、
+配对码或其他凭据导出。
+每次调用都会先恢复实时页面并观察一个新的成功帧，再切换到目标预览；因此连续
+抓取多个页面时，不会把上一次冻结的画面误当成当前结果。
+
+`clear` 恢复实时页面。预览、抓图、确认事件和队列只存在于启用诊断控制台的
+开发版；release 固件不得包含入口或额外预览/抓图状态。

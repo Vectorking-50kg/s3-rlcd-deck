@@ -1,0 +1,104 @@
+name: Firmware and Deck UI
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/firmware-ui.yml"
+      - "firmware/**"
+      - "protocol/**"
+      - "tests/host/**"
+      - "tools/idf.sh"
+      - "tools/generate_m0_font.sh"
+      - "tools/hil_ui_preview.py"
+      - "docs/deck-ui.md"
+      - "docs/research/deck-cjk-fonts.md"
+      - "docs/acceptance/ui-frames/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/firmware-ui.yml"
+      - "firmware/**"
+      - "protocol/**"
+      - "tests/host/**"
+      - "tools/idf.sh"
+      - "tools/generate_m0_font.sh"
+      - "tools/hil_ui_preview.py"
+      - "docs/deck-ui.md"
+      - "docs/research/deck-cjk-fonts.md"
+      - "docs/acceptance/ui-frames/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firmware-ui-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host-contracts:
+    name: macOS Host and UI contracts
+    runs-on: macos-15
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out the tested commit
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: companion/go.mod
+          cache-dependency-path: companion/go.sum
+
+      - name: Run Host and UI contracts
+        run: ./tools/test_host.sh
+
+  firmware-builds:
+    name: ESP-IDF 6.0.2 dev and release
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    container:
+      image: espressif/idf:v6.0.2
+      env:
+        HOME: /tmp
+    steps:
+      - name: Check out the tested commit
+        uses: actions/checkout@v6
+
+      - name: Trust the checked-out workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Verify pinned toolchain
+        run: |
+          source "$IDF_PATH/export.sh" >/dev/null
+          idf.py --version | grep -F "ESP-IDF v6.0.2"
+
+      - name: Build development firmware
+        run: |
+          source "$IDF_PATH/export.sh" >/dev/null
+          ./tools/idf.sh dev build
+
+      - name: Build release firmware
+        run: |
+          source "$IDF_PATH/export.sh" >/dev/null
+          ./tools/idf.sh release build
+
+      - name: Upload firmware images
+        uses: actions/upload-artifact@v4
+        with:
+          name: s3-rlcd-deck-firmware-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            build/dev/s3_rlcd_deck.bin
+            build/dev/s3_rlcd_deck.elf
+            build/dev/partition_table/partition-table.bin
+            build/release/s3_rlcd_deck.bin
+            build/release/s3_rlcd_deck.elf
+            build/release/partition_table/partition-table.bin

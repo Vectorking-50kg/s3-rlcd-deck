@@ -1,0 +1,135 @@
+{
+  "schema_version": 1,
+  "evidence_kind": "deck_display_successful_frame",
+  "firmware_commit": "bde4983164371a473ee0a3844b2be59d2b43a81d",
+  "firmware_version": "0.3.0-dev",
+  "capture_tool_commit": "bde4983164371a473ee0a3844b2be59d2b43a81d",
+  "display": {
+    "width": 400,
+    "height": 300,
+    "frame_bytes": 15000,
+    "pixel_format": "rlcd-packed-1bpp-monochrome"
+  },
+  "optical_photo_status": "pending",
+  "frames": [
+    {
+      "page": "board",
+      "file": "board.png",
+      "completed_frames": 13,
+      "bytes": 2672,
+      "sha256": "0e296e55570b6eb880d952bdf352bb7baf63befd9ddf3e3279632c757c812ee0"
+    },
+    {
+      "page": "pairing",
+      "file": "pairing.png",
+      "completed_frames": 15,
+      "bytes": 2576,
+      "sha256": "eb16a2b3f9ab86f08a5e0193540423a07dee562dadd30bd4af1092579d4c6454"
+    },
+    {
+      "page": "pairing-authenticating",
+      "file": "pairing-authenticating.png",
+      "completed_frames": 17,
+      "bytes": 2402,
+      "sha256": "eccdc787e26e0f8b68ac49ad49a39d21c90b27b4a859d275b02ab793d3c6f2cf"
+    },
+    {
+      "page": "pairing-verified",
+      "file": "pairing-verified.png",
+      "completed_frames": 19,
+      "bytes": 2378,
+      "sha256": "3b000f5c0a19eb9106d201ba5f72100a7b9e66dab6b6a2b212de14b1060c8dfb"
+    },
+    {
+      "page": "pairing-success",
+      "file": "pairing-success.png",
+      "completed_frames": 21,
+      "bytes": 2583,
+      "sha256": "422847c1aae5aefa71d46020fa86a75e1c8dbde22a9744d5e7ca68f8fc07ad3b"
+    },
+    {
+      "page": "pairing-expired",
+      "file": "pairing-expired.png",
+      "completed_frames": 23,
+      "bytes": 2667,
+      "sha256": "0a5b07b01d1dc3983733bac45f4087604306881fe0a11e365f23e62f1a617819"
+    },
+    {
+      "page": "pairing-error",
+      "file": "pairing-error.png",
+      "completed_frames": 25,
+      "bytes": 2617,
+      "sha256": "6a95e11c43f9dc6eb83e4c6fcdc89327943b616e06b2c8da644abfec7285155b"
+    },
+    {
+      "page": "setup",
+      "file": "setup.png",
+      "completed_frames": 27,
+      "bytes": 3363,
+      "sha256": "cd70afb902366bab455d0a565d98618c9ad98b1d0354aee2741db92d80ac6d81"
+    },
+    {
+      "page": "setup-validating",
+      "file": "setup-validating.png",
+      "completed_frames": 29,
+      "bytes": 3300,
+      "sha256": "caf44d4889468af02c99643472436abf401c8a3a3b3f70ff9f3d11cf18518dbc"
+    },
+    {
+      "page": "setup-error",
+      "file": "setup-error.png",
+      "completed_frames": 31,
+      "bytes": 3426,
+      "sha256": "64c7b11664fcc6ad544d5c084e87c2daeacba3e73040de5b80d5f000323b3a7e"
+    },
+    {
+      "page": "ai",
+      "file": "ai.png",
+      "completed_frames": 33,
+      "bytes": 3283,
+      "sha256": "5fff06a758ec96dd7d42d4b91f50fed58eeb6888f61944fab273e33d82976644"
+    },
+    {
+      "page": "ai-stale",
+      "file": "ai-stale.png",
+      "completed_frames": 35,
+      "bytes": 3413,
+      "sha256": "c5faba3c681e6cc2b485d8a317bc34bd729ff160bd1e2bc22099afa04219f934"
+    },
+    {
+      "page": "provider",
+      "file": "provider.png",
+      "completed_frames": 37,
+      "bytes": 2725,
+      "sha256": "95a9c3f37d7a98d7e56364959b767908f5f8f888be6c413e916b62f11474a9d6"
+    },
+    {
+      "page": "configuration",
+      "file": "configuration.png",
+      "completed_frames": 39,
+      "bytes": 2881,
+      "sha256": "ec05f87f2548a9a409b25eb96f04a0aa741e77b413ae4d767f88717bd1e416eb"
+    },
+    {
+      "page": "serial",
+      "file": "serial.png",
+      "completed_frames": 41,
+      "bytes": 2649,
+      "sha256": "fb494bd040ea285ba5e5badd165cd782a2f0aaad573f8ff84bc9d0e7efcc68e5"
+    },
+    {
+      "page": "offline",
+      "file": "offline.png",
+      "completed_frames": 43,
+      "bytes": 2716,
+      "sha256": "606d875ea023adb191f7a33ac09646e5b85fa4fed184c586fcbd43f91e246955"
+    },
+    {
+      "page": "error",
+      "file": "error.png",
+      "completed_frames": 45,
+      "bytes": 3058,
+      "sha256": "5465058c22650b1e49da32c6db49b7b9aaf7ded3e65ecf55fc6fa4c73b8949f8"
+    }
+  ]
+}

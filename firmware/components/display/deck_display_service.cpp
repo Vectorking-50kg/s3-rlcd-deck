@@ -27,6 +27,7 @@ struct deck_display_service {
     bool dirty;
     bool in_flight;
     bool timeout_reported;
+    bool has_successful_frame;
     deck_display_metrics_t metrics;
 };
 
@@ -253,6 +254,7 @@ deck_display_result_t deck_display_service_poll(deck_display_service_t *display,
             return DECK_DISPLAY_RECOVERING;
         }
         std::memcpy(display->successful_frame, display->working_frame, DECK_DISPLAY_FRAME_BYTES);
+        display->has_successful_frame = true;
         return DECK_DISPLAY_COMPLETED;
     }
     if (!display->timeout_reported && now_ms - display->transfer_started_ms >= display->timeout_ms) {
@@ -266,4 +268,18 @@ deck_display_result_t deck_display_service_poll(deck_display_service_t *display,
 deck_display_metrics_t deck_display_service_metrics(const deck_display_service_t *display)
 {
     return display == nullptr ? deck_display_metrics_t{} : display->metrics;
+}
+
+bool deck_display_service_copy_successful(
+    const deck_display_service_t *display,
+    uint8_t *output,
+    size_t output_size
+)
+{
+    if (display == nullptr || output == nullptr || output_size != DECK_DISPLAY_FRAME_BYTES ||
+        !display->has_successful_frame) {
+        return false;
+    }
+    std::memcpy(output, display->successful_frame, DECK_DISPLAY_FRAME_BYTES);
+    return true;
 }

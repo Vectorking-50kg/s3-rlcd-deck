@@ -1,5 +1,6 @@
 #include "sdkconfig.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstring>
 #include <inttypes.h>
@@ -18,6 +19,7 @@
 #include "deck_rlcd_panel.h"
 #include "deck_setup_service.h"
 #include "deck_serial_service.h"
+#include "deck_ui_preview.h"
 
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"
@@ -83,6 +85,7 @@ int16_t application_temperature_offset_tenths_c =
 #include "driver/usb_serial_jtag.h"
 #include "driver/usb_serial_jtag_vfs.h"
 #include "esp_private/periph_ctrl.h"
+#include "esp_rom_crc.h"
 #include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -1011,6 +1014,133 @@ bool decode_diagnostic_hex(
     return true;
 }
 
+void emit_ui_preview_result(const char *page, bool active, bool accepted)
+{
+    char response[128];
+    const int size = snprintf(
+        response,
+        sizeof(response),
+        "{\"type\":\"ui_preview\",\"page\":\"%s\","
+        "\"active\":%s,\"accepted\":%s}\n",
+        page,
+        active ? "true" : "false",
+        accepted ? "true" : "false"
+    );
+    if (size > 0 && static_cast<size_t>(size) < sizeof(response)) {
+        write_stdout(nullptr, response, static_cast<size_t>(size));
+    }
+}
+
+void emit_ui_capture_error(const char *reason)
+{
+    char response[96];
+    const int size = snprintf(
+        response,
+        sizeof(response),
+        "{\"type\":\"ui_capture_error\",\"reason\":\"%s\"}\n",
+        reason
+    );
+    if (size > 0 && static_cast<size_t>(size) < sizeof(response)) {
+        write_stdout(nullptr, response, static_cast<size_t>(size));
+    }
+}
+
+void emit_ui_capture()
+{
+    constexpr size_t kChunkBytes = 256;
+    constexpr size_t kChunkCount =
+        (DECK_DISPLAY_FRAME_BYTES + kChunkBytes - 1U) / kChunkBytes;
+    auto *frame = static_cast<uint8_t *>(heap_caps_malloc(
+        DECK_DISPLAY_FRAME_BYTES,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+    ));
+    if (frame == nullptr) {
+        emit_ui_capture_error("allocation_failed");
+        return;
+    }
+    if (!deck_application_ui_capture_preview_frame(
+            frame,
+            DECK_DISPLAY_FRAME_BYTES,
+            1'000
+        )) {
+        std::memset(frame, 0, DECK_DISPLAY_FRAME_BYTES);
+        heap_caps_free(frame);
+        emit_ui_capture_error("preview_unavailable");
+        return;
+    }
+
+    const uint32_t checksum = esp_rom_crc32_le(
+        0,
+        frame,
+        static_cast<uint32_t>(DECK_DISPLAY_FRAME_BYTES)
+    );
+    char line[640];
+    int size = snprintf(
+        line,
+        sizeof(line),
+        "{\"type\":\"ui_capture_begin\",\"width\":%d,\"height\":%d,"
+        "\"frame_bytes\":%d,\"chunk_bytes\":%zu,\"chunks\":%zu,"
+        "\"crc32\":%" PRIu32 "}\n",
+        DECK_DISPLAY_WIDTH,
+        DECK_DISPLAY_HEIGHT,
+        DECK_DISPLAY_FRAME_BYTES,
+        kChunkBytes,
+        kChunkCount,
+        checksum
+    );
+    if (size <= 0 || static_cast<size_t>(size) >= sizeof(line)) {
+        std::memset(frame, 0, DECK_DISPLAY_FRAME_BYTES);
+        heap_caps_free(frame);
+        emit_ui_capture_error("encoding_failed");
+        return;
+    }
+    write_stdout(nullptr, line, static_cast<size_t>(size));
+
+    static constexpr char kHex[] = "0123456789abcdef";
+    for (size_t chunk = 0; chunk < kChunkCount; ++chunk) {
+        const size_t offset = chunk * kChunkBytes;
+        const size_t chunk_size =
+            std::min(
+                kChunkBytes,
+                static_cast<size_t>(DECK_DISPLAY_FRAME_BYTES) - offset
+            );
+        char encoded[kChunkBytes * 2U + 1U];
+        for (size_t index = 0; index < chunk_size; ++index) {
+            const uint8_t value = frame[offset + index];
+            encoded[index * 2U] = kHex[value >> 4U];
+            encoded[index * 2U + 1U] = kHex[value & 0x0fU];
+        }
+        encoded[chunk_size * 2U] = '\0';
+        size = snprintf(
+            line,
+            sizeof(line),
+            "{\"type\":\"ui_capture_chunk\",\"index\":%zu,\"data\":\"%s\"}\n",
+            chunk,
+            encoded
+        );
+        std::memset(encoded, 0, sizeof(encoded));
+        if (size <= 0 || static_cast<size_t>(size) >= sizeof(line)) {
+            std::memset(frame, 0, DECK_DISPLAY_FRAME_BYTES);
+            heap_caps_free(frame);
+            emit_ui_capture_error("encoding_failed");
+            return;
+        }
+        write_stdout(nullptr, line, static_cast<size_t>(size));
+    }
+    size = snprintf(
+        line,
+        sizeof(line),
+        "{\"type\":\"ui_capture_end\",\"chunks\":%zu,\"crc32\":%" PRIu32 "}\n",
+        kChunkCount,
+        checksum
+    );
+    std::memset(frame, 0, DECK_DISPLAY_FRAME_BYTES);
+    heap_caps_free(frame);
+    if (size > 0 && static_cast<size_t>(size) < sizeof(line)) {
+        write_stdout(nullptr, line, static_cast<size_t>(size));
+    }
+}
+
 void handle_diagnostic_control_line(char *line)
 {
     if (line == nullptr) {
@@ -1068,6 +1198,30 @@ void handle_diagnostic_control_line(char *line)
         std::memset(ssid, 0, sizeof(ssid));
         std::memset(password, 0, sizeof(password));
         std::memset(address, 0, sizeof(address));
+        return;
+    }
+    if (std::strcmp(line, "DECK_UI_PREVIEW clear") == 0) {
+        emit_ui_preview_result("live", false, deck_application_ui_preview_clear());
+        return;
+    }
+    if (std::strcmp(line, "DECK_UI_CAPTURE") == 0) {
+        emit_ui_capture();
+        return;
+    }
+    constexpr char kUiPreviewPrefix[] = "DECK_UI_PREVIEW ";
+    if (std::strncmp(line, kUiPreviewPrefix, sizeof(kUiPreviewPrefix) - 1U) == 0) {
+        const char *page_name = line + sizeof(kUiPreviewPrefix) - 1U;
+        deck_ui_preview_page_t page = DECK_UI_PREVIEW_BOARD;
+        deck_ui_scene_t scene{};
+        const bool accepted = deck_ui_preview_page_parse(page_name, &page) &&
+                              deck_ui_preview_scene(page, &scene) &&
+                              deck_application_ui_preview(&scene);
+        if (accepted) {
+            emit_ui_preview_result(page_name, true, true);
+        } else {
+            emit_ui_preview_result("invalid", false, false);
+        }
+        std::memset(&scene, 0, sizeof(scene));
         return;
     }
     if (application_setup == nullptr) {
@@ -1396,7 +1550,7 @@ void start_setup_after_ui_ready()
         if (xTaskCreatePinnedToCore(
                 diagnostic_control_task,
                 "diagnostic_control",
-                4'096,
+                8'192,
                 nullptr,
                 1,
                 nullptr,

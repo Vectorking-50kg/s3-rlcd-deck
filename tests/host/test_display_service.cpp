@@ -108,6 +108,11 @@ void owns_the_frame_until_async_completion()
     const deck_display_panel_adapter_t adapter = {start_transfer, &panel};
     deck_display_service_t *display = deck_display_service_create(adapter, 50);
     assert(display != nullptr);
+    std::array<uint8_t, DECK_DISPLAY_FRAME_BYTES> captured{};
+    assert(!deck_display_service_copy_successful(display, captured.data(), captured.size()));
+    assert(!deck_display_service_copy_successful(nullptr, captured.data(), captured.size()));
+    assert(!deck_display_service_copy_successful(display, nullptr, captured.size()));
+    assert(!deck_display_service_copy_successful(display, captured.data(), captured.size() - 1));
 
     const uint16_t black = 0x0000;
     const uint16_t white = 0xffff;
@@ -123,6 +128,8 @@ void owns_the_frame_until_async_completion()
 
     panel.complete();
     assert(deck_display_service_poll(display, 111) == DECK_DISPLAY_COMPLETED);
+    assert(deck_display_service_copy_successful(display, captured.data(), captured.size()));
+    assert(captured == panel.completed_frame);
     assert(deck_display_service_update(display, top_left, &white, 1) == DECK_DISPLAY_UPDATED);
     assert(deck_display_service_submit(display, 112) == DECK_DISPLAY_SUBMITTED);
     assert(panel.frame[74] == 0xff);

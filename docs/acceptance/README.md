@@ -32,3 +32,13 @@ The command returns zero only when every release gate passes. Missing, failed, d
 wrong-commit, wrong-toolchain, malformed, reset, watchdog, display, I²C, Setup, or
 unrecovered Wi-Fi evidence produces a `BLOCKED` report and a non-zero exit status. Never
 copy raw logs, Wi-Fi passwords, credentials, or private device data into this directory.
+
+Deck UI logical-frame evidence is stored under `ui-frames/<firmware-commit>/`. Each set is
+captured from the display service's last successfully transferred 15,000-byte RLCD frame,
+contains deterministic sample data only, and is bound to the exact firmware and capture-tool
+commits by `manifest.json`. `test_deck_ui_frame_evidence.py` verifies hashes, PNG structure,
+400×300 dimensions, and strict black/white pixels. This evidence proves the rendered and
+transferred frame; it does not replace straight-on physical photos needed to verify panel
+contrast, difficult CJK strokes, reflections, bezel clipping, or refresh artifacts. The
+manifest therefore keeps `optical_photo_status` as `pending` until that independent gate is
+complete.
