@@ -366,8 +366,9 @@ boolean, or bounded integer fields. Host and firmware builds run the same fixtur
 `protocol/fixtures`.
 
 The `Snapshot Store` is the only stateful sink used by Companion Link for `snapshot.ai`.
-It replaces the in-memory document immediately after full validation, rejects future or
-regressing timestamps, and checkpoints through versioned candidate/two-slot records with
+It replaces the in-memory document immediately after full validation, allows at most five
+seconds of bounded queue/transport skew but rejects later future or regressing timestamps,
+and checkpoints through versioned candidate/two-slot records with
 length, CRC, readback verification, and an atomic active marker. The dedicated 128 KiB
 `snapshot_nvs` partition has room for three maximum 16 KiB records plus NVS replacement/GC
 overhead. A private worker owns Flash open, recovery reads, writes, and close, so Store creation

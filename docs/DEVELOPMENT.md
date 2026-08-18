@@ -971,7 +971,8 @@ Web 修改 ESP32 配置时使用 write-through：只有收到设备确认才显�
   fail-closed 到已提交记录。关闭时在 2 秒预算内排空已排队
   checkpoint；驱动仍阻塞时保留完整 owner 并允许幂等重试关闭。
 - Companion Link 只通过统一 message dispatch 把完整校验通过的 `snapshot.ai`
-  发布给 Snapshot Store；解析失败、过大、隐私边界、未来时间、时间回退或未知 major
+  发布给 Snapshot Store；独立心跳/快照队列只允许 5 秒有界传输偏差，解析失败、过大、
+  隐私边界、超出偏差的未来时间、时间回退或未知 major
   都不能覆盖最后有效快照。
 - Companion 离线不足 24 小时时 Snapshot Store 允许读取旧文档并标 `STALE`；达到
   24 小时、时钟无效或任一可信时间源低于其 high-water mark 时不向 UI 暴露文档/额度，

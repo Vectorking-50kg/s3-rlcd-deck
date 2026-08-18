@@ -206,14 +206,16 @@ bool present_model(UiContext *context)
 
 void receive_model_update(UiContext *context)
 {
-    deck_m0_view_model_t updated{};
-    if (xQueueReceive(context->model_updates, &updated, 0) != pdTRUE) {
+    const uint32_t refresh_count = context->model.refresh_count;
+    const uint64_t uptime_seconds = context->model.uptime_seconds;
+    const uint32_t minimum_free_heap_bytes =
+        context->model.minimum_free_heap_bytes;
+    if (xQueueReceive(context->model_updates, &context->model, 0) != pdTRUE) {
         return;
     }
-    updated.refresh_count = context->model.refresh_count;
-    updated.uptime_seconds = context->model.uptime_seconds;
-    updated.minimum_free_heap_bytes = context->model.minimum_free_heap_bytes;
-    context->model = updated;
+    context->model.refresh_count = refresh_count;
+    context->model.uptime_seconds = uptime_seconds;
+    context->model.minimum_free_heap_bytes = minimum_free_heap_bytes;
     context->model.firmware_version = context->firmware_version;
     (void)present_model(context);
 }

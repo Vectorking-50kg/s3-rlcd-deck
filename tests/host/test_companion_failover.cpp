@@ -101,6 +101,31 @@ void flapping_active_requires_one_continuous_offline_window()
     assert(action.profile_generation == current.generation);
 }
 
+void first_heartbeat_only_activates_a_generation_fenced_candidate()
+{
+    deck_companion_profiles_snapshot_t current = profiles();
+    assert(deck_companion_failover_classify_target(
+               &current,
+               current.active_profile_id,
+               current.generation
+           ) == DECK_COMPANION_FAILOVER_TARGET_ACTIVE);
+    assert(deck_companion_failover_classify_target(
+               &current,
+               current.profiles[1].profile_id,
+               current.generation
+           ) == DECK_COMPANION_FAILOVER_TARGET_CANDIDATE);
+    assert(deck_companion_failover_classify_target(
+               &current,
+               current.profiles[1].profile_id,
+               current.generation - 1
+           ) == DECK_COMPANION_FAILOVER_TARGET_STALE_GENERATION);
+    assert(deck_companion_failover_classify_target(
+               &current,
+               "sha256:missing",
+               current.generation
+           ) == DECK_COMPANION_FAILOVER_TARGET_INVALID);
+}
+
 void all_offline_rotates_once_then_returns_to_the_sticky_active()
 {
     deck_companion_failover_t failover{};
@@ -458,6 +483,7 @@ void fake_clock_and_transport_follow_manual_generation_changes()
 
 int main()
 {
+    first_heartbeat_only_activates_a_generation_fenced_candidate();
     flapping_active_requires_one_continuous_offline_window();
     all_offline_rotates_once_then_returns_to_the_sticky_active();
     successful_candidate_stays_sticky_but_manual_selection_wins();

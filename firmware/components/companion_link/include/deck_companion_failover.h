@@ -39,6 +39,24 @@ typedef struct {
     char target_profile_id[DECK_COMPANION_PROFILE_ID_CAPACITY];
 } deck_companion_failover_t;
 
+typedef enum {
+    DECK_COMPANION_FAILOVER_TARGET_INVALID = 0,
+    DECK_COMPANION_FAILOVER_TARGET_STALE_GENERATION,
+    DECK_COMPANION_FAILOVER_TARGET_ACTIVE,
+    DECK_COMPANION_FAILOVER_TARGET_CANDIDATE,
+} deck_companion_failover_target_t;
+
+/*
+ * Classifies the generation-fenced transport target at its first heartbeat.
+ * Reconnecting the already Active Profile must not create a new transaction;
+ * only a different candidate needs activation.
+ */
+deck_companion_failover_target_t deck_companion_failover_classify_target(
+    const deck_companion_profiles_snapshot_t *profiles,
+    const char *profile_id,
+    uint32_t expected_generation
+);
+
 /*
  * Advances the sticky failover policy using one monotonic event. Profile order
  * is the stable tie-break after descending priority and last-success.

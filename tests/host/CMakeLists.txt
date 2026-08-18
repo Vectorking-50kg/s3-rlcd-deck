@@ -184,6 +184,13 @@ deck_add_host_test(
         ../../firmware/components/transaction_store/include
 )
 deck_add_host_test(
+    test_companion_identity
+    SOURCES
+        test_companion_identity.cpp
+        ../../firmware/components/companion_profiles/deck_companion_identity.cpp
+    INCLUDE_DIRS ../../firmware/components/companion_profiles/include
+)
+deck_add_host_test(
     test_device_protocol
     SOURCES
         test_device_protocol.cpp

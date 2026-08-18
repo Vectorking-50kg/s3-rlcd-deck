@@ -318,6 +318,28 @@ void invalid_time_and_documents_preserve_the_last_valid_snapshot()
     deck_ai_snapshot_store_destroy(store);
 }
 
+void bounded_transport_skew_is_not_mistaken_for_a_future_snapshot()
+{
+    FakeStorage storage;
+    deck_ai_snapshot_store_t *store = create_store(&storage);
+    assert(store != nullptr);
+    const std::string within_skew = document_at("2026-08-13T12:00:04Z");
+    const std::string beyond_skew = document_at("2026-08-13T12:00:06Z");
+    const uint64_t trusted_utc = generated_at(within_skew) - 4'000;
+
+    assert(apply_and_wait(store, within_skew, trusted_utc) ==
+           DECK_AI_SNAPSHOT_STORE_ACCEPTED_MEMORY);
+    assert(deck_ai_snapshot_store_apply(
+               store,
+               beyond_skew.data(),
+               beyond_skew.size(),
+               trusted_utc
+           ) == DECK_AI_SNAPSHOT_STORE_INVALID_TIME);
+    assert(copy_snapshot(store, generated_at(within_skew), true).document ==
+           within_skew);
+    deck_ai_snapshot_store_destroy(store);
+}
+
 void offline_policy_hides_the_document_at_twenty_four_hours()
 {
     FakeStorage storage;
@@ -942,6 +964,7 @@ int main()
 {
     memory_updates_are_independent_of_flash_throttling();
     invalid_time_and_documents_preserve_the_last_valid_snapshot();
+    bounded_transport_skew_is_not_mistaken_for_a_future_snapshot();
     offline_policy_hides_the_document_at_twenty_four_hours();
     nvs_failure_keeps_new_memory_and_old_committed_flash();
     crc_corruption_recovers_previous_and_unknown_storage_schema_fails_closed();

@@ -161,6 +161,27 @@ bool profiles_changed(
 
 }  // namespace
 
+deck_companion_failover_target_t deck_companion_failover_classify_target(
+    const deck_companion_profiles_snapshot_t *profiles,
+    const char *profile_id,
+    uint32_t expected_generation
+)
+{
+    if (profiles == nullptr || profile_id == nullptr || profile_id[0] == '\0' ||
+        profiles->count > DECK_COMPANION_MAX_PROFILES ||
+        profile_index(profiles, profile_id) < 0) {
+        return DECK_COMPANION_FAILOVER_TARGET_INVALID;
+    }
+    if (profiles->generation != expected_generation) {
+        return DECK_COMPANION_FAILOVER_TARGET_STALE_GENERATION;
+    }
+    if (profiles->has_active &&
+        std::strcmp(profiles->active_profile_id, profile_id) == 0) {
+        return DECK_COMPANION_FAILOVER_TARGET_ACTIVE;
+    }
+    return DECK_COMPANION_FAILOVER_TARGET_CANDIDATE;
+}
+
 bool deck_companion_failover_advance(
     deck_companion_failover_t *failover,
     const deck_companion_profiles_snapshot_t *profiles,

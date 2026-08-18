@@ -6,6 +6,7 @@ CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=8192
 CONFIG_FREERTOS_HZ=1000
 CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 CONFIG_USJ_ENABLE_USB_SERIAL_JTAG=y
@@ -13,6 +14,21 @@ CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+# Keep the 4 KiB TLS egress record buffer in internal RAM while routing larger
+# TLS working allocations and the 16 KiB ingress record buffer to PSRAM. This
+# leaves enough internal memory for the long-lived Device Link after the rest of
+# the firmware services start, without placing its outbound bearer Token in the
+# external ingress buffer.
+CONFIG_MBEDTLS_DEFAULT_MEM_ALLOC=y
+CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN=y
+CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=16384
+CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
+# ESP32-S3 hardware AES requires an internal DMA bounce buffer when TLS records
+# live in PSRAM. The fully initialized application cannot guarantee even that
+# 1600-byte contiguous DMA allocation, so use bounded software AES for the
+# low-throughput Device Link instead of dropping authenticated heartbeats.
+# CONFIG_MBEDTLS_HARDWARE_AES is not set
+# CONFIG_MBEDTLS_AES_USE_INTERRUPT is not set
 # Pairing performs one certificate-discovery request only inside the random,
 # WPA2-protected Setup AP. Normal Device Link WSS always supplies pinned DER.
 CONFIG_ESP_TLS_INSECURE=y

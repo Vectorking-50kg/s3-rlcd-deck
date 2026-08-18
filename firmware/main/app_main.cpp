@@ -212,6 +212,9 @@ constexpr EventBits_t kSerialViewTaskReadyBit = BIT0;
 constexpr EventBits_t kSerialViewTaskStoppedBit = BIT1;
 constexpr EventBits_t kApplicationUiReadyBit = BIT0;
 constexpr EventBits_t kApplicationUiFailedBit = BIT1;
+// Snapshot JSON projection exceeds 4 KiB on the real Xtensa call path even
+// though its large DTOs live in PSRAM. Keep the Wi-Fi-calling task internal.
+constexpr uint32_t kAiPageTaskStackBytes = 8'192;
 constexpr TickType_t kSerialViewPollTicks = pdMS_TO_TICKS(100);
 constexpr TickType_t kSerialViewLifecycleTicks = pdMS_TO_TICKS(2'000);
 
@@ -889,7 +892,7 @@ AiPageTaskContext *start_ai_page_task(deck_companion_link_t *link)
         xTaskCreatePinnedToCore(
             ai_page_task,
             "ai_page_model",
-            4'096,
+            kAiPageTaskStackBytes,
             context,
             2,
             &context->task,

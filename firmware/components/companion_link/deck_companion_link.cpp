@@ -34,7 +34,9 @@
 
 namespace {
 
-constexpr uint32_t kTaskStackBytes = 8'192;
+// The owner calls through esp_websocket_client_start during TLS setup. An
+// 8 KiB stack overflows on ESP-IDF 6.0.2 before the first authenticated hello.
+constexpr uint32_t kTaskStackBytes = 12'288;
 constexpr UBaseType_t kTaskPriority = 2;
 constexpr TickType_t kPollTicks = pdMS_TO_TICKS(10);
 constexpr TickType_t kSendTimeoutTicks = pdMS_TO_TICKS(2'000);
@@ -1236,24 +1238,40 @@ bool accept_heartbeat(
         return false;
     }
     if (first_valid_heartbeat) {
-        const deck_companion_profile_update_result_t activated =
-            deck_companion_profiles_activate_on_success(
-                link->profiles,
-                link->secret->profile_id,
-                link->target_profile_generation,
-                heartbeat.utc_unix_ms
-            );
-        if (activated == DECK_COMPANION_PROFILE_STALE_GENERATION) {
-            return refresh_profile(link, now);
-        }
-        if (activated != DECK_COMPANION_PROFILE_UPDATED) {
-            increment_error(link);
-            return false;
-        }
         deck_companion_profiles_snapshot_t profiles{};
         if (!deck_companion_profiles_snapshot(link->profiles, &profiles)) {
             increment_error(link);
             return false;
+        }
+        const deck_companion_failover_target_t target =
+            deck_companion_failover_classify_target(
+                &profiles,
+                link->secret->profile_id,
+                link->target_profile_generation
+            );
+        if (target == DECK_COMPANION_FAILOVER_TARGET_STALE_GENERATION) {
+            return refresh_profile(link, now);
+        }
+        if (target == DECK_COMPANION_FAILOVER_TARGET_INVALID) {
+            increment_error(link);
+            return false;
+        }
+        if (target == DECK_COMPANION_FAILOVER_TARGET_CANDIDATE) {
+            const deck_companion_profile_update_result_t activated =
+                deck_companion_profiles_activate_on_success(
+                    link->profiles,
+                    link->secret->profile_id,
+                    link->target_profile_generation,
+                    heartbeat.utc_unix_ms
+                );
+            if (activated == DECK_COMPANION_PROFILE_STALE_GENERATION) {
+                return refresh_profile(link, now);
+            }
+            if (activated != DECK_COMPANION_PROFILE_UPDATED ||
+                !deck_companion_profiles_snapshot(link->profiles, &profiles)) {
+                increment_error(link);
+                return false;
+            }
         }
         link->profiles_snapshot = profiles;
         link->has_profiles_snapshot = true;
