@@ -322,6 +322,23 @@ target_compile_definitions(
     test_pairing_v2_contract
     PRIVATE DECK_REPOSITORY_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../.."
 )
+deck_add_host_test(
+    test_pairing_v2_transaction
+    SOURCES
+        test_pairing_v2_transaction.cpp
+        ../../firmware/components/lan_pairing/deck_pairing_v2_contract.cpp
+        ../../firmware/components/lan_pairing/deck_pairing_v2_transaction.cpp
+        ../../firmware/components/companion_profiles/deck_companion_profiles.cpp
+        ../../firmware/components/transaction_store/deck_transaction_store.cpp
+    INCLUDE_DIRS
+        ../../firmware/components/lan_pairing/include
+        ../../firmware/components/companion_profiles/include
+        ../../firmware/components/transaction_store/include
+)
+target_compile_definitions(
+    test_pairing_v2_transaction
+    PRIVATE DECK_REPOSITORY_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../.."
+)
 
 add_test(
     NAME hil_boot_smoke_replay

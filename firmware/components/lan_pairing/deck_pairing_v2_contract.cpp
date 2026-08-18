@@ -1,5 +1,7 @@
 #include "deck_pairing_v2_contract.h"
 
+#include <cinttypes>
+#include <cstdio>
 #include <cstring>
 #include <new>
 
@@ -224,6 +226,22 @@ bool copy_span(Span source, char *output, size_t capacity)
     }
     std::memcpy(output, source.data, source.size);
     output[source.size] = '\0';
+    return true;
+}
+
+bool bounded_span(const char *value, size_t capacity, Span *output)
+{
+    if (value == nullptr || capacity == 0 || output == nullptr) {
+        return false;
+    }
+    size_t size = 0;
+    while (size < capacity && value[size] != '\0') {
+        ++size;
+    }
+    if (size == 0 || size == capacity) {
+        return false;
+    }
+    *output = {value, size};
     return true;
 }
 
@@ -829,7 +847,12 @@ bool validate_message(
                ) &&
                message->profile_generation != 0 &&
                string_field(fields, count, "transcript_sha256", &transcript) && digest(transcript) &&
-               copy_span(profile, message->profile_id, sizeof(message->profile_id));
+               copy_span(profile, message->profile_id, sizeof(message->profile_id)) &&
+               copy_span(
+                   transcript,
+                   message->transcript_sha256,
+                   sizeof(message->transcript_sha256)
+               );
     }
     if (span_equal(message_type, "pairing.status_request")) {
         static constexpr const char *names[] = {
@@ -854,7 +877,12 @@ bool validate_message(
                string_field(fields, count, "error_code", &error) && error_code(error) &&
                string_field(fields, count, "transcript_sha256", &transcript) && digest(transcript) &&
                copy_span(state_value, message->state, sizeof(message->state)) &&
-               copy_span(error, message->error_code, sizeof(message->error_code));
+               copy_span(error, message->error_code, sizeof(message->error_code)) &&
+               copy_span(
+                   transcript,
+                   message->transcript_sha256,
+                   sizeof(message->transcript_sha256)
+               );
     }
     if (span_equal(message_type, "pairing.cancel")) {
         static constexpr const char *names[] = {
@@ -909,6 +937,137 @@ void deck_pairing_v2_contract_clear(deck_pairing_v2_message_t *message)
     if (message != nullptr) {
         secure_clear(message, sizeof(*message));
     }
+}
+
+bool deck_pairing_v2_contract_encode(
+    const deck_pairing_v2_message_t *message,
+    char *document,
+    size_t document_capacity,
+    size_t *document_size
+)
+{
+    if (document != nullptr && document_capacity != 0) {
+        secure_clear(document, document_capacity);
+    }
+    if (message == nullptr || document == nullptr || document_capacity == 0 ||
+        document_size == nullptr) {
+        return false;
+    }
+    *document_size = 0;
+    Span session{};
+    Span transaction{};
+    if (!bounded_span(message->common.session_id, sizeof(message->common.session_id), &session) ||
+        !lowercase_hex(session, 32) ||
+        !bounded_span(
+            message->common.transaction_id,
+            sizeof(message->common.transaction_id),
+            &transaction
+        ) ||
+        !lowercase_hex(transaction, 32)) {
+        return false;
+    }
+    int written = -1;
+    if (message->type == DECK_PAIRING_V2_MESSAGE_COMMIT_READY &&
+        message->common.sequence == 2U) {
+        Span window{};
+        Span companion{};
+        Span deck{};
+        Span id{};
+        Span identity{};
+        Span profile{};
+        Span transcript{};
+        if (!bounded_span(
+                message->commit_ready.window_nonce,
+                sizeof(message->commit_ready.window_nonce),
+                &window
+            ) ||
+            !lowercase_hex(window, 32) ||
+            !bounded_span(
+                message->commit_ready.companion_nonce,
+                sizeof(message->commit_ready.companion_nonce),
+                &companion
+            ) ||
+            !lowercase_hex(companion, 32) ||
+            !bounded_span(
+                message->commit_ready.deck_nonce,
+                sizeof(message->commit_ready.deck_nonce),
+                &deck
+            ) ||
+            !lowercase_hex(deck, 32) ||
+            !bounded_span(message->commit_ready.device_id, sizeof(message->commit_ready.device_id), &id) ||
+            !device_id(id) ||
+            !bounded_span(
+                message->commit_ready.device_identity,
+                sizeof(message->commit_ready.device_identity),
+                &identity
+            ) ||
+            !device_identity(identity) ||
+            !bounded_span(
+                message->commit_ready.profile_id,
+                sizeof(message->commit_ready.profile_id),
+                &profile
+            ) ||
+            !digest(profile) ||
+            !bounded_span(
+                message->commit_ready.transcript_sha256,
+                sizeof(message->commit_ready.transcript_sha256),
+                &transcript
+            ) ||
+            !digest(transcript)) {
+            return false;
+        }
+        written = std::snprintf(
+            document,
+            document_capacity,
+            "{\"type\":\"pairing.commit_ready\",\"protocol_version\":2,"
+            "\"session_id\":\"%s\",\"transaction_id\":\"%s\",\"sequence\":2,"
+            "\"window_nonce\":\"%s\",\"companion_nonce\":\"%s\","
+            "\"deck_nonce\":\"%s\",\"device_id\":\"%s\",\"device_identity\":\"%s\","
+            "\"profile_id\":\"%s\",\"transcript_sha256\":\"%s\"}",
+            message->common.session_id,
+            message->common.transaction_id,
+            message->commit_ready.window_nonce,
+            message->commit_ready.companion_nonce,
+            message->commit_ready.deck_nonce,
+            message->commit_ready.device_id,
+            message->commit_ready.device_identity,
+            message->commit_ready.profile_id,
+            message->commit_ready.transcript_sha256
+        );
+    } else if (message->type == DECK_PAIRING_V2_MESSAGE_COMMIT_RECEIPT &&
+               message->common.sequence == 4U && message->profile_generation != 0U) {
+        Span profile{};
+        Span transcript{};
+        if (!bounded_span(message->profile_id, sizeof(message->profile_id), &profile) ||
+            !digest(profile) ||
+            !bounded_span(
+                message->transcript_sha256,
+                sizeof(message->transcript_sha256),
+                &transcript
+            ) ||
+            !digest(transcript)) {
+            return false;
+        }
+        written = std::snprintf(
+            document,
+            document_capacity,
+            "{\"type\":\"pairing.commit_receipt\",\"protocol_version\":2,"
+            "\"session_id\":\"%s\",\"transaction_id\":\"%s\",\"sequence\":4,"
+            "\"profile_id\":\"%s\",\"profile_generation\":%" PRIu32 ","
+            "\"transcript_sha256\":\"%s\"}",
+            message->common.session_id,
+            message->common.transaction_id,
+            message->profile_id,
+            message->profile_generation,
+            message->transcript_sha256
+        );
+    }
+    if (written <= 0 || static_cast<size_t>(written) >= document_capacity) {
+        secure_clear(document, document_capacity);
+        return false;
+    }
+    *document_size = static_cast<size_t>(written);
+    return true;
 }
 
 bool deck_pairing_v2_contract_transcript_sha256(

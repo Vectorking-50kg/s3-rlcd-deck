@@ -110,7 +110,11 @@ bool serial_page_visible(const deck_serial_view_model_t &serial)
 bool pairing_page_visible(const deck_pairing_v2_view_model_t &pairing)
 {
     return pairing.state == DECK_PAIRING_V2_ACTIVE ||
-           pairing.state == DECK_PAIRING_V2_PROOF_VERIFIED;
+           pairing.state == DECK_PAIRING_V2_AUTHENTICATING ||
+           pairing.state == DECK_PAIRING_V2_PROOF_VERIFIED ||
+           pairing.state == DECK_PAIRING_V2_PAIRED ||
+           pairing.state == DECK_PAIRING_V2_EXPIRED ||
+           pairing.state == DECK_PAIRING_V2_ERROR;
 }
 
 bool pairing_equal(
@@ -130,9 +134,56 @@ bool format_pairing_page(
     size_t buffer_size
 )
 {
-    if (!pairing_page_visible(pairing) || buffer == nullptr || buffer_size == 0 ||
-        strlen(pairing.code) != 6) {
+    if (!pairing_page_visible(pairing) || buffer == nullptr || buffer_size == 0) {
         return false;
+    }
+    if (pairing.state == DECK_PAIRING_V2_PAIRED ||
+        pairing.state == DECK_PAIRING_V2_EXPIRED ||
+        pairing.state == DECK_PAIRING_V2_ERROR) {
+        const char *headline = pairing.state == DECK_PAIRING_V2_PAIRED
+                                   ? "PAIRING COMPLETE"
+                                   : pairing.state == DECK_PAIRING_V2_EXPIRED
+                                         ? "PAIRING EXPIRED"
+                                         : "PAIRING FAILED";
+        const char *detail = pairing.state == DECK_PAIRING_V2_PAIRED
+                                 ? "Companion authenticated"
+                                 : "No trust was changed";
+        const char *action = pairing.state == DECK_PAIRING_V2_PAIRED
+                                 ? "The secure link is ready"
+                                 : "Press BOOT to try again";
+        const int paired_size = snprintf(
+            buffer,
+            buffer_size,
+            "PAIRING V2       SAME LAN\n"
+            "--------------------------------\n"
+            "%s\n"
+            "\n"
+            "%s\n"
+            "%s\n"
+            "\n"
+            "%s\n"
+            "\n"
+            "You may close Pair a Deck\n"
+            "\n"
+            "--------------------------------\n"
+            "TX DISARMED",
+            headline,
+            detail,
+            pairing.state == DECK_PAIRING_V2_PAIRED
+                ? "Profile saved safely"
+                : "The previous Profile remains",
+            action
+        );
+        return paired_size >= 0 && static_cast<size_t>(paired_size) < buffer_size;
+    }
+    if (strlen(pairing.code) != 6) {
+        return false;
+    }
+    const char *status = "WAITING FOR CODE";
+    if (pairing.state == DECK_PAIRING_V2_AUTHENTICATING) {
+        status = "VERIFYING COMPANION";
+    } else if (pairing.state == DECK_PAIRING_V2_PROOF_VERIFIED) {
+        status = "SECURE LINK VERIFIED";
     }
     const int size = snprintf(
         buffer,
@@ -141,7 +192,7 @@ bool format_pairing_page(
         "--------------------------------\n"
         "CODE\n"
         "            %.3s %.3s\n"
-        "\n"
+        "BOOT: cancel\n"
         "Enter this code on your Mac\n"
         "Companion > Pair a Deck\n"
         "\n"
@@ -152,9 +203,7 @@ bool format_pairing_page(
         "TX DISARMED",
         pairing.code,
         pairing.code + 3,
-        pairing.state == DECK_PAIRING_V2_PROOF_VERIFIED
-            ? "SECURITY PROOF VERIFIED"
-            : "WAITING FOR CODE",
+        status,
         pairing.remaining_seconds
     );
     return size >= 0 && static_cast<size_t>(size) < buffer_size;

@@ -324,6 +324,7 @@ void pairing_code_has_highest_page_priority_and_is_ephemeral()
     assert(page.find("PAIRING V2       SAME LAN") != std::string::npos);
     assert(page.find("123 456") != std::string::npos);
     assert(page.find("Expires in 87 s") != std::string::npos);
+    assert(page.find("BOOT: cancel") != std::string::npos);
     assert(page.find("WEB TX") == std::string::npos);
 
     deck_m0_view_model_t hidden_change = model;
@@ -332,11 +333,31 @@ void pairing_code_has_highest_page_priority_and_is_ephemeral()
     ++hidden_change.pairing_v2.remaining_seconds;
     assert(!deck_m0_view_model_equal(&model, &hidden_change));
 
+    model.pairing_v2.state = DECK_PAIRING_V2_AUTHENTICATING;
+    assert(deck_m0_view_model_format_active_page(
+        &model, text, sizeof(text), &ai_page_visible
+    ));
+    assert(std::string(text).find("VERIFYING COMPANION") != std::string::npos);
+
     model.pairing_v2.state = DECK_PAIRING_V2_PROOF_VERIFIED;
     assert(deck_m0_view_model_format_active_page(
         &model, text, sizeof(text), &ai_page_visible
     ));
-    assert(std::string(text).find("SECURITY PROOF VERIFIED") != std::string::npos);
+    assert(std::string(text).find("SECURE LINK VERIFIED") != std::string::npos);
+
+    model.pairing_v2.state = DECK_PAIRING_V2_PAIRED;
+    std::memset(model.pairing_v2.code, 0, sizeof(model.pairing_v2.code));
+    assert(deck_m0_view_model_format_active_page(
+        &model, text, sizeof(text), &ai_page_visible
+    ));
+    assert(std::string(text).find("PAIRING COMPLETE") != std::string::npos);
+
+    model.pairing_v2.state = DECK_PAIRING_V2_EXPIRED;
+    assert(deck_m0_view_model_format_active_page(
+        &model, text, sizeof(text), &ai_page_visible
+    ));
+    assert(std::string(text).find("PAIRING EXPIRED") != std::string::npos);
+    assert(std::string(text).find("No trust was changed") != std::string::npos);
 
     model.pairing_v2.state = DECK_PAIRING_V2_IDLE;
     std::memset(model.pairing_v2.code, 0, sizeof(model.pairing_v2.code));

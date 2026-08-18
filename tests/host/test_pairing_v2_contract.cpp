@@ -227,6 +227,49 @@ void canonical_transcript_matches_the_cross_end_kat()
     deck_pairing_v2_contract_clear(&ready);
 }
 
+void deck_owned_messages_encode_and_round_trip()
+{
+    const deck_pairing_v2_crypto_t crypto{fixture_sha256, nullptr};
+    for (const char *name : {"valid-commit-ready.json", "valid-commit-receipt.json"}) {
+        const std::string source = fixture(name);
+        deck_pairing_v2_message_t message{};
+        assert(deck_pairing_v2_contract_decode(
+            source.data(), source.size(), &crypto, &message
+        ));
+        char encoded[DECK_PAIRING_V2_MAX_DOCUMENT_BYTES]{};
+        size_t encoded_size = 0;
+        assert(deck_pairing_v2_contract_encode(
+            &message,
+            encoded,
+            sizeof(encoded),
+            &encoded_size
+        ));
+        deck_pairing_v2_message_t round_trip{};
+        assert(deck_pairing_v2_contract_decode(
+            encoded,
+            encoded_size,
+            &crypto,
+            &round_trip
+        ));
+        assert(round_trip.type == message.type);
+        assert(std::strcmp(round_trip.common.session_id, message.common.session_id) == 0);
+        if (message.type == DECK_PAIRING_V2_MESSAGE_COMMIT_READY) {
+            assert(std::strcmp(
+                round_trip.commit_ready.transcript_sha256,
+                message.commit_ready.transcript_sha256
+            ) == 0);
+        } else {
+            assert(round_trip.profile_generation == message.profile_generation);
+            assert(std::strcmp(
+                round_trip.transcript_sha256,
+                message.transcript_sha256
+            ) == 0);
+        }
+        deck_pairing_v2_contract_clear(&message);
+        deck_pairing_v2_contract_clear(&round_trip);
+    }
+}
+
 }  // namespace
 
 int main()
@@ -235,5 +278,6 @@ int main()
     credentials_are_owned_and_cleared();
     malformed_documents_fail_closed();
     canonical_transcript_matches_the_cross_end_kat();
+    deck_owned_messages_encode_and_round_trip();
     return 0;
 }

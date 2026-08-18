@@ -85,6 +85,7 @@ typedef struct {
     char state[16];
     char error_code[32];
     char profile_id[DECK_PAIRING_V2_DIGEST_CAPACITY];
+    char transcript_sha256[DECK_PAIRING_V2_DIGEST_CAPACITY];
     uint32_t profile_generation;
 } deck_pairing_v2_message_t;
 
@@ -96,6 +97,14 @@ bool deck_pairing_v2_contract_decode(
 );
 
 void deck_pairing_v2_contract_clear(deck_pairing_v2_message_t *message);
+
+/* Encodes Deck-owned commit-ready or commit-receipt messages canonically. */
+bool deck_pairing_v2_contract_encode(
+    const deck_pairing_v2_message_t *message,
+    char *document,
+    size_t document_capacity,
+    size_t *document_size
+);
 
 /* Computes the canonical transcript bound by commit-ready and commit. */
 bool deck_pairing_v2_contract_transcript_sha256(
