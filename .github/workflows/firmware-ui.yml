@@ -40,6 +40,9 @@ jobs:
     name: Host contracts and ESP-IDF 6.0.2
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
     container:
       image: espressif/idf:v6.0.2
       env:
@@ -49,16 +52,22 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Verify pinned toolchain
-        run: idf.py --version | grep -F "ESP-IDF v6.0.2"
+        run: |
+          source "$IDF_PATH/export.sh" >/dev/null
+          idf.py --version | grep -F "ESP-IDF v6.0.2"
 
       - name: Run Host and UI contracts
         run: ./tools/test_host.sh
 
       - name: Build development firmware
-        run: ./tools/idf.sh dev build
+        run: |
+          source "$IDF_PATH/export.sh" >/dev/null
+          ./tools/idf.sh dev build
 
       - name: Build release firmware
-        run: ./tools/idf.sh release build
+        run: |
+          source "$IDF_PATH/export.sh" >/dev/null
+          ./tools/idf.sh release build
 
       - name: Upload firmware images
         uses: actions/upload-artifact@v4
