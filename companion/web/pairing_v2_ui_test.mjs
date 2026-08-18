@@ -35,9 +35,16 @@ test("six-digit code and session presentation fail closed", () => {
 
 test("countdown is monotonic and clamps at zero", () => {
   const deadline = "2026-08-18T10:00:03.100Z";
-  assert.equal(pairing.secondsRemaining(deadline, Date.parse("2026-08-18T10:00:00Z")), 4);
+  const now = Date.parse("2026-08-18T10:00:00Z");
+  assert.equal(pairing.secondsRemaining(deadline, now), 4);
   assert.equal(pairing.secondsRemaining(deadline, Date.parse("2026-08-18T10:00:04Z")), 0);
   assert.equal(pairing.secondsRemaining("invalid"), 0);
+  assert.equal(pairing.candidateExpiryText(deadline, now), "匿名候选将在 4 秒后失效。");
+  assert.equal(
+    pairing.sessionExpiryText(deadline, now),
+    "本机会话最多保留 4 秒；请以 Deck 屏幕倒计时为准。验证码只会交给本机 Companion。",
+  );
+  assert.doesNotMatch(pairing.sessionExpiryText(deadline, now), /^配对窗口剩余/);
 });
 
 test("every stable backend failure has a local fail-closed explanation", () => {

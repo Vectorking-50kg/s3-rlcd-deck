@@ -34,6 +34,7 @@ func TestEmbeddedConsoleContainsCompleteChineseSchemeCWorkflows(t *testing.T) {
 			`$("#serial-preset-form").addEventListener`, "downloadSerialCapture",
 			"serialPresetOperationController", "serialPresetOperationIsCurrent", "scrubSerialPresetEditor",
 			"previewOTA", "applyOTA", "pollOTAStatus", "resetOTAPreview", "otaPreviewEpoch",
+			"candidateExpiryText", "sessionExpiryText",
 		},
 		"/serial-terminal.js": {
 			"S3DeckSerialTerminal", "createClient", "decodeFrame", "MAX_TRANSMIT_BYTES",
@@ -41,6 +42,7 @@ func TestEmbeddedConsoleContainsCompleteChineseSchemeCWorkflows(t *testing.T) {
 		"/pairing-v2-ui.js": {
 			"S3DeckPairingV2UI", "awaiting_code", "proving_link", "committing", "paired",
 			"authentication_failed", "storage_failure", "hub_unavailable", "link_failed", "validCode",
+			"匿名候选将在", "请以 Deck 屏幕倒计时为准",
 		},
 		"/vendor/xterm/xterm.js":           {"Terminal", "Uint8Array", "dispose"},
 		"/vendor/xterm/addon-fit.js":       {"FitAddon"},

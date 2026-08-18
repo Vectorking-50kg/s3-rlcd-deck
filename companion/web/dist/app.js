@@ -1135,11 +1135,6 @@ function setPairingV2Feedback(title, detail, kind = "neutral") {
   callout.className = `callout compact ${kind}`;
 }
 
-function pairingV2SecondsText(expiresAt) {
-  const remaining = window.S3DeckPairingV2UI.secondsRemaining(expiresAt);
-  return remaining > 0 ? `配对窗口剩余 ${remaining} 秒。验证码只会交给本机 Companion。` : "配对窗口正在过期。";
-}
-
 function renderPairingV2Candidates() {
   if (!state.authenticated || state.pairingV2.sessionRef) return;
   const candidates = window.S3DeckPairingV2UI.candidates(state.pairingV2.candidates);
@@ -1155,7 +1150,7 @@ function renderPairingV2Candidates() {
     const row = element("div", "pairing-candidate");
     const copy = element("div");
     copy.append(element("strong", "", candidate.label),
-      element("small", "", pairingV2SecondsText(candidate.expiresAt)));
+      element("small", "", window.S3DeckPairingV2UI.candidateExpiryText(candidate.expiresAt)));
     const button = element("button", "button primary", "选择并继续");
     button.type = "button";
     button.addEventListener("click", () => beginPairingV2Session(candidate.reference));
@@ -1180,7 +1175,7 @@ function renderPairingV2Session(view) {
   $("#pairing-v2-code-form").hidden = !awaitingCode;
   $("#pairing-v2-rescan").hidden = !presentation.terminal;
   $("#pairing-v2-cancel").textContent = presentation.terminal ? "关闭" : "取消配对";
-  $("#pairing-v2-countdown").textContent = pairingV2SecondsText(view.expires_at);
+  $("#pairing-v2-countdown").textContent = window.S3DeckPairingV2UI.sessionExpiryText(view.expires_at);
   if (awaitingCode) $("#pairing-v2-code").focus();
   if (presentation.terminal) {
     clearPairingV2Timers();
@@ -1191,7 +1186,7 @@ function renderPairingV2Session(view) {
   storePairingV2Session(view.session_ref);
   state.pairingV2.countdownTimer = window.setTimeout(() => {
     if (state.pairingV2.view?.session_ref === view.session_ref) {
-      $("#pairing-v2-countdown").textContent = pairingV2SecondsText(view.expires_at);
+      $("#pairing-v2-countdown").textContent = window.S3DeckPairingV2UI.sessionExpiryText(view.expires_at);
     }
   }, 1000);
   schedulePairingV2Poll();

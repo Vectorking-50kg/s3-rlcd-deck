@@ -683,6 +683,9 @@ Companion 使用本地 SQLite 保存最近 90 天的小时级用量、余额和�
 存储均不得出现验证码或凭据。Pairing v1 的 Setup 恢复页流程只在一个兼容版本内通过显式
 `/compat/pairing-v1` 入口支持旧固件；不得回退成默认流程。完整决定见
 [ADR 0026](adr/0026-bootstrap-companion-trust-with-lan-discovery-and-deck-displayed-pake.md)。
+候选倒计时仅表示浏览器不透明引用的有效期，Companion Session 倒计时仅表示本地上限；
+Deck 屏幕是 Pairing Window 和验证码截止时间的唯一权威。Web 不得把任一本地计时器标成
+Deck 配对窗口剩余时间。
 
 每个 Companion 使用独立 Token 和证书，可单独撤销。
 

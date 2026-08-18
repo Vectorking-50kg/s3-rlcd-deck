@@ -44,6 +44,18 @@
     return Math.max(0, Math.ceil((deadline - now) / 1000));
   }
 
+  function candidateExpiryText(expiresAt, now = Date.now()) {
+    const remaining = secondsRemaining(expiresAt, now);
+    return remaining > 0 ? `匿名候选将在 ${remaining} 秒后失效。` : "匿名候选正在失效。";
+  }
+
+  function sessionExpiryText(expiresAt, now = Date.now()) {
+    const remaining = secondsRemaining(expiresAt, now);
+    return remaining > 0 ?
+      `本机会话最多保留 ${remaining} 秒；请以 Deck 屏幕倒计时为准。验证码只会交给本机 Companion。` :
+      "本机会话正在过期；请确认 Deck 屏幕上的配对窗口仍然有效。";
+  }
+
   function candidates(values, now = Date.now()) {
     const safe = Array.isArray(values) ? values.filter((candidate) =>
       candidate && typeof candidate.candidate_ref === "string" && candidate.candidate_ref &&
@@ -79,5 +91,7 @@
     };
   }
 
-  return Object.freeze({ candidates, presentation, secondsRemaining, validCode });
+  return Object.freeze({
+    candidateExpiryText, candidates, presentation, secondsRemaining, sessionExpiryText, validCode,
+  });
 });

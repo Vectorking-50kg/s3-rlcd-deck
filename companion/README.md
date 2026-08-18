@@ -242,6 +242,9 @@ candidate/session references to the management Web, and submits credentials only
 Security2 PAKE channel after the user enters the code displayed on the Deck. Trust and Profile
 remain provisional until the exact new Device Link proves its pinned certificate, independent
 device Token, hello, and heartbeat. The Setup AP is not part of this flow.
+The browser's candidate countdown is only the lifetime of its opaque discovery reference, and the
+Companion session countdown is only a local upper bound. The Deck display is the authoritative
+Pairing Window and code deadline; the Web must never label either local timer as Deck time.
 
 On macOS, Companion publishes `_s3rlcd-hub._tcp.local.` through the native Bonjour
 `DNSServiceRegister` API on the selected physical LAN interface. It does not open a second UDP

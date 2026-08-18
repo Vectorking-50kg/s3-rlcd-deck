@@ -18,6 +18,9 @@ stable Device ID, MAC address, Pairing code, certificate fingerprint, Token, Wi-
 trust state. The Companion backend—not browser JavaScript—browses DNS-SD and gives the management
 Web an opaque candidate reference. Discovery therefore provides a route to a candidate, never
 identity or trust, and a manual-IP fallback must use the same authenticated protocol.
+The candidate reference lifetime and the Companion Session lifetime are local resource bounds,
+not observations of the Deck's remaining Pairing Window. The Deck display is authoritative for
+the Pairing Window and code deadline, and management UI copy must keep these clocks distinct.
 
 Selecting a candidate starts one Pairing Session. The Deck generates a uniform six-digit code with
 its cryptographic random source, displays it with a deadline, and retains only the short-lived
