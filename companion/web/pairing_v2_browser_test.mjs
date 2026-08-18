@@ -231,6 +231,7 @@ async function main() {
       await wait('initial session probe',()=>document.querySelector('#management-token')&&document.querySelector('#session-resume').hidden&&!document.querySelector('#login-view').hidden);
       document.querySelector('#management-token').value='local-test-token';document.querySelector('#login-form').requestSubmit();
       await wait('authenticated application',()=>!document.querySelector('#application').hidden);
+      await wait('Pairing capability',()=>!document.querySelector('#pair-deck').disabled);
       document.querySelector('#pair-deck').click();
       await wait('Pairing candidates',()=>document.querySelectorAll('.pairing-candidate').length===2);
       const labels=[...document.querySelectorAll('.pairing-candidate strong')].map(node=>node.textContent);
