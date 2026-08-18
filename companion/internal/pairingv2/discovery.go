@@ -68,8 +68,9 @@ type Route struct {
 // Selection is the backend-only route to an untrusted Pairing Window. It is
 // deliberately unavailable to the management browser.
 type Selection struct {
-	WindowID [windowIDBytes]byte
-	Routes   []Route
+	WindowID  [windowIDBytes]byte
+	Routes    []Route
+	ExpiresAt time.Time
 }
 
 type DiscoveryConfig struct {
@@ -208,7 +209,11 @@ func (discovery *Discovery) Resolve(reference string) (Selection, error) {
 		delete(discovery.entries, reference)
 		return Selection{}, ErrCandidateExpired
 	}
-	return Selection{WindowID: entry.windowID, Routes: append([]Route(nil), entry.routes...)}, nil
+	return Selection{
+		WindowID:  entry.windowID,
+		Routes:    append([]Route(nil), entry.routes...),
+		ExpiresAt: entry.expiresAt,
+	}, nil
 }
 
 func (discovery *Discovery) replaceCatalog(entries map[string]catalogEntry) {

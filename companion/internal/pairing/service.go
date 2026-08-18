@@ -135,6 +135,16 @@ type ProvisionalTrustRequest struct {
 	ExpiresAt       time.Time
 }
 
+// ProvisionalMaterial is the one-use credential bundle sent only through an
+// authenticated Pairing v2 Security2 channel. It must never be returned by a
+// management API or persisted before the exact Device Link proof succeeds.
+type ProvisionalMaterial struct {
+	Token                  string
+	CertificateFingerprint string
+	CertificateDER         string
+	ProtocolVersion        int
+}
+
 type IssuedCode struct {
 	Code      string    `json:"code"`
 	ExpiresAt time.Time `json:"expires_at"`
@@ -302,6 +312,26 @@ func (service *Service) StageProvisional(ctx context.Context, request Provisiona
 	}
 	service.provisional[request.TransactionID] = staged
 	return nil
+}
+
+func (service *Service) IssueProvisionalMaterial(ctx context.Context) (ProvisionalMaterial, error) {
+	if err := ctx.Err(); err != nil {
+		return ProvisionalMaterial{}, err
+	}
+	tokenBytes, err := service.random.Bytes(deviceTokenBytes)
+	if err != nil || len(tokenBytes) != deviceTokenBytes {
+		clear(tokenBytes)
+		return ProvisionalMaterial{}, errors.New("generate provisional device token")
+	}
+	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
+	clear(tokenBytes)
+	if !deviceTokenPattern.MatchString(token) {
+		return ProvisionalMaterial{}, errors.New("generate canonical provisional device token")
+	}
+	return ProvisionalMaterial{
+		Token: token, CertificateFingerprint: service.fingerprint,
+		CertificateDER: service.certificateDER, ProtocolVersion: ProtocolVersion,
+	}, nil
 }
 
 // VerifyProvisional is the only verifier for the restricted first-link probe.
