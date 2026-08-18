@@ -13,6 +13,7 @@
 #include "deck_ota_service.h"
 #include "deck_serial_frame.h"
 #include "deck_serial_request_tracker.h"
+#include "deck_tls_clock.h"
 
 #include <atomic>
 #include <cstdio>
@@ -476,6 +477,12 @@ deck_companion_link_error_t start_transport(deck_companion_link_t *link)
 {
     if (link->secret == nullptr || !certificate_matches(*link->secret)) {
         return DECK_COMPANION_LINK_ERROR_TLS_PIN_MISMATCH;
+    }
+    if (!deck_tls_clock_prepare_pinned_certificate(
+            link->secret->certificate_der,
+            link->secret->certificate_der_size
+        )) {
+        return DECK_COMPANION_LINK_ERROR_TLS_TIME;
     }
     char uri[160]{};
     char headers[320]{};
@@ -1221,6 +1228,11 @@ bool accept_heartbeat(
         DECK_COMPANION_TRANSPORT_AI_SNAPSHOT
     );
     if (first_valid_heartbeat && link->secret == nullptr) {
+        return false;
+    }
+    if (first_valid_heartbeat &&
+        !deck_tls_clock_accept_trusted_utc(heartbeat.utc_unix_ms)) {
+        increment_error(link);
         return false;
     }
     if (first_valid_heartbeat) {

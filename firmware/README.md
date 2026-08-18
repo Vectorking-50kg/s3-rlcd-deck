@@ -316,7 +316,11 @@ automatically and an already paired Deck requires a short BOOT press. The Deck d
 six-digit code and exchanges credentials only after the Security2 PAKE confirms both peers. Profile
 and Companion Trust are staged until the exact new certificate-pinned, Token-authenticated Device
 Link proves its first heartbeat. Failure or expiry clears provisional secrets and leaves the old
-Profile set and Active Companion unchanged. Normal operation never
+Profile set and Active Companion unchanged. When a cold boot has no credible wall clock, the exact
+authenticated pinned certificate may seed TLS time only within its validity window and no earlier
+than the immutable firmware-build time; an already credible clock is never moved to admit a future
+or expired certificate. The first valid pinned-WSS heartbeat then supplies trusted UTC. Normal
+operation never
 uses discovery trust: the `companion_link` module initiates WSS with the exact stored
 certificate, device identity, and per-Deck Token. It sends `device.hello` first, accepts
 only strict version-1 heartbeat frames up to 16 KiB, marks the Companion offline after 30

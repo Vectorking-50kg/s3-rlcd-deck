@@ -297,6 +297,8 @@ const char *companion_link_error_name(deck_companion_link_error_t error)
             return "transport";
         case DECK_COMPANION_LINK_ERROR_TLS_PIN_MISMATCH:
             return "tls_pin_mismatch";
+        case DECK_COMPANION_LINK_ERROR_TLS_TIME:
+            return "tls_time";
         case DECK_COMPANION_LINK_ERROR_AUTH_REJECTED:
             return "auth_rejected";
         case DECK_COMPANION_LINK_ERROR_PROTOCOL_MAJOR_REJECTED:

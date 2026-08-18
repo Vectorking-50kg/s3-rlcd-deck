@@ -1,5 +1,6 @@
 #include "deck_lan_pairing.h"
 #include "deck_device_protocol.h"
+#include "deck_tls_clock.h"
 #include "deck_pairing_v2_transaction.h"
 
 #include <atomic>
@@ -564,6 +565,15 @@ bool run_link_attempt(
         delete event;
         return false;
     }
+    if (!deck_tls_clock_prepare_pinned_certificate(
+            request.secret.certificate_der,
+            request.secret.certificate_der_size
+        )) {
+        secure_clear(headers, headers_capacity);
+        std::free(headers);
+        delete event;
+        return false;
+    }
     const int uri_size = std::snprintf(
         uri,
         sizeof(uri),
@@ -650,6 +660,7 @@ bool run_link_attempt(
                     &heartbeat
                 );
             if (parsed == DECK_DEVICE_HEARTBEAT_VALID &&
+                deck_tls_clock_accept_trusted_utc(heartbeat.utc_unix_ms) &&
                 send_link_heartbeat(pairing, heartbeat.utc_unix_ms)) {
                 const std::lock_guard<std::mutex> lock(pairing->transaction_mutex);
                 proven = deck_pairing_v2_transaction_mark_link_proven(

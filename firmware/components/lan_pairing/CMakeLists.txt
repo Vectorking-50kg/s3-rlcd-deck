@@ -14,6 +14,7 @@ idf_component_register(
         mbedtls
         mdns
         protocomm
+        tls_clock
 )
 
 target_compile_features(${COMPONENT_LIB} PRIVATE cxx_std_17)

@@ -867,6 +867,18 @@ def test_secret_tracker_catches_value_leaked_before_it_was_known() -> None:
     assert not tracker.clean()
 
 
+def test_idf_kconfig_identifier_is_not_mistaken_for_a_device_token() -> None:
+    warning = (
+        "duplicate rename mapping: new target "
+        "CONFIG_BT_CTRL_COEX_PHY_CODED_TX_RX_TLIM_EN - last mapping is used"
+    )
+    assert m1.text_is_redacted(warning)
+    tracker = m1.SensitiveValueTracker()
+    assert not tracker.observe(warning)
+    assert tracker.clean()
+    assert not m1.text_is_redacted("unlabelled AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+
+
 def test_expected_setup_access_does_not_trip_secret_observation() -> None:
     raw = '{"type":"hil_setup_access","ssid":"Deck","password":"secret","address":"192.168.4.1"}'
     sanitized, _ = m1.sanitize_serial_line(raw)
@@ -930,6 +942,7 @@ if __name__ == "__main__":
     test_setup_restart_requires_explicit_inactive_observation()
     test_exact_link_error_gate_rejects_unrelated_failures()
     test_secret_tracker_catches_value_leaked_before_it_was_known()
+    test_idf_kconfig_identifier_is_not_mistaken_for_a_device_token()
     test_expected_setup_access_does_not_trip_secret_observation()
     test_preflight_uses_the_users_zsh_for_idf_activation()
     print("M1 acceptance contract passed")

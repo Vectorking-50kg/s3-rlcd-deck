@@ -224,6 +224,13 @@ deck_add_host_test(
     INCLUDE_DIRS ../../firmware/components/companion_link/include
 )
 deck_add_host_test(
+    test_tls_clock_policy
+    SOURCES
+        test_tls_clock_policy.cpp
+        ../../firmware/components/tls_clock/deck_tls_clock_policy.cpp
+    INCLUDE_DIRS ../../firmware/components/tls_clock
+)
+deck_add_host_test(
     test_ota_transaction
     SOURCES
         test_ota_transaction.cpp

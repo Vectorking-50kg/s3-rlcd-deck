@@ -40,6 +40,15 @@ may report successful Pairing until the exact new trust establishes an authentic
 heartbeat. Failures, expiry, restart, capacity exhaustion, storage errors, and lost receipts leave
 the previous Profile set and Active Companion unchanged, and all provisional secrets are cleared.
 
+TLS verification must also work after a cold boot when the board RTC has no backup time. The Deck
+does not disable certificate verification or trust unauthenticated network time. If its system wall
+clock is older than the immutable firmware-build lower bound, the exact PAKE-authenticated or
+committed pinned certificate may seed the clock only inside the intersection of its validity window
+and that build lower bound. A credible wall clock is never moved to make a future or expired
+certificate pass. The first heartbeat received through that exact pinned WSS transport then becomes
+the trusted UTC sample. This closes the first-connection time bootstrap without weakening the
+certificate, Token, or expiration checks.
+
 An unpaired Deck may open its first Pairing Window automatically for a bounded period after normal
 Wi-Fi becomes usable. A paired Deck requires local user action to open another Pairing Window, so
 arbitrary LAN clients cannot continually replace the display with Pairing requests. One Deck has

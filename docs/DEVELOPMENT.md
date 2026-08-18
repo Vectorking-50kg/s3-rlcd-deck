@@ -672,6 +672,9 @@ Companion 使用本地 SQLite 保存最近 90 天的小时级用量、余额和�
    Device Token、Companion 证书、固定指纹和 Device Hub DNS-SD identity。
 6. Deck Profile 与 Companion Trust 先暂存；只有新 Profile 建立证书固定、Token 认证的
    WSS hello/heartbeat 后才同时提交并显示成功。任何失败保留原 Profile 与 Active Companion。
+7. 若断电启动后系统墙钟早于固件提交时间，Deck 只能用 PAKE 已认证或已提交的精确固定证书
+   在其有效期内播种 TLS 临时时钟；已有可信墙钟不得为了未来或过期证书回拨。首个固定 WSS
+   心跳随后提供可信 UTC。
 
 浏览器只接触不透明候选/会话引用和用户当次输入的验证码。DNS-SD、日志、URL、诊断与持久
 存储均不得出现验证码或凭据。Pairing v1 的 Setup 恢复页流程只在一个兼容版本内通过显式
