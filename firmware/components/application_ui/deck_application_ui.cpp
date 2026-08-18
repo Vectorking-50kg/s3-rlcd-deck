@@ -1,4 +1,6 @@
 #include "deck_application_ui.h"
+#include "deck_ui_renderer.h"
+#include "deck_ui_scene.h"
 
 #include <atomic>
 #include <new>
@@ -18,8 +20,6 @@
 #include "lvgl.h"
 #pragma GCC diagnostic pop
 
-LV_FONT_DECLARE(lv_font_deck_m0_16);
-
 namespace {
 
 constexpr uint32_t kDrawRows = 24;
@@ -37,11 +37,10 @@ static_assert(
 struct UiContext {
     deck_display_service_t *display_service;
     deck_m0_view_model_t model;
-    deck_m0_view_model_t presented_model;
+    deck_ui_scene_t presented_scene;
     char firmware_version[32];
-    char page_text[1024];
     lv_display_t *lv_display;
-    lv_obj_t *page_label;
+    deck_ui_renderer_t *renderer;
     uint8_t *draw_buffer_a;
     uint8_t *draw_buffer_b;
     deck_application_ui_event_fn event_callback;
@@ -49,7 +48,7 @@ struct UiContext {
     QueueHandle_t model_updates;
     int64_t last_tick_us;
     uint64_t last_model_second;
-    bool presented_model_valid;
+    bool presented_scene_valid;
     bool ready_emitted;
     bool lvgl_initialized;
 };
@@ -81,9 +80,10 @@ void fail_task(UiContext *context)
 {
     active_model_updates.store(nullptr, std::memory_order_release);
     if (context->lv_display != nullptr) {
+        deck_ui_renderer_destroy(context->renderer);
+        context->renderer = nullptr;
         lv_display_delete(context->lv_display);
         context->lv_display = nullptr;
-        context->page_label = nullptr;
     }
     if (context->draw_buffer_a != nullptr) {
         heap_caps_free(context->draw_buffer_a);
@@ -178,29 +178,19 @@ void display_flush(lv_display_t *lv_display, const lv_area_t *area, uint8_t *pix
 
 bool present_model(UiContext *context)
 {
-    if (context->presented_model_valid &&
-        deck_m0_view_model_equal(&context->model, &context->presented_model)) {
-        return true;
-    }
-    bool show_ai_page = false;
-    const bool formatted = deck_m0_view_model_format_active_page(
-        &context->model,
-        context->page_text,
-        sizeof(context->page_text),
-        &show_ai_page
-    );
-    if (!formatted) {
+    deck_ui_scene_t scene{};
+    if (!deck_ui_scene_project(&context->model, &scene)) {
         return false;
     }
-    lv_obj_set_style_text_line_space(
-        context->page_label,
-        show_ai_page ? DECK_AI_PAGE_LINE_SPACING : 5,
-        LV_PART_MAIN
-    );
-    lv_label_set_text(context->page_label, context->page_text);
-    context->presented_model = context->model;
-    context->presented_model.firmware_version = context->firmware_version;
-    context->presented_model_valid = true;
+    if (context->presented_scene_valid &&
+        deck_ui_scene_equal(&scene, &context->presented_scene)) {
+        return true;
+    }
+    if (!deck_ui_renderer_present(context->renderer, &scene)) {
+        return false;
+    }
+    context->presented_scene = scene;
+    context->presented_scene_valid = true;
     return true;
 }
 
@@ -250,16 +240,10 @@ bool initialize_lvgl(UiContext *context)
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
 
-    context->page_label = lv_label_create(screen);
-    if (context->page_label == nullptr) {
+    context->renderer = deck_ui_renderer_create(screen);
+    if (context->renderer == nullptr) {
         return false;
     }
-    lv_obj_set_width(context->page_label, DECK_DISPLAY_WIDTH - 16);
-    lv_label_set_long_mode(context->page_label, LV_LABEL_LONG_MODE_WRAP);
-    lv_obj_set_style_text_font(context->page_label, &lv_font_deck_m0_16, LV_PART_MAIN);
-    lv_obj_set_style_text_color(context->page_label, lv_color_black(), LV_PART_MAIN);
-    lv_obj_set_style_text_line_space(context->page_label, 5, LV_PART_MAIN);
-    lv_obj_align(context->page_label, LV_ALIGN_TOP_LEFT, 8, DECK_AI_PAGE_TOP_OFFSET);
     return present_model(context);
 }
 

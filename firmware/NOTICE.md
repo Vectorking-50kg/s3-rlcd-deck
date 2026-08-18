@@ -6,9 +6,10 @@ Do not copy the example's NXP-proprietary generated UI or images, or its button 
 
 See ADR-0001 for the decision and rationale. Add a source-level SPDX and provenance note to every adapted file when display work begins.
 
-The M0 diagnostic font is a 1bpp subset generated from Source Han Sans SC,
+The Deck UI fonts are 1bpp subsets generated from Source Han Sans SC,
 Copyright 2014-2021 Adobe. The source font ships with the locked LVGL 9.4.0
 dependency and is licensed under the SIL Open Font License 1.1. The generated
-subset uses no Reserved Font Name and includes only ASCII plus the glyphs listed
-in `application_ui/assets/m0_glyphs.txt`. See
+subsets use no Reserved Font Name. The 16 px and 20 px faces include ASCII plus
+the glyphs listed in `application_ui/assets/m0_glyphs.txt`; the 32 px metric/code
+face contains printable ASCII only. See
 `application_ui/assets/SourceHanSansSC-OFL.txt`.

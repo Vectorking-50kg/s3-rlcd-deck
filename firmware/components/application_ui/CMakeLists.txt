@@ -3,7 +3,11 @@ idf_component_register(
         "deck_application_ui.cpp"
         "deck_ai_page_view_model.cpp"
         "deck_m0_view_model.cpp"
+        "deck_ui_renderer.cpp"
+        "deck_ui_scene.cpp"
         "assets/lv_font_deck_m0_16.c"
+        "assets/lv_font_deck_ui_20.c"
+        "assets/lv_font_deck_ui_32.c"
     INCLUDE_DIRS "include"
     REQUIRES ai_snapshot display esp_system esp_timer heap lvgl__lvgl
 )
@@ -21,5 +25,7 @@ set_source_files_properties(
     deck_application_ui.cpp
     deck_ai_page_view_model.cpp
     deck_m0_view_model.cpp
+    deck_ui_renderer.cpp
+    deck_ui_scene.cpp
     PROPERTIES COMPILE_OPTIONS "-Wall;-Wextra;-Werror;-Wconversion;-Wsign-conversion"
 )

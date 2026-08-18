@@ -72,6 +72,16 @@ target_compile_definitions(
     PRIVATE DECK_REPOSITORY_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../.."
 )
 deck_add_host_test(
+    test_deck_ui_scene
+    SOURCES
+        test_deck_ui_scene.cpp
+        ../../firmware/components/application_ui/deck_ai_page_view_model.cpp
+        ../../firmware/components/application_ui/deck_ui_scene.cpp
+    INCLUDE_DIRS
+        ../../firmware/components/ai_snapshot/include
+        ../../firmware/components/application_ui/include
+)
+deck_add_host_test(
     test_button_input
     SOURCES
         test_button_input.cpp
