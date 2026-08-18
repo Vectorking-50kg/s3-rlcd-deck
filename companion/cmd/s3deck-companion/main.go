@@ -58,6 +58,11 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	showVersion := flags.Bool("version", false, "print build identity and exit")
 	headless := flags.Bool("headless", false, "run in the foreground without the menu-bar or tray shell")
+	openConsole := flags.Bool(
+		"open-console",
+		false,
+		"open one short-lived authorized management console after desktop startup",
+	)
 	managementAddress := flags.String(
 		"management-address",
 		"127.0.0.1:7777",
@@ -109,6 +114,10 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	if flags.NArg() != 0 {
 		fmt.Fprintln(stderr, "s3deck-companion does not accept positional arguments")
+		return 2
+	}
+	if *headless && *openConsole {
+		fmt.Fprintln(stderr, "--open-console requires the native desktop shell")
 		return 2
 	}
 	serverProtocolVersion := 0
@@ -387,6 +396,9 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		desktop.OpenURL,
 	)
 	if err == nil {
+		if *openConsole {
+			shell.OpenConsole()
+		}
 		go func() {
 			<-ctx.Done()
 			shell.Close()

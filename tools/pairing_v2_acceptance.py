@@ -169,6 +169,13 @@ def companion_identity(executable: pathlib.Path, commit: str) -> bool:
     return observed == expected
 
 
+def companion_command(executable: pathlib.Path) -> list[str]:
+    # The native shell issues a one-time browser grant and opens the exact
+    # loopback management console. No long-lived management Token enters argv,
+    # stdout, evidence, or the user procedure.
+    return [str(executable), "--open-console"]
+
+
 def listener_is_free() -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as connection:
         connection.settimeout(0.25)
@@ -279,7 +286,7 @@ def main() -> int:
             5.0,
         )
         companion_process = subprocess.Popen(
-            [str(executable)],
+            companion_command(executable),
             cwd=REPOSITORY_ROOT,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

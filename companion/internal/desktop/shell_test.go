@@ -149,12 +149,34 @@ func TestShellMakesControllerActionFailuresVisible(t *testing.T) {
 
 	controller.startErr = nil
 	controller.status.State = companionruntime.StateReady
-	shell.openConsole()
+	shell.OpenConsole()
 	tray.mu.Lock()
 	status = tray.status
 	tray.mu.Unlock()
 	if status != "Error · browser unavailable" {
 		t.Fatalf("browser failure status = %q", status)
+	}
+}
+
+func TestShellCanOpenOneTimeConsoleBeforeTrayLoop(t *testing.T) {
+	controller := &fakeController{status: companionruntime.Status{State: companionruntime.StateReady}}
+	tray := newFakeTray()
+	opened := make(chan string, 1)
+	shell, err := NewShell(controller, tray, []byte("png"), func(address string) error {
+		opened <- address
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("NewShell() error = %v", err)
+	}
+	shell.OpenConsole()
+	select {
+	case address := <-opened:
+		if address == "" || controller.accessCount() != 1 {
+			t.Fatalf("opened = %q, accesses = %d", address, controller.accessCount())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("startup console action did not complete")
 	}
 }
 

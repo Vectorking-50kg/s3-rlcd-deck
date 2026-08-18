@@ -90,6 +90,13 @@ def test_user_readiness_gate_fails_closed_without_a_terminal() -> None:
         raise AssertionError("missing user readiness input was accepted")
 
 
+def test_formal_companion_opens_a_one_time_authorized_console() -> None:
+    executable = pathlib.Path("/private/verified/s3deck-companion")
+    assert pairing.companion_command(executable) == [
+        str(executable), "--open-console",
+    ]
+
+
 if __name__ == "__main__":
     test_complete_same_lan_transaction_passes()
     test_online_before_commit_and_setup_mode_fail_closed()
@@ -97,3 +104,4 @@ if __name__ == "__main__":
     test_pairing_diagnostic_is_strict_and_secret_free()
     test_user_readiness_gate_accepts_only_a_non_secret_enter()
     test_user_readiness_gate_fails_closed_without_a_terminal()
+    test_formal_companion_opens_a_one_time_authorized_console()
