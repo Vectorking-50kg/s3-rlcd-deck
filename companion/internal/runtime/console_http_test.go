@@ -60,8 +60,9 @@ func TestConsoleViewIsAuthenticatedStableAndPrivacySafe(t *testing.T) {
 		Providers    []json.RawMessage `json:"providers"`
 		Sessions     []json.RawMessage `json:"sessions"`
 		Capabilities struct {
-			Pairing bool `json:"pairing"`
-			Serial  bool `json:"serial"`
+			Pairing   bool `json:"pairing"`
+			PairingV2 bool `json:"pairing_v2"`
+			Serial    bool `json:"serial"`
 		} `json:"capabilities"`
 	}
 	if err = json.Unmarshal(body, &document); err != nil {
@@ -71,7 +72,7 @@ func TestConsoleViewIsAuthenticatedStableAndPrivacySafe(t *testing.T) {
 		document.Runtime.DeviceHubAddress == document.Runtime.DeviceHubAdvertisedAddress ||
 		document.Runtime.DeviceHubAdvertisedAddress != "192.168.50.8:7780" ||
 		document.Providers == nil || document.Sessions == nil || !document.Capabilities.Pairing ||
-		!document.Capabilities.Serial {
+		document.Capabilities.PairingV2 || !document.Capabilities.Serial {
 		t.Fatalf("console ViewModel = %#v", document)
 	}
 

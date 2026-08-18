@@ -28,6 +28,14 @@ type ProofResult struct {
 	Elapsed time.Duration
 }
 
+type endpointStatusError struct {
+	statusCode int
+}
+
+func (failure *endpointStatusError) Error() string {
+	return fmt.Sprintf("Pairing v2 endpoint rejected request with HTTP %d", failure.statusCode)
+}
+
 type ProofClient struct {
 	random io.Reader
 }
@@ -234,7 +242,7 @@ func postPairingEndpoint(
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maximumHTTPBody+1))
-		return nil, fmt.Errorf("Pairing v2 endpoint rejected request with HTTP %d", response.StatusCode)
+		return nil, &endpointStatusError{statusCode: response.StatusCode}
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, maximumHTTPBody+1))
 	if err != nil {

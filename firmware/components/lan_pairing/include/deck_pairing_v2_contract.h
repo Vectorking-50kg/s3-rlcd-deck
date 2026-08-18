@@ -98,7 +98,7 @@ bool deck_pairing_v2_contract_decode(
 
 void deck_pairing_v2_contract_clear(deck_pairing_v2_message_t *message);
 
-/* Encodes Deck-owned commit-ready or commit-receipt messages canonically. */
+/* Encodes Deck-owned commit-ready, commit-receipt, or error messages canonically. */
 bool deck_pairing_v2_contract_encode(
     const deck_pairing_v2_message_t *message,
     char *document,

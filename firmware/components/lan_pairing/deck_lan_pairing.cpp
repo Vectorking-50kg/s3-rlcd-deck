@@ -439,8 +439,7 @@ esp_err_t transaction_handler(
             &action
         );
     }
-    if (result != DECK_PAIRING_V2_TRANSACTION_OK || response_size == 0 ||
-        response_size > static_cast<size_t>(SSIZE_MAX)) {
+    if (response_size == 0 || response_size > static_cast<size_t>(SSIZE_MAX)) {
         secure_clear(response, DECK_PAIRING_V2_MAX_DOCUMENT_BYTES);
         std::free(response);
         return result == DECK_PAIRING_V2_TRANSACTION_STORAGE_FAILURE

@@ -46,6 +46,64 @@ bool exact_string(const char *left, const char *right)
     return difference == 0;
 }
 
+const char *transaction_error_code(deck_pairing_v2_transaction_result_t result)
+{
+    switch (result) {
+        case DECK_PAIRING_V2_TRANSACTION_CONFLICT:
+            return "busy";
+        case DECK_PAIRING_V2_TRANSACTION_LINK_REQUIRED:
+            return "link_failed";
+        case DECK_PAIRING_V2_TRANSACTION_CAPACITY_REACHED:
+            return "capacity_reached";
+        case DECK_PAIRING_V2_TRANSACTION_STORAGE_FAILURE:
+            return "storage_failure";
+        case DECK_PAIRING_V2_TRANSACTION_INVALID:
+            return "malformed";
+        default:
+            return nullptr;
+    }
+}
+
+bool encode_transaction_error(
+    const deck_pairing_v2_common_t &request,
+    deck_pairing_v2_transaction_result_t result,
+    char *response,
+    size_t response_capacity,
+    size_t *response_size
+)
+{
+    const char *code = transaction_error_code(result);
+    std::unique_ptr<deck_pairing_v2_message_t> failure(
+        new (std::nothrow) deck_pairing_v2_message_t{}
+    );
+    const bool valid = failure != nullptr && code != nullptr && request.sequence < UINT32_MAX &&
+                       copy_string(
+                           failure->common.session_id,
+                           sizeof(failure->common.session_id),
+                           request.session_id
+                       ) &&
+                       copy_string(
+                           failure->common.transaction_id,
+                           sizeof(failure->common.transaction_id),
+                           request.transaction_id
+                       ) &&
+                       copy_string(failure->error_code, sizeof(failure->error_code), code);
+    if (valid) {
+        failure->type = DECK_PAIRING_V2_MESSAGE_ERROR;
+        failure->common.sequence = request.sequence + 1U;
+    }
+    const bool encoded = valid && deck_pairing_v2_contract_encode(
+                                      failure.get(),
+                                      response,
+                                      response_capacity,
+                                      response_size
+                                  );
+    if (failure != nullptr) {
+        deck_pairing_v2_contract_clear(failure.get());
+    }
+    return encoded;
+}
+
 bool valid_hex_id(const char *value)
 {
     if (value == nullptr || std::strlen(value) != 32U) {
@@ -440,6 +498,7 @@ deck_pairing_v2_transaction_result_t deck_pairing_v2_transaction_exchange(
                               )) {
         return DECK_PAIRING_V2_TRANSACTION_INVALID;
     }
+    const deck_pairing_v2_common_t request_common = message->common;
     deck_pairing_v2_transaction_result_t result = DECK_PAIRING_V2_TRANSACTION_INVALID;
     if (message->type == DECK_PAIRING_V2_MESSAGE_CREDENTIALS) {
         result = accept_credentials(
@@ -462,6 +521,15 @@ deck_pairing_v2_transaction_result_t deck_pairing_v2_transaction_exchange(
     }
     if (message != nullptr) {
         deck_pairing_v2_contract_clear(message.get());
+    }
+    if (result != DECK_PAIRING_V2_TRANSACTION_OK) {
+        encode_transaction_error(
+            request_common,
+            result,
+            response,
+            response_capacity,
+            response_size
+        );
     }
     return result;
 }

@@ -23,6 +23,7 @@ type consoleCapabilities struct {
 	History            bool `json:"history"`
 	Backup             bool `json:"backup"`
 	Pairing            bool `json:"pairing"`
+	PairingV2          bool `json:"pairing_v2"`
 	Serial             bool `json:"serial"`
 	Updates            bool `json:"updates"`
 	Diagnostics        bool `json:"diagnostics"`
@@ -60,6 +61,7 @@ func (application *Runtime) consoleView(ctx context.Context) consoleViewResponse
 			History:            status.HistoryAvailable,
 			Backup:             application.backup != nil,
 			Pairing:            application.pairing != nil,
+			PairingV2:          application.pairingV2 != nil,
 			Serial:             application.serialHub != nil,
 			Updates:            application.ota != nil,
 			Diagnostics:        false,

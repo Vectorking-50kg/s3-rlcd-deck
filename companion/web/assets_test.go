@@ -17,16 +17,17 @@ func TestEmbeddedConsoleContainsCompleteChineseSchemeCWorkflows(t *testing.T) {
 			"provider-form", "management-token", "provider-headers", "map-reset-format",
 			"backup-mode", "backup-conflicts", "providers_only", "replace", "merge",
 			"ota-file", "ota-device-id", "ota-confirm", "ota-apply",
+			"pairing-v2-dialog", "pairing-v2-code", "扫描并配对", "六位码只显示在 Deck",
 			`role="alert"`, "console-alert", "providers-alert", "history-alert", "toast-alert-region",
 		},
 		"/app.js": {
 			"/api/v1/session/refresh", "/api/v1/console", "/api/v1/providers", "/api/v1/providers/order", "/test",
 			"/api/v1/history", "/api/v1/backups/export", "/api/v1/backups/preview",
 			"/api/v1/ota/preview", "/api/v1/ota/apply", "/api/v1/ota/status",
-			"/api/v1/pairing/codes", "renderDeckPreview", "showDialog", "visibilitychange",
+			"/api/v1/pairing-v2/scan", "/api/v1/pairing-v2/sessions", "renderDeckPreview", "showDialog", "visibilitychange",
 			"textContent", "TextEncoder", "reset_format", "keep_existing",
 			"keep_current", "use_backup", "resetBackupPreview", "#import-file",
-			"scrubSensitiveState", "issued.device_hub_address", "authEpoch", "TX 未启用",
+			"scrubSensitiveState", "resumePairingV2Session", "authEpoch", "TX 未启用",
 			"state.sync.console.lastSuccess", "providerDataWritable", "保留最后有效数据", "确认替换当前配置",
 			"/api/v1/serial/presets", "connectSerialObserver", "submitSerial",
 			`$("#serial-compose").addEventListener`, `$("#serial-lease").addEventListener`,
@@ -36,6 +37,10 @@ func TestEmbeddedConsoleContainsCompleteChineseSchemeCWorkflows(t *testing.T) {
 		},
 		"/serial-terminal.js": {
 			"S3DeckSerialTerminal", "createClient", "decodeFrame", "MAX_TRANSMIT_BYTES",
+		},
+		"/pairing-v2-ui.js": {
+			"S3DeckPairingV2UI", "awaiting_code", "proving_link", "committing", "paired",
+			"authentication_failed", "storage_failure", "link_failed", "validCode",
 		},
 		"/vendor/xterm/xterm.js":           {"Terminal", "Uint8Array", "dispose"},
 		"/vendor/xterm/addon-fit.js":       {"FitAddon"},
@@ -63,7 +68,7 @@ func TestEmbeddedConsoleContainsCompleteChineseSchemeCWorkflows(t *testing.T) {
 			}
 		}
 		firstPartyAsset := path == "/" || path == "/app.js" || path == "/app.css" ||
-			path == "/serial-terminal.js"
+			path == "/pairing-v2-ui.js" || path == "/serial-terminal.js"
 		if firstPartyAsset && (strings.Contains(string(body), "innerHTML") ||
 			strings.Contains(string(body), "localStorage") ||
 			strings.Contains(string(body), "navigator.clipboard") ||

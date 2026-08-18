@@ -21,10 +21,9 @@ constexpr char kPage[] =
     "<input name=offset type=number min=-15 max=15 step=.1 value=-4.0 required>"
     "</label> <button>Save offset</button></form>"
     "<h2>Wi-Fi recovery</h2><button id=clear type=button>Clear Wi-Fi...</button>"
-    "<h2>Companion pairing</h2><form id=pair><label>Hub host:port "
-    "<input name=hub_address maxlength=95 required></label> <label>Six-digit code "
-    "<input name=code inputmode=numeric pattern='[0-9]{6}' maxlength=6 required></label> "
-    "<button>Pair Companion</button></form><div id=companions></div>"
+    "<h2>Companion profiles</h2><p>Pairing v2 is completed from the Companion Web "
+    "console while both devices stay on the normal LAN. <a href=/compat/pairing-v1>"
+    "Legacy Pairing v1 compatibility...</a></p><div id=companions></div>"
     "<pre id=state>Loading...</pre>"
     "<script>function show(j){state.textContent=JSON.stringify(j,null,2);"
     "companions.replaceChildren();for(let p of(j.companions?.profiles||[])){let row="
@@ -48,13 +47,6 @@ constexpr char kPage[] =
     "let r=await fetch('/api/wifi',{method:'POST',headers:{'Content-Type':"
     "'application/x-www-form-urlencoded'},body:new URLSearchParams(new FormData(wifi))});"
     "show(await r.json());if(r.ok)setTimeout(load,500)};"
-    "pair.onsubmit=async e=>{e.preventDefault();let r=await fetch('/api/companions/pair',"
-    "{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:"
-    "new URLSearchParams(new FormData(pair))});let j=await r.json();state.textContent="
-    "JSON.stringify(j);pair.code.value='';if(r.ok&&/^[0-9a-f]{32}$/.test(j.response_ack))"
-    "fetch('/api/companions/pair/ack',{method:'POST',headers:{'Content-Type':"
-    "'application/x-www-form-urlencoded'},body:new URLSearchParams({response_ack:"
-    "j.response_ack})}).catch(()=>{})};"
     "temp.onsubmit=async e=>{e.preventDefault();let r=await fetch('/api/temperature',"
     "{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},"
     "body:new URLSearchParams(new FormData(temp))});show(await r.json());if(r.ok)"
@@ -67,8 +59,29 @@ constexpr char kPage[] =
     "if(r.ok)setTimeout(load,250)}};"
     "load()</script></body></html>";
 
+constexpr char kLegacyPairingPage[] =
+    "<!doctype html><html><head><meta charset=utf-8><meta name=viewport "
+    "content='width=device-width,initial-scale=1'><title>Legacy Pairing v1</title>"
+    "<style>body{font:16px system-ui;max-width:42rem;margin:2rem auto;padding:0 1rem}"
+    "button{padding:.7rem 1rem}pre{white-space:pre-wrap}</style></head><body>"
+    "<p><a href=/>Back to Setup / Recovery</a></p><h1>Legacy Pairing v1</h1>"
+    "<p>This temporary compatibility flow is only for an older Companion release. "
+    "New Pairing must be started from the Companion Web console on the normal LAN.</p>"
+    "<form id=pair><label>Hub host:port <input name=hub_address maxlength=95 required>"
+    "</label> <label>Six-digit code <input name=code inputmode=numeric "
+    "pattern='[0-9]{6}' maxlength=6 required></label> <button>Pair legacy Companion"
+    "</button></form><pre id=state>Waiting...</pre><script>"
+    "pair.onsubmit=async e=>{e.preventDefault();let r=await fetch('/api/companions/pair',"
+    "{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:"
+    "new URLSearchParams(new FormData(pair))});let j=await r.json();state.textContent="
+    "JSON.stringify(j);pair.code.value='';if(r.ok&&/^[0-9a-f]{32}$/.test(j.response_ack))"
+    "fetch('/api/companions/pair/ack',{method:'POST',headers:{'Content-Type':"
+    "'application/x-www-form-urlencoded'},body:new URLSearchParams({response_ack:"
+    "j.response_ack})}).catch(()=>{})}</script></body></html>";
+
 constexpr deck_setup_http_route_spec_t kRoutes[] = {
     {DECK_SETUP_HTTP_PAGE, DECK_SETUP_HTTP_GET, "/"},
+    {DECK_SETUP_HTTP_LEGACY_PAIRING_PAGE, DECK_SETUP_HTTP_GET, "/compat/pairing-v1"},
     {DECK_SETUP_HTTP_STATUS, DECK_SETUP_HTTP_GET, "/api/status"},
     {DECK_SETUP_HTTP_SCAN, DECK_SETUP_HTTP_POST, "/api/scan"},
     {DECK_SETUP_HTTP_WIFI, DECK_SETUP_HTTP_POST, "/api/wifi"},
@@ -361,6 +374,11 @@ bool deck_setup_http_convert_scan_results(
 const char *deck_setup_http_page(void)
 {
     return kPage;
+}
+
+const char *deck_setup_http_legacy_pairing_page(void)
+{
+    return kLegacyPairingPage;
 }
 
 deck_setup_wifi_request_result_t deck_setup_http_parse_wifi_request(

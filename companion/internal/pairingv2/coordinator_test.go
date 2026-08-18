@@ -44,6 +44,9 @@ type scriptedPairingChannel struct {
 	commitReceived      chan struct{}
 	badTranscript       bool
 	badReceipt          bool
+	credentialErrorCode string
+	commitErrorCode     string
+	connectError        error
 	closed              bool
 }
 
@@ -70,6 +73,17 @@ func (channel *scriptedPairingChannel) Exchange(
 	case *Credentials:
 		channel.mutex.Lock()
 		channel.credentials = *value
+		if channel.credentialErrorCode != "" {
+			failure := Error{
+				Type: "pairing.error", ProtocolVersion: ContractVersion,
+				SessionID: value.SessionID, TransactionID: value.TransactionID,
+				Sequence: 2, Code: channel.credentialErrorCode,
+			}
+			response, marshalErr := json.Marshal(failure)
+			channel.mutex.Unlock()
+			channel.credentialsReceived <- struct{}{}
+			return response, marshalErr
+		}
 		channel.ready = CommitReady{
 			Type: "pairing.commit_ready", ProtocolVersion: ContractVersion,
 			SessionID: value.SessionID, TransactionID: value.TransactionID, Sequence: 2,
@@ -96,6 +110,17 @@ func (channel *scriptedPairingChannel) Exchange(
 	case *Commit:
 		channel.mutex.Lock()
 		ready := channel.ready
+		if channel.commitErrorCode != "" {
+			failure := Error{
+				Type: "pairing.error", ProtocolVersion: ContractVersion,
+				SessionID: value.SessionID, TransactionID: value.TransactionID,
+				Sequence: 4, Code: channel.commitErrorCode,
+			}
+			response, marshalErr := json.Marshal(failure)
+			channel.mutex.Unlock()
+			channel.commitReceived <- struct{}{}
+			return response, marshalErr
+		}
 		valid := value.SessionID == ready.SessionID &&
 			value.TransactionID == ready.TransactionID && value.DeckNonce == ready.DeckNonce &&
 			value.TranscriptSHA256 == ready.TranscriptSHA256
@@ -171,6 +196,9 @@ func newCoordinatorFixture(
 		Discovery: discovery, Trust: trust, Clock: clock,
 		Random: bytes.NewReader(randomBytes[candidateRefBytes:]),
 		Connect: func(context.Context, Route, []byte) (SecureChannel, error) {
+			if channel.connectError != nil {
+				return nil, channel.connectError
+			}
 			return channel, nil
 		},
 		Hub: func(context.Context) (HubLocator, error) {
@@ -259,6 +287,64 @@ func TestCoordinatorRejectsAlteredTranscriptBeforeTrustOrCommit(t *testing.T) {
 	if err != nil || len(trusts) != 0 {
 		t.Fatalf("trusts after altered transcript = %#v, %v", trusts, err)
 	}
+}
+
+func TestCoordinatorPreservesStableFailureCodes(t *testing.T) {
+	t.Run("Security2 rejects a wrong code", func(t *testing.T) {
+		channel := newScriptedPairingChannel()
+		channel.connectError = errSecurity2Proof
+		coordinator, _, session := newCoordinatorFixture(t, channel)
+		view, err := coordinator.Confirm(context.Background(), session.Reference, "000000")
+		if !errors.Is(err, ErrPairingFailed) || view.State != SessionFailed ||
+			view.ErrorCode != "authentication_failed" {
+			t.Fatalf("Confirm(wrong code) = %#v, %v", view, err)
+		}
+	})
+
+	t.Run("Deck rejects credential staging", func(t *testing.T) {
+		channel := newScriptedPairingChannel()
+		channel.credentialErrorCode = "capacity_reached"
+		coordinator, trust, session := newCoordinatorFixture(t, channel)
+		view, err := coordinator.Confirm(context.Background(), session.Reference, "012345")
+		if !errors.Is(err, ErrPairingFailed) || view.State != SessionFailed ||
+			view.ErrorCode != "capacity_reached" {
+			t.Fatalf("Confirm(capacity) = %#v, %v", view, err)
+		}
+		trusts, listErr := trust.ListTrusts(context.Background())
+		if listErr != nil || len(trusts) != 0 {
+			t.Fatalf("trusts after capacity failure = %#v, %v", trusts, listErr)
+		}
+	})
+
+	t.Run("Deck rejects durable commit", func(t *testing.T) {
+		channel := newScriptedPairingChannel()
+		channel.commitErrorCode = "storage_failure"
+		coordinator, trust, session := newCoordinatorFixture(t, channel)
+		type confirmation struct {
+			view SessionView
+			err  error
+		}
+		completed := make(chan confirmation, 1)
+		go func() {
+			view, err := coordinator.Confirm(context.Background(), session.Reference, "012345")
+			completed <- confirmation{view: view, err: err}
+		}()
+		<-channel.credentialsReceived
+		waitForCoordinatorState(t, coordinator, session.Reference, SessionProvingLink)
+		deviceID, transactionID := channel.proofIdentity()
+		if err := coordinator.ObserveProvisionalHeartbeat(deviceID, transactionID); err != nil {
+			t.Fatal(err)
+		}
+		outcome := <-completed
+		if !errors.Is(outcome.err, ErrPairingFailed) || outcome.view.State != SessionFailed ||
+			outcome.view.ErrorCode != "storage_failure" {
+			t.Fatalf("Confirm(storage) = %#v, %v", outcome.view, outcome.err)
+		}
+		trusts, listErr := trust.ListTrusts(context.Background())
+		if listErr != nil || len(trusts) != 0 {
+			t.Fatalf("trusts after storage failure = %#v, %v", trusts, listErr)
+		}
+	})
 }
 
 func TestCoordinatorRollsBackTrustWhenDeckReceiptIsInvalid(t *testing.T) {

@@ -383,14 +383,17 @@ func (coordinator *Coordinator) confirm(
 ) (resultErr error) {
 	material, err := coordinator.trust.IssueProvisionalMaterial(ctx)
 	if err != nil {
+		coordinator.setFailureCode(record, coordinatorErrorCode(err))
 		return err
 	}
 	locator, err := coordinator.hub(ctx)
 	if err != nil {
+		coordinator.setFailureCode(record, "link_failed")
 		return err
 	}
 	channel, err := coordinator.connectRoutes(ctx, record.selection.Routes, code)
 	if err != nil {
+		coordinator.setFailureCode(record, coordinatorErrorCode(err))
 		return err
 	}
 	defer channel.Close()
@@ -417,14 +420,24 @@ func (coordinator *Coordinator) confirm(
 	}
 	message, err := DecodeContractMessage(response)
 	clearBytes(response)
+	if remote, ok := message.(*Error); err == nil && ok {
+		if !coordinator.remoteErrorMatches(record, remote, 2) {
+			coordinator.setFailureCode(record, "malformed")
+			return ErrMalformedContract
+		}
+		coordinator.setFailureCode(record, remote.Code)
+		return ErrPairingFailed
+	}
 	ready, ok := message.(*CommitReady)
 	if err != nil || !ok || !coordinator.readyMatches(record, credentials, ready) {
+		coordinator.setFailureCode(record, "malformed")
 		return ErrMalformedContract
 	}
 	transcript, err := TranscriptSHA256(credentials, *ready)
 	if err != nil || subtle.ConstantTimeCompare(
 		[]byte(transcript), []byte(ready.TranscriptSHA256),
 	) != 1 {
+		coordinator.setFailureCode(record, "malformed")
 		return ErrMalformedContract
 	}
 
@@ -454,6 +467,7 @@ func (coordinator *Coordinator) confirm(
 		Token: material.Token, ProtocolVersion: material.ProtocolVersion,
 		ExpiresAt: record.view.ExpiresAt,
 	}); err != nil {
+		coordinator.setFailureCode(record, trustPersistenceErrorCode(err))
 		return err
 	}
 	staged = true
@@ -463,6 +477,7 @@ func (coordinator *Coordinator) confirm(
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-proofTimer.C:
+		coordinator.setFailureCode(record, "link_failed")
 		return errors.New("Pairing v2 Device Link proof timed out")
 	case <-record.proof:
 	}
@@ -471,6 +486,7 @@ func (coordinator *Coordinator) confirm(
 	record.view.State = SessionCommitting
 	coordinator.mutex.Unlock()
 	if err = coordinator.trust.CommitProvisional(ctx, record.transactionID, ready.DeviceID); err != nil {
+		coordinator.setFailureCode(record, trustPersistenceErrorCode(err))
 		return err
 	}
 	staged = false
@@ -492,10 +508,19 @@ func (coordinator *Coordinator) confirm(
 	}
 	message, err = DecodeContractMessage(response)
 	clearBytes(response)
+	if remote, ok := message.(*Error); err == nil && ok {
+		if !coordinator.remoteErrorMatches(record, remote, 4) {
+			coordinator.setFailureCode(record, "malformed")
+			return ErrMalformedContract
+		}
+		coordinator.setFailureCode(record, remote.Code)
+		return ErrPairingFailed
+	}
 	receipt, ok := message.(*CommitReceipt)
 	if err != nil || !ok || receipt.SessionID != record.sessionID ||
 		receipt.TransactionID != record.transactionID || receipt.ProfileID != ready.ProfileID ||
 		receipt.TranscriptSHA256 != transcript || receipt.ProfileGeneration == 0 {
+		coordinator.setFailureCode(record, "malformed")
 		return ErrMalformedContract
 	}
 	trustCommitted = false
@@ -504,6 +529,68 @@ func (coordinator *Coordinator) confirm(
 	record.view.ErrorCode = "none"
 	coordinator.mutex.Unlock()
 	return nil
+}
+
+func (coordinator *Coordinator) setFailureCode(record *sessionRecord, code string) {
+	if code == "none" || !validErrorCode(code) {
+		return
+	}
+	coordinator.mutex.Lock()
+	record.view.ErrorCode = code
+	coordinator.mutex.Unlock()
+}
+
+func (coordinator *Coordinator) remoteErrorMatches(
+	record *sessionRecord,
+	remote *Error,
+	expectedSequence uint32,
+) bool {
+	return remote != nil && remote.SessionID == record.sessionID &&
+		remote.TransactionID == record.transactionID && remote.Sequence == expectedSequence &&
+		remote.Code != "none"
+}
+
+func trustPersistenceErrorCode(err error) string {
+	if errors.Is(err, pairing.ErrProvisionalCapacity) {
+		return "capacity_reached"
+	}
+	return "storage_failure"
+}
+
+func coordinatorErrorCode(err error) string {
+	if err == nil {
+		return "none"
+	}
+	if errors.Is(err, pairing.ErrProvisionalCapacity) {
+		return "capacity_reached"
+	}
+	if errors.Is(err, errSecurity2Proof) || errors.Is(err, errSecurity2Status) {
+		return "authentication_failed"
+	}
+	if errors.Is(err, ErrMalformedContract) {
+		return "malformed"
+	}
+	var endpointFailure *endpointStatusError
+	if errors.As(err, &endpointFailure) {
+		switch endpointFailure.statusCode {
+		case 400:
+			return "malformed"
+		case 409:
+			return "busy"
+		case 410:
+			return "expired"
+		case 426:
+			return "incompatible_protocol"
+		case 429:
+			return "rate_limited"
+		default:
+			return "link_failed"
+		}
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "expired"
+	}
+	return "link_failed"
 }
 
 func (coordinator *Coordinator) ObserveProvisionalHeartbeat(deviceID, transactionID string) error {

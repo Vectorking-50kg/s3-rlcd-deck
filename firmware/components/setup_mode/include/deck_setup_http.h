@@ -21,6 +21,7 @@ typedef enum {
     DECK_SETUP_HTTP_NOT_FOUND = 0,
     DECK_SETUP_HTTP_METHOD_NOT_ALLOWED,
     DECK_SETUP_HTTP_PAGE,
+    DECK_SETUP_HTTP_LEGACY_PAIRING_PAGE,
     DECK_SETUP_HTTP_STATUS,
     DECK_SETUP_HTTP_SCAN,
     DECK_SETUP_HTTP_WIFI,
@@ -100,6 +101,8 @@ bool deck_setup_http_convert_scan_results(
 );
 // Returns the immutable, NUL-terminated Setup page owned by this component.
 const char *deck_setup_http_page(void);
+// Returns the temporary, explicitly labelled Pairing v1 compatibility page.
+const char *deck_setup_http_legacy_pairing_page(void);
 deck_setup_wifi_request_result_t deck_setup_http_parse_wifi_request(
     const char *body,
     size_t body_size,

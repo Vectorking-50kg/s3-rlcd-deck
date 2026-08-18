@@ -236,6 +236,11 @@ void profile_is_invisible_until_link_proof_and_commit()
                &receipt,
                &action
            ) == DECK_PAIRING_V2_TRANSACTION_LINK_REQUIRED);
+    assert(receipt ==
+           "{\"type\":\"pairing.error\",\"protocol_version\":2,"
+           "\"session_id\":\"00112233445566778899aabbccddeeff\","
+           "\"transaction_id\":\"ffeeddccbbaa99887766554433221100\","
+           "\"sequence\":4,\"code\":\"link_failed\"}");
     assert(deck_pairing_v2_transaction_mark_link_proven(
         value.transaction,
         link.session_id,

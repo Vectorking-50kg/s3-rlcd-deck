@@ -1061,6 +1061,24 @@ bool deck_pairing_v2_contract_encode(
             message->profile_generation,
             message->transcript_sha256
         );
+    } else if (message->type == DECK_PAIRING_V2_MESSAGE_ERROR &&
+               message->common.sequence >= 1U) {
+        Span code{};
+        if (!bounded_span(message->error_code, sizeof(message->error_code), &code) ||
+            !error_code(code) || span_equal(code, "none")) {
+            return false;
+        }
+        written = std::snprintf(
+            document,
+            document_capacity,
+            "{\"type\":\"pairing.error\",\"protocol_version\":2,"
+            "\"session_id\":\"%s\",\"transaction_id\":\"%s\",\"sequence\":%" PRIu32 ","
+            "\"code\":\"%s\"}",
+            message->common.session_id,
+            message->common.transaction_id,
+            message->common.sequence,
+            message->error_code
+        );
     }
     if (written <= 0 || static_cast<size_t>(written) >= document_capacity) {
         secure_clear(document, document_capacity);

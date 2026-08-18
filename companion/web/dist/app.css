@@ -330,6 +330,14 @@ td code { font-size: 12px; }
 .dialog-body p:last-child { margin-bottom: 0; }
 .dialog-footer { display: flex; justify-content: flex-end; gap: 9px; padding: 16px 22px; border-top: 1px solid var(--line); }
 .pairing-code { margin: 18px 0; padding: 18px; border: 2px solid var(--text); border-radius: var(--radius-sm); background: #f5f2e7; font: 700 34px var(--font-mono); letter-spacing: .18em; text-align: center; }
+.pairing-dialog { width: min(650px, calc(100vw - 28px)); }
+.pairing-candidates { display: grid; gap: 10px; }
+.pairing-candidate { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 14px; padding: 14px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-2); }
+.pairing-candidate strong, .pairing-candidate small { display: block; }
+.pairing-candidate small { margin-top: 4px; color: var(--muted); }
+.pairing-dialog .callout.success { border-color: #9db8ac; color: var(--success); }
+.pairing-dialog .callout.danger { border-color: #d7a8a2; color: var(--danger); }
+.pairing-dialog .callout.warning { border-color: #d9c58f; color: var(--warning); }
 .toast-region { position: fixed; z-index: 120; right: 20px; bottom: 20px; display: grid; width: min(390px, calc(100vw - 40px)); gap: 10px; pointer-events: none; }
 #toast-alert-region { bottom: 96px; }
 .toast { display: flex; align-items: flex-start; gap: 12px; padding: 14px 16px; border: 1px solid #9db8ac; border-radius: var(--radius); background: var(--surface); color: var(--success); box-shadow: var(--shadow); }
