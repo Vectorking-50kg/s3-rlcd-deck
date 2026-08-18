@@ -74,6 +74,7 @@ class AiPageFontLayoutContract(unittest.TestCase):
         manifest = set(GLYPH_MANIFEST.read_text(encoding="utf-8"))
         production_sources = (
             REPOSITORY_ROOT / "firmware/components/application_ui/deck_m0_view_model.cpp",
+            REPOSITORY_ROOT / "firmware/components/application_ui/deck_ui_preview.cpp",
             REPOSITORY_ROOT / "firmware/components/application_ui/deck_ui_scene.cpp",
         )
         required = {

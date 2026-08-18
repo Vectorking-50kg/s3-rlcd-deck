@@ -4,6 +4,7 @@
 
 #include "deck_display.h"
 #include "deck_m0_view_model.h"
+#include "deck_ui_scene.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -32,6 +33,12 @@ bool deck_application_ui_start(
 
 /* Coalesces a cross-task model update for the sole LVGL owner. */
 bool deck_application_ui_update(const deck_m0_view_model_t *model);
+
+/* Dev diagnostics only: freezes presentation on a deterministic visual fixture. */
+bool deck_application_ui_preview(const deck_ui_scene_t *scene);
+
+/* Dev diagnostics only: clears the fixture and resumes the latest live model. */
+bool deck_application_ui_preview_clear(void);
 
 #ifdef __cplusplus
 }

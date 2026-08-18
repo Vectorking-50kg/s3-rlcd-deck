@@ -77,10 +77,12 @@ deck_add_host_test(
         test_deck_ui_scene.cpp
         ../../firmware/components/application_ui/deck_ai_page_view_model.cpp
         ../../firmware/components/application_ui/deck_ui_layout.cpp
+        ../../firmware/components/application_ui/deck_ui_preview.cpp
         ../../firmware/components/application_ui/deck_ui_scene.cpp
     INCLUDE_DIRS
         ../../firmware/components/ai_snapshot/include
         ../../firmware/components/application_ui/include
+        "${DECK_M0_GENERATED_DIR}"
 )
 deck_add_host_test(
     test_button_input
@@ -368,6 +370,10 @@ target_compile_definitions(
 add_test(
     NAME hil_boot_smoke_replay
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_hil_boot_smoke.py
+)
+add_test(
+    NAME hil_ui_preview_contract
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_hil_ui_preview.py
 )
 add_test(
     NAME ai_page_font_layout_contract

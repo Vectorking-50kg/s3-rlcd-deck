@@ -57,7 +57,7 @@ Deck 是放在桌面上的本地技术仪表，不是串口日志窗口。用户
 
 ### 4.2 字形规则
 
-- 字库只包含生产文案与严格受限的动态字符范围，不打包完整 CJK。
+- 字库只包含生产文案与严格受限的动态字符范围，不打包完整 CJK。Provider、额度窗口、会话名和错误码在投影时按 UTF-8 code point 校验；超出字形清单时显示明确中文替代文案，禁止把缺字方框当作降级。
 - 生成时使用 `1 bpp`，不让 RGB565 阈值临时决定笔画。
 - 中文标题不靠极细字重或字间距制造层级，优先用字号、反白和留白。
 - 动态英文名、SSID、Provider 名和会话名按真实 glyph advance 截断；混排必须保持 UTF‑8 边界。
@@ -140,3 +140,23 @@ Deck 是放在桌面上的本地技术仪表，不是串口日志窗口。用户
 - 横屏、纯黑白、无镜像、无裁切、无随机花屏。
 - 板级主页、Codex 正常、AI 过期/不可用、Pairing 全阶段、Setup、Serial、错误/恢复至少各拍一张 400×300 实物照片。
 - 在正常桌面距离和常见室内光线下，中文正文、六位码、百分比和底栏均可直接辨认。
+
+### 8.1 开发版逐页冻结
+
+开发版固件提供只读视觉预览命令，用固定、无凭据的样例数据冻结页面。工具会先取得显示帧基线，发送预览命令，再等待命令确认和后续完整帧；仅收到串口确认但屏幕没有完成刷新时会失败。
+
+```sh
+source /Users/xiaowang/.espressif/v6.0.2/esp-idf/export.sh
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page board
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page pairing
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page setup
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page ai
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page provider
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page configuration
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page serial
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page offline
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page error
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page clear
+```
+
+`clear` 恢复实时页面。该命令、确认事件和预览队列只存在于启用诊断控制台的开发版；release 固件不得包含入口或额外预览状态。

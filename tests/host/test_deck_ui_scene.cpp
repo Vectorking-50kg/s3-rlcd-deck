@@ -1,5 +1,6 @@
 #include "deck_ui_scene.h"
 #include "deck_ui_layout.h"
+#include "deck_ui_preview.h"
 
 #include <cassert>
 #include <cstring>
@@ -200,6 +201,29 @@ void unavailable_ai_data_is_explicit_and_does_not_show_zeroes()
     assert_scene_fits_panel(scene);
 }
 
+void unsupported_dynamic_chinese_never_renders_as_missing_glyph_boxes()
+{
+    deck_m0_view_model_t model = ai_model();
+    std::strcpy(model.ai_page.codex.featured_session.display_name, "未收录龘字");
+    std::strcpy(model.ai_page.codex.windows[0].name, "龘额度");
+    deck_ui_scene_t scene{};
+    assert(deck_ui_scene_project(&model, &scene));
+    assert(std::string(scene.summary_title) == "会话名称不可用");
+    assert(std::string(scene.metrics[0].label) == "自定义额度");
+
+    model.ai_page.pages.provider_count = 1U;
+    model.ai_page.selected_provider = 0U;
+    auto &provider = model.ai_page.pages.providers[0];
+    std::strcpy(provider.provider_id, "custom");
+    std::strcpy(provider.display_name, "龘 Provider");
+    provider.status = DECK_AI_SNAPSHOT_PROVIDER_DEGRADED;
+    provider.has_error = true;
+    std::strcpy(provider.error_code, "错误龘");
+    assert(deck_ui_scene_project(&model, &scene));
+    assert(std::string(scene.title) == "自定义 Provider");
+    assert(std::string(scene.summary_value) == "错误代码不可用");
+}
+
 void serial_scene_keeps_payload_out_and_makes_the_owner_obvious()
 {
     deck_m0_view_model_t model = ai_model();
@@ -243,6 +267,44 @@ void layout_rejects_dense_centered_content_instead_of_covering_the_footer()
     assert(!deck_ui_layout_plan(&scene, &layout));
 }
 
+void every_visual_preview_is_named_deterministic_and_panel_safe()
+{
+    struct PreviewCase {
+        const char *name;
+        deck_ui_preview_page_t page;
+    };
+    constexpr PreviewCase cases[] = {
+        {"board", DECK_UI_PREVIEW_BOARD},
+        {"pairing", DECK_UI_PREVIEW_PAIRING},
+        {"setup", DECK_UI_PREVIEW_SETUP},
+        {"ai", DECK_UI_PREVIEW_AI},
+        {"provider", DECK_UI_PREVIEW_PROVIDER},
+        {"configuration", DECK_UI_PREVIEW_CONFIGURATION},
+        {"serial", DECK_UI_PREVIEW_SERIAL},
+        {"offline", DECK_UI_PREVIEW_OFFLINE},
+        {"error", DECK_UI_PREVIEW_ERROR},
+    };
+    for (const PreviewCase &preview : cases) {
+        deck_ui_preview_page_t parsed = DECK_UI_PREVIEW_BOARD;
+        assert(deck_ui_preview_page_parse(preview.name, &parsed));
+        assert(parsed == preview.page);
+        deck_ui_scene_t first{};
+        deck_ui_scene_t second{};
+        assert(deck_ui_preview_scene(parsed, &first));
+        assert(deck_ui_preview_scene(parsed, &second));
+        assert(deck_ui_scene_equal(&first, &second));
+        assert(first.title[0] != '\0');
+        assert(first.status_time[0] != '\0');
+        assert_scene_fits_panel(first);
+    }
+    deck_ui_preview_page_t parsed = DECK_UI_PREVIEW_BOARD;
+    assert(!deck_ui_preview_page_parse("unknown", &parsed));
+    assert(!deck_ui_preview_page_parse(nullptr, &parsed));
+    deck_ui_scene_t invalid{};
+    assert(!deck_ui_preview_scene(static_cast<deck_ui_preview_page_t>(99), &invalid));
+    assert(!deck_ui_preview_scene(DECK_UI_PREVIEW_BOARD, nullptr));
+}
+
 }  // namespace
 
 int main()
@@ -253,8 +315,10 @@ int main()
     setup_credentials_are_structured_as_ephemeral_rows();
     codex_uses_chinese_labels_and_real_progress_metrics();
     unavailable_ai_data_is_explicit_and_does_not_show_zeroes();
+    unsupported_dynamic_chinese_never_renders_as_missing_glyph_boxes();
     serial_scene_keeps_payload_out_and_makes_the_owner_obvious();
     semantic_scene_equality_detects_visible_changes();
     layout_rejects_dense_centered_content_instead_of_covering_the_footer();
+    every_visual_preview_is_named_deterministic_and_panel_safe();
     return 0;
 }

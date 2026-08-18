@@ -1,4 +1,5 @@
 #include "deck_application_ui.h"
+#include "sdkconfig.h"
 #include "deck_ui_renderer.h"
 #include "deck_ui_scene.h"
 
@@ -34,6 +35,13 @@ static_assert(
     DECK_DISPLAY_HEIGHT
 );
 
+#ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
+struct PreviewUpdate {
+    bool active;
+    deck_ui_scene_t scene;
+};
+#endif
+
 struct UiContext {
     deck_display_service_t *display_service;
     deck_m0_view_model_t model;
@@ -46,6 +54,11 @@ struct UiContext {
     deck_application_ui_event_fn event_callback;
     void *event_context;
     QueueHandle_t model_updates;
+#ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
+    QueueHandle_t preview_updates;
+    PreviewUpdate preview_update;
+    bool preview_active;
+#endif
     int64_t last_tick_us;
     uint64_t last_model_second;
     bool presented_scene_valid;
@@ -58,6 +71,12 @@ std::atomic<QueueHandle_t> active_model_updates = nullptr;
 StaticQueue_t model_update_queue_storage{};
 uint8_t model_update_queue_buffer[sizeof(deck_m0_view_model_t)]{};
 QueueHandle_t model_update_queue = nullptr;
+#ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
+std::atomic<QueueHandle_t> active_preview_updates = nullptr;
+StaticQueue_t preview_update_queue_storage{};
+uint8_t preview_update_queue_buffer[sizeof(PreviewUpdate)]{};
+QueueHandle_t preview_update_queue = nullptr;
+#endif
 
 uint64_t monotonic_ms()
 {
@@ -79,6 +98,9 @@ void notify(UiContext *context, deck_application_ui_state_t state)
 void fail_task(UiContext *context)
 {
     active_model_updates.store(nullptr, std::memory_order_release);
+#ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
+    active_preview_updates.store(nullptr, std::memory_order_release);
+#endif
     if (context->lv_display != nullptr) {
         deck_ui_renderer_destroy(context->renderer);
         context->renderer = nullptr;
@@ -176,22 +198,35 @@ void display_flush(lv_display_t *lv_display, const lv_area_t *area, uint8_t *pix
     lv_display_flush_ready(lv_display);
 }
 
+bool present_scene(UiContext *context, const deck_ui_scene_t *scene)
+{
+    if (scene == nullptr) {
+        return false;
+    }
+    if (context->presented_scene_valid &&
+        deck_ui_scene_equal(scene, &context->presented_scene)) {
+        return true;
+    }
+    if (!deck_ui_renderer_present(context->renderer, scene)) {
+        return false;
+    }
+    context->presented_scene = *scene;
+    context->presented_scene_valid = true;
+    return true;
+}
+
 bool present_model(UiContext *context)
 {
+#ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
+    if (context->preview_active) {
+        return true;
+    }
+#endif
     deck_ui_scene_t scene{};
     if (!deck_ui_scene_project(&context->model, &scene)) {
         return false;
     }
-    if (context->presented_scene_valid &&
-        deck_ui_scene_equal(&scene, &context->presented_scene)) {
-        return true;
-    }
-    if (!deck_ui_renderer_present(context->renderer, &scene)) {
-        return false;
-    }
-    context->presented_scene = scene;
-    context->presented_scene_valid = true;
-    return true;
+    return present_scene(context, &scene);
 }
 
 void receive_model_update(UiContext *context)
@@ -209,6 +244,26 @@ void receive_model_update(UiContext *context)
     context->model.firmware_version = context->firmware_version;
     (void)present_model(context);
 }
+
+#ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
+void receive_preview_update(UiContext *context)
+{
+    if (xQueueReceive(
+            context->preview_updates,
+            &context->preview_update,
+            0
+        ) != pdTRUE) {
+        return;
+    }
+    context->preview_active = context->preview_update.active;
+    if (context->preview_active) {
+        (void)present_scene(context, &context->preview_update.scene);
+    } else {
+        (void)present_model(context);
+    }
+    memset(&context->preview_update, 0, sizeof(context->preview_update));
+}
+#endif
 
 bool initialize_lvgl(UiContext *context)
 {
@@ -277,6 +332,9 @@ void ui_task(void *task_context)
         }
 
         receive_model_update(context);
+#ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
+        receive_preview_update(context);
+#endif
         update_model(context, static_cast<uint64_t>(now_us / 1'000'000));
         lv_timer_handler();
         vTaskDelay(pdMS_TO_TICKS(kUiPollMs));
@@ -331,9 +389,33 @@ bool deck_application_ui_start(
         ui_started.store(false, std::memory_order_release);
         return false;
     }
+#ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
+    if (preview_update_queue == nullptr) {
+        preview_update_queue = xQueueCreateStatic(
+            1,
+            sizeof(PreviewUpdate),
+            preview_update_queue_buffer,
+            &preview_update_queue_storage
+        );
+    } else {
+        (void)xQueueReset(preview_update_queue);
+    }
+    context->preview_updates = preview_update_queue;
+    if (context->preview_updates == nullptr) {
+        delete context;
+        ui_started.store(false, std::memory_order_release);
+        return false;
+    }
+#endif
     active_model_updates.store(context->model_updates, std::memory_order_release);
+#ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
+    active_preview_updates.store(context->preview_updates, std::memory_order_release);
+#endif
     if (xTaskCreatePinnedToCore(ui_task, "deck_ui", kUiStackBytes, context, kUiPriority, nullptr, 0) != pdPASS) {
         active_model_updates.store(nullptr, std::memory_order_release);
+#ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
+        active_preview_updates.store(nullptr, std::memory_order_release);
+#endif
         delete context;
         ui_started.store(false, std::memory_order_release);
         return false;
@@ -348,4 +430,42 @@ bool deck_application_ui_update(const deck_m0_view_model_t *model)
     }
     QueueHandle_t updates = active_model_updates.load(std::memory_order_acquire);
     return updates != nullptr && xQueueOverwrite(updates, model) == pdPASS;
+}
+
+bool deck_application_ui_preview(const deck_ui_scene_t *scene)
+{
+#ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
+    if (scene == nullptr || scene->metric_count > DECK_UI_SCENE_MAX_METRICS) {
+        return false;
+    }
+    QueueHandle_t updates = active_preview_updates.load(std::memory_order_acquire);
+    if (updates == nullptr) {
+        return false;
+    }
+    PreviewUpdate update{};
+    update.active = true;
+    update.scene = *scene;
+    const bool queued = xQueueOverwrite(updates, &update) == pdPASS;
+    memset(&update, 0, sizeof(update));
+    return queued;
+#else
+    (void)scene;
+    return false;
+#endif
+}
+
+bool deck_application_ui_preview_clear(void)
+{
+#ifdef CONFIG_DECK_DIAGNOSTIC_CONSOLE
+    QueueHandle_t updates = active_preview_updates.load(std::memory_order_acquire);
+    if (updates == nullptr) {
+        return false;
+    }
+    PreviewUpdate update{};
+    const bool queued = xQueueOverwrite(updates, &update) == pdPASS;
+    memset(&update, 0, sizeof(update));
+    return queued;
+#else
+    return false;
+#endif
 }

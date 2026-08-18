@@ -18,6 +18,7 @@
 #include "deck_rlcd_panel.h"
 #include "deck_setup_service.h"
 #include "deck_serial_service.h"
+#include "deck_ui_preview.h"
 
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"
@@ -1011,6 +1012,23 @@ bool decode_diagnostic_hex(
     return true;
 }
 
+void emit_ui_preview_result(const char *page, bool active, bool accepted)
+{
+    char response[128];
+    const int size = snprintf(
+        response,
+        sizeof(response),
+        "{\"type\":\"ui_preview\",\"page\":\"%s\","
+        "\"active\":%s,\"accepted\":%s}\n",
+        page,
+        active ? "true" : "false",
+        accepted ? "true" : "false"
+    );
+    if (size > 0 && static_cast<size_t>(size) < sizeof(response)) {
+        write_stdout(nullptr, response, static_cast<size_t>(size));
+    }
+}
+
 void handle_diagnostic_control_line(char *line)
 {
     if (line == nullptr) {
@@ -1068,6 +1086,26 @@ void handle_diagnostic_control_line(char *line)
         std::memset(ssid, 0, sizeof(ssid));
         std::memset(password, 0, sizeof(password));
         std::memset(address, 0, sizeof(address));
+        return;
+    }
+    if (std::strcmp(line, "DECK_UI_PREVIEW clear") == 0) {
+        emit_ui_preview_result("live", false, deck_application_ui_preview_clear());
+        return;
+    }
+    constexpr char kUiPreviewPrefix[] = "DECK_UI_PREVIEW ";
+    if (std::strncmp(line, kUiPreviewPrefix, sizeof(kUiPreviewPrefix) - 1U) == 0) {
+        const char *page_name = line + sizeof(kUiPreviewPrefix) - 1U;
+        deck_ui_preview_page_t page = DECK_UI_PREVIEW_BOARD;
+        deck_ui_scene_t scene{};
+        const bool accepted = deck_ui_preview_page_parse(page_name, &page) &&
+                              deck_ui_preview_scene(page, &scene) &&
+                              deck_application_ui_preview(&scene);
+        if (accepted) {
+            emit_ui_preview_result(page_name, true, true);
+        } else {
+            emit_ui_preview_result("invalid", false, false);
+        }
+        std::memset(&scene, 0, sizeof(scene));
         return;
     }
     if (application_setup == nullptr) {
@@ -1396,7 +1434,7 @@ void start_setup_after_ui_ready()
         if (xTaskCreatePinnedToCore(
                 diagnostic_control_task,
                 "diagnostic_control",
-                4'096,
+                8'192,
                 nullptr,
                 1,
                 nullptr,

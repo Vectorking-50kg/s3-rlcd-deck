@@ -1,10 +1,93 @@
 #include "deck_ui_scene.h"
+#include "deck_m0_glyphs.h"
 
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
 
 namespace {
+
+bool decode_utf8_codepoint(const char **cursor, uint32_t *codepoint)
+{
+    if (cursor == nullptr || *cursor == nullptr || codepoint == nullptr || **cursor == '\0') {
+        return false;
+    }
+    const auto *bytes = reinterpret_cast<const uint8_t *>(*cursor);
+    size_t length = 0U;
+    uint32_t value = 0U;
+    uint32_t minimum = 0U;
+    if (bytes[0] < 0x80U) {
+        length = 1U;
+        value = bytes[0];
+    } else if ((bytes[0] & 0xe0U) == 0xc0U) {
+        length = 2U;
+        value = bytes[0] & 0x1fU;
+        minimum = 0x80U;
+    } else if ((bytes[0] & 0xf0U) == 0xe0U) {
+        length = 3U;
+        value = bytes[0] & 0x0fU;
+        minimum = 0x800U;
+    } else if ((bytes[0] & 0xf8U) == 0xf0U) {
+        length = 4U;
+        value = bytes[0] & 0x07U;
+        minimum = 0x10000U;
+    } else {
+        return false;
+    }
+    for (size_t index = 1U; index < length; ++index) {
+        if (bytes[index] == 0U || (bytes[index] & 0xc0U) != 0x80U) {
+            return false;
+        }
+        value = (value << 6U) | (bytes[index] & 0x3fU);
+    }
+    if (value < minimum || value > 0x10ffffU || (value >= 0xd800U && value <= 0xdfffU)) {
+        return false;
+    }
+    *cursor += length;
+    *codepoint = value;
+    return true;
+}
+
+bool manifest_contains(uint32_t expected)
+{
+    const char *cursor = DECK_M0_REQUIRED_GLYPHS;
+    while (*cursor != '\0') {
+        uint32_t codepoint = 0U;
+        if (!decode_utf8_codepoint(&cursor, &codepoint)) {
+            return false;
+        }
+        if (codepoint == expected) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool display_text_supported(const char *value)
+{
+    if (value == nullptr || value[0] == '\0') {
+        return false;
+    }
+    const char *cursor = value;
+    while (*cursor != '\0') {
+        uint32_t codepoint = 0U;
+        if (!decode_utf8_codepoint(&cursor, &codepoint)) {
+            return false;
+        }
+        if (codepoint >= 0x20U && codepoint <= 0x7eU) {
+            continue;
+        }
+        if (!manifest_contains(codepoint)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+const char *display_text_or(const char *value, const char *fallback)
+{
+    return display_text_supported(value) ? value : fallback;
+}
 
 template <size_t Capacity>
 bool set_text(char (&output)[Capacity], const char *value)
@@ -177,7 +260,7 @@ const char *window_name(const char *name)
     if (strcmp(name, "monthly") == 0) {
         return "每月额度";
     }
-    return name;
+    return display_text_or(name, "自定义额度");
 }
 
 void format_status(const deck_m0_view_model_t *model, deck_ui_scene_t *scene)
@@ -315,7 +398,10 @@ void format_ai_summary(const deck_ai_snapshot_codex_projection_t *codex, deck_ui
         return;
     }
     if (codex->featured_session.has_display_name) {
-        (void)set_text(scene->summary_title, codex->featured_session.display_name);
+        (void)set_text(
+            scene->summary_title,
+            display_text_or(codex->featured_session.display_name, "会话名称不可用")
+        );
     } else {
         const size_t id_size = strlen(codex->featured_session.session_id);
         const char *suffix = codex->featured_session.session_id + (id_size > 8U ? id_size - 8U : 0U);
@@ -518,7 +604,7 @@ void project_board(const deck_m0_view_model_t *model, deck_ui_scene_t *scene)
     (void)set_text(scene->summary_title, model->firmware_version);
     (void)format_text(
         scene->summary_detail,
-        "运行 %lluh%02llum · 最低堆 %u KiB",
+        "运行 %llu时%02llu分 · 最低堆 %u KiB",
         static_cast<unsigned long long>(model->uptime_seconds / 3'600ULL),
         static_cast<unsigned long long>(model->uptime_seconds / 60ULL % 60ULL),
         model->minimum_free_heap_bytes / 1'024U
@@ -604,7 +690,7 @@ void project_provider(
 )
 {
     scene->kind = DECK_UI_SCENE_PROVIDER;
-    (void)set_text(scene->title, provider->display_name);
+    (void)set_text(scene->title, display_text_or(provider->display_name, "自定义 Provider"));
     if (model->ai_page.snapshot_state == DECK_AI_PAGE_SNAPSHOT_STALE) {
         (void)set_text(scene->badge, "数据已过期");
         scene->badge_style = DECK_UI_BADGE_ALERT;
@@ -662,7 +748,10 @@ void project_provider(
         }
         if (provider->has_error) {
             (void)set_text(scene->summary_title, "Provider 错误");
-            (void)set_text(scene->summary_value, provider->error_code);
+            (void)set_text(
+                scene->summary_value,
+                display_text_or(provider->error_code, "错误代码不可用")
+            );
             (void)set_text(scene->summary_detail, "其他健康页面继续运行");
         }
     }
