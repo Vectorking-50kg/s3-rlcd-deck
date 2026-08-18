@@ -377,6 +377,10 @@ add_test(
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_m1_setup_client.py
 )
 add_test(
+    NAME pairing_v2_acceptance_contract
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pairing_v2_acceptance.py
+)
+add_test(
     NAME companion_native_smoke_contract
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_smoke_companion_artifact.py
 )

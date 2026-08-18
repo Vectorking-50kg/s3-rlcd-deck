@@ -1,8 +1,14 @@
-# M0 acceptance evidence
+# Acceptance evidence
+
+Pairing v2 same-LAN acceptance is defined in `pairing-v2.md` and
+`pairing-v2-manifest.json`. Its controller is `tools/pairing_v2_acceptance.py`.
+It keeps the Mac and Deck on their normal LAN and requires the user to read the
+six-digit code from the Deck screen; neither the code nor any resulting credential is retained.
 
 M1 Pairing and Device Link acceptance is defined separately in `m1.md` and
 `m1-manifest.json`. Its real-Deck transaction is run by `tools/m1_acceptance.py`; it does not
-replace the M0 duration gates below.
+replace Pairing v2 or the M0 duration gates below. M1 remains the Pairing v1 compatibility
+evidence until the Pairing v2 migration gate passes.
 
 `m0.md` is the version-controlled single source of truth for M0 release acceptance. It is
 generated from `m0-manifest.json` and remains `BLOCKED` until all three evidence records are

@@ -49,6 +49,13 @@ LINK_SCHEMA = {
 }
 SETUP_ACCESS_SCHEMA = {"type": str, "ssid": str, "password": str, "address": str}
 BUILD_IDENTITY_SCHEMA = {"type": str, "firmware_commit": str}
+PAIRING_V2_SCHEMA = {
+    "type": str,
+    "state": str,
+    "remaining_seconds": int,
+    "proof_count": int,
+    "error_stage": str,
+}
 REQUIRED_CHECKS = (
     "builds_clean",
     "recovery_pairing",
@@ -657,6 +664,19 @@ def sanitize_serial_line(line: str) -> tuple[str, dict[str, Any] | None]:
     ):
         if re.fullmatch(r"[0-9a-f]{40}", event["firmware_commit"]) is not None:
             return json.dumps(event, separators=(",", ":"), sort_keys=True), event
+    if event_type == "pairing_v2" and set(event) == set(PAIRING_V2_SCHEMA) and all(
+        type(event[name]) is expected for name, expected in PAIRING_V2_SCHEMA.items()
+    ):
+        if (
+            event["state"] in {
+                "idle", "active", "authenticating", "proof_verified",
+                "paired", "expired", "error",
+            }
+            and 0 <= event["remaining_seconds"] <= 120
+            and event["proof_count"] >= 0
+            and re.fullmatch(r"[a-z0-9_]{0,31}", event["error_stage"]) is not None
+        ):
+            return json.dumps(event, separators=(",", ":"), sort_keys=True), event
     # Preserve only exact, known credential-free diagnostics used to prove boot.
     if event_type == "boot_ok" and set(event) == {
         "type", "firmware_version", "reset_reason", "uptime_ms", "minimum_free_heap_bytes"
@@ -677,12 +697,14 @@ class SerialEvidence:
         output: pathlib.Path,
         timeout: float,
         secrets: SensitiveValueTracker,
+        event_sink: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self._serial_exception = serial_module.SerialException
         self._connection = self.open_connection(serial_module, port, timeout)
         self._output = output.open("w", encoding="utf-8")
         self._stage_timeout = timeout
         self._secrets = secrets
+        self._event_sink = event_sink
 
     @staticmethod
     def open_connection(serial_module: Any, port: str, timeout: float) -> Any:
@@ -843,6 +865,8 @@ class SerialEvidence:
                 raise AcceptanceFailure(f"{stage}: fatal Deck log observed")
             if sanitized == "[REDACTED SECRET TARGET LINE]":
                 raise AcceptanceFailure(f"{stage}: credential appeared in Deck output")
+            if event is not None and self._event_sink is not None:
+                self._event_sink(event)
             if event is not None and predicate(event):
                 return event
         raise AcceptanceTimeout(f"{stage}: timed out waiting for Deck state")
