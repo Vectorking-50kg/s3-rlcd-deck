@@ -35,6 +35,25 @@ type testAuthenticator struct {
 	revoked bool
 }
 
+type provisionalTestAuthenticator struct {
+	transactionID string
+}
+
+func (*provisionalTestAuthenticator) Verify(context.Context, pairing.Authentication) (bool, error) {
+	return false, nil
+}
+
+func (authenticator *provisionalTestAuthenticator) VerifyProvisional(
+	_ context.Context,
+	authentication pairing.Authentication,
+) (string, bool, error) {
+	valid := authentication.DeviceID == testDeviceID &&
+		authentication.Token == testDeviceToken &&
+		authentication.DeviceIdentity == testDeviceIdentity &&
+		authentication.ProtocolVersion == ProtocolVersion
+	return authenticator.transactionID, valid, nil
+}
+
 func (authenticator *testAuthenticator) Verify(
 	_ context.Context,
 	authentication pairing.Authentication,
@@ -195,6 +214,120 @@ func TestHubAuthenticatesThenRequiresDeviceHelloBeforeHeartbeat(t *testing.T) {
 	if heartbeat.Type != MessageHeartbeat || heartbeat.ProtocolVersion != ProtocolVersion ||
 		heartbeat.UTC == "" || heartbeat.RXQueueCapacity == 0 || heartbeat.TXQueueCapacity == 0 {
 		t.Fatalf("heartbeat = %#v", heartbeat)
+	}
+}
+
+func TestProvisionalDeviceLinkAllowsOnlyHelloAndFirstHeartbeatProof(t *testing.T) {
+	const transactionID = "ffeeddccbbaa99887766554433221100"
+	proof := make(chan string, 1)
+	profilePublished := make(chan struct{}, 1)
+	hub, err := New(Config{
+		Authenticator:     &provisionalTestAuthenticator{transactionID: transactionID},
+		HeartbeatInterval: 20 * time.Millisecond,
+		HeartbeatTimeout:  200 * time.Millisecond,
+		OnDeviceProfile: func(configmodel.DeviceProfile) {
+			profilePublished <- struct{}{}
+		},
+		OnProvisionalHeartbeat: func(deviceID, exactTransaction string) error {
+			proof <- deviceID + ":" + exactTransaction
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewTLSServer(hub)
+	defer func() {
+		hub.Close()
+		server.Close()
+	}()
+	if err = hub.PublishSnapshot(validSnapshot(t, "must-not-cross-provisional")); err != nil {
+		t.Fatal(err)
+	}
+	connection, response, err := dialTestDeck(t, server, testDeviceID, testDeviceToken)
+	if err != nil {
+		t.Fatalf("provisional Dial() status=%v error=%v", response, err)
+	}
+	defer connection.CloseNow()
+	if err = connection.Write(context.Background(), websocket.MessageText, validHello()); err != nil {
+		t.Fatal(err)
+	}
+	var heartbeat Heartbeat
+	if err = json.Unmarshal(readText(t, connection, time.Second), &heartbeat); err != nil ||
+		heartbeat.Type != MessageHeartbeat {
+		t.Fatalf("provisional server heartbeat = %#v, %v", heartbeat, err)
+	}
+	if err = connection.Write(
+		context.Background(),
+		websocket.MessageText,
+		validHeartbeat(1),
+	); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-proof:
+		if got != testDeviceID+":"+transactionID {
+			t.Fatalf("provisional proof = %q", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("provisional heartbeat proof was not published")
+	}
+	select {
+	case <-profilePublished:
+		t.Fatal("provisional hello published a normal Device Profile")
+	default:
+	}
+	if snapshot := hub.Snapshot(); snapshot.ConnectedDecks != 0 ||
+		snapshot.AcceptedConnections != 0 {
+		t.Fatalf("provisional probe entered normal session counters: %#v", snapshot)
+	}
+}
+
+func TestProvisionalDeviceLinkRejectsNormalControlBeforeProof(t *testing.T) {
+	unexpectedProof := make(chan struct{}, 1)
+	hub, err := New(Config{
+		Authenticator:     &provisionalTestAuthenticator{transactionID: "ffeeddccbbaa99887766554433221100"},
+		HeartbeatInterval: 20 * time.Millisecond,
+		HeartbeatTimeout:  200 * time.Millisecond,
+		OnProvisionalHeartbeat: func(string, string) error {
+			unexpectedProof <- struct{}{}
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewTLSServer(hub)
+	defer func() {
+		hub.Close()
+		server.Close()
+	}()
+	connection, _, err := dialTestDeck(t, server, testDeviceID, testDeviceToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.CloseNow()
+	if err = connection.Write(context.Background(), websocket.MessageText, validHello()); err != nil {
+		t.Fatal(err)
+	}
+	_ = readText(t, connection, time.Second)
+	if err = connection.Write(
+		context.Background(),
+		websocket.MessageBinary,
+		[]byte("serial-payload"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, _, err = connection.Read(ctx)
+	if err == nil {
+		t.Fatal("provisional binary control remained connected")
+	}
+	select {
+	case <-unexpectedProof:
+		t.Fatal("non-heartbeat provisional control produced proof")
+	default:
 	}
 }
 

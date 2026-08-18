@@ -11,6 +11,7 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -31,6 +32,17 @@ type ProofClient struct {
 	random io.Reader
 }
 
+// SecureSession owns one interface-pinned HTTP connection, cookie jar, and
+// ordered Security2 nonce stream. Exchanges are serialized because nonce and
+// cookie order are part of the authenticated transcript.
+type SecureSession struct {
+	mutex    sync.Mutex
+	security *Security2
+	client   *http.Client
+	baseURL  string
+	closed   bool
+}
+
 func NewProofClient(random io.Reader) *ProofClient {
 	return &ProofClient{random: random}
 }
@@ -39,58 +51,13 @@ func NewProofClient(random io.Reader) *ProofClient {
 // discovery route and performs one encrypted application round trip. It does
 // not create or mutate any Companion Profile or Trust record.
 func (client *ProofClient) Prove(ctx context.Context, route Route, code []byte) (ProofResult, error) {
-	if route.InterfaceIndex <= 0 || route.InterfaceName == "" ||
-		!usablePairingIPv4(route.Address) || route.Port == 0 {
-		return ProofResult{}, errors.New("invalid Pairing v2 proof route")
-	}
-	security, err := NewSecurity2(code, client.random)
-	if err != nil {
-		return ProofResult{}, err
-	}
-	defer security.Close()
-	httpClient, err := newPairingHTTPClient(route)
-	if err != nil {
-		return ProofResult{}, err
-	}
-	defer httpClient.CloseIdleConnections()
-	baseURL := "http://" + net.JoinHostPort(route.Address.String(), strconv.Itoa(int(route.Port)))
 	started := time.Now()
-
-	command0, err := security.Start()
+	session, err := client.Connect(ctx, route, code)
 	if err != nil {
 		return ProofResult{}, err
 	}
-	response0, err := postPairingEndpoint(ctx, httpClient, baseURL, security2Endpoint, command0)
-	clearBytes(command0)
-	if err != nil {
-		return ProofResult{}, err
-	}
-	command1, err := security.HandleResponse0(response0)
-	clearBytes(response0)
-	if err != nil {
-		return ProofResult{}, err
-	}
-	response1, err := postPairingEndpoint(ctx, httpClient, baseURL, security2Endpoint, command1)
-	clearBytes(command1)
-	if err != nil {
-		return ProofResult{}, err
-	}
-	err = security.HandleResponse1(response1)
-	clearBytes(response1)
-	if err != nil {
-		return ProofResult{}, err
-	}
-	encryptedRequest, err := security.Seal([]byte(proofRequest))
-	if err != nil {
-		return ProofResult{}, err
-	}
-	encryptedResponse, err := postPairingEndpoint(ctx, httpClient, baseURL, proofEndpoint, encryptedRequest)
-	clearBytes(encryptedRequest)
-	if err != nil {
-		return ProofResult{}, err
-	}
-	response, err := security.Open(encryptedResponse)
-	clearBytes(encryptedResponse)
+	defer session.Close()
+	response, err := session.Exchange(ctx, proofEndpoint, []byte(proofRequest))
 	if err != nil {
 		return ProofResult{}, err
 	}
@@ -99,6 +66,117 @@ func (client *ProofClient) Prove(ctx context.Context, route Route, code []byte) 
 		return ProofResult{}, errors.New("Pairing v2 proof endpoint returned an unexpected response")
 	}
 	return ProofResult{Route: route, Elapsed: time.Since(started)}, nil
+}
+
+func (client *ProofClient) Connect(
+	ctx context.Context,
+	route Route,
+	code []byte,
+) (*SecureSession, error) {
+	if route.InterfaceIndex <= 0 || route.InterfaceName == "" ||
+		!usablePairingIPv4(route.Address) || route.Port == 0 {
+		return nil, errors.New("invalid Pairing v2 proof route")
+	}
+	security, err := NewSecurity2(code, client.random)
+	if err != nil {
+		return nil, err
+	}
+	httpClient, err := newPairingHTTPClient(route)
+	if err != nil {
+		security.Close()
+		return nil, err
+	}
+	baseURL := "http://" + net.JoinHostPort(route.Address.String(), strconv.Itoa(int(route.Port)))
+
+	command0, err := security.Start()
+	if err != nil {
+		security.Close()
+		httpClient.CloseIdleConnections()
+		return nil, err
+	}
+	response0, err := postPairingEndpoint(ctx, httpClient, baseURL, security2Endpoint, command0)
+	clearBytes(command0)
+	if err != nil {
+		security.Close()
+		httpClient.CloseIdleConnections()
+		return nil, err
+	}
+	command1, err := security.HandleResponse0(response0)
+	clearBytes(response0)
+	if err != nil {
+		security.Close()
+		httpClient.CloseIdleConnections()
+		return nil, err
+	}
+	response1, err := postPairingEndpoint(ctx, httpClient, baseURL, security2Endpoint, command1)
+	clearBytes(command1)
+	if err != nil {
+		security.Close()
+		httpClient.CloseIdleConnections()
+		return nil, err
+	}
+	err = security.HandleResponse1(response1)
+	clearBytes(response1)
+	if err != nil {
+		security.Close()
+		httpClient.CloseIdleConnections()
+		return nil, err
+	}
+	return &SecureSession{security: security, client: httpClient, baseURL: baseURL}, nil
+}
+
+func (session *SecureSession) Exchange(
+	ctx context.Context,
+	endpoint string,
+	plaintext []byte,
+) ([]byte, error) {
+	session.mutex.Lock()
+	defer session.mutex.Unlock()
+	if session.closed || session.security == nil || session.client == nil {
+		return nil, errors.New("Pairing v2 secure session is closed")
+	}
+	encryptedRequest, err := session.security.Seal(plaintext)
+	if err != nil {
+		return nil, err
+	}
+	encryptedResponse, err := postPairingEndpoint(
+		ctx,
+		session.client,
+		session.baseURL,
+		endpoint,
+		encryptedRequest,
+	)
+	clearBytes(encryptedRequest)
+	if err != nil {
+		return nil, err
+	}
+	response, err := session.security.Open(encryptedResponse)
+	clearBytes(encryptedResponse)
+	if err != nil {
+		return nil, err
+	}
+	return response, nil
+}
+
+func (session *SecureSession) Close() {
+	if session == nil {
+		return
+	}
+	session.mutex.Lock()
+	defer session.mutex.Unlock()
+	if session.closed {
+		return
+	}
+	session.closed = true
+	if session.security != nil {
+		session.security.Close()
+	}
+	if session.client != nil {
+		session.client.CloseIdleConnections()
+	}
+	session.security = nil
+	session.client = nil
+	session.baseURL = ""
 }
 
 func newPairingHTTPClient(route Route) (*http.Client, error) {
