@@ -38,6 +38,10 @@ var (
 	)
 )
 
+func ValidHubService(value string) bool {
+	return servicePattern.MatchString(value)
+}
+
 type Message interface {
 	pairingV2Message()
 }

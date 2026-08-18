@@ -166,6 +166,29 @@ func (application *Runtime) managementRoutes() http.Handler {
 		limits.SensitiveRateWindow,
 		application.requireManagementWrite(application.handleIssuePairingCode),
 	))
+	mux.HandleFunc("POST /api/v1/pairing-v2/scan", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.requireManagementWrite(application.handlePairingV2Scan),
+	))
+	mux.HandleFunc("POST /api/v1/pairing-v2/sessions", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.requireManagementWrite(application.handlePairingV2Begin),
+	))
+	mux.HandleFunc("GET /api/v1/pairing-v2/sessions/{sessionRef}",
+		application.requireManagementSession(application.handlePairingV2Status),
+	)
+	mux.HandleFunc("POST /api/v1/pairing-v2/sessions/{sessionRef}/confirm", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.requireManagementWrite(application.handlePairingV2Confirm),
+	))
+	mux.HandleFunc("DELETE /api/v1/pairing-v2/sessions/{sessionRef}", limitManagementRequests(
+		sensitiveRateLimiter,
+		limits.SensitiveRateWindow,
+		application.requireManagementWrite(application.handlePairingV2Cancel),
+	))
 	mux.HandleFunc("POST /api/v1/devices/{deviceID}/rotate", limitManagementRequests(
 		sensitiveRateLimiter,
 		limits.SensitiveRateWindow,

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	goruntime "runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/history"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/managementtoken"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairing"
+	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/pairingv2"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/protectedfile"
 	companionruntime "github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/runtime"
 	"github.com/Vectorking-50kg/s3-rlcd-deck/companion/internal/secretstore"
@@ -207,6 +209,19 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "cannot configure pairing: %v\n", err)
 		return 2
 	}
+	var pairingV2Discovery *pairingv2.Discovery
+	var pairingV2HubService string
+	if goruntime.GOOS == "darwin" {
+		pairingV2Discovery, err = pairingv2.NewDiscovery(pairingv2.DiscoveryConfig{
+			Source: pairingv2.NewMDNSSource(),
+		})
+		fingerprint := strings.TrimPrefix(identity.Fingerprint(), "sha256:")
+		if err != nil || len(fingerprint) < 12 {
+			fmt.Fprintln(stderr, "cannot configure Pairing v2 discovery")
+			return 2
+		}
+		pairingV2HubService = "s3deck-" + fingerprint[:12] + "._s3rlcd-hub._tcp.local."
+	}
 	structuredProviderService, backupService, configurationOwner, restorableConfiguration,
 		closeProviderDefinitions := loadStructuredProviders(
 		resolvedDataDirectory,
@@ -327,7 +342,9 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			TLSCertificate:        &tlsCertificate,
 			ServerProtocolVersion: serverProtocolVersion,
 		},
-		Pairing: pairingService,
+		Pairing:             pairingService,
+		PairingV2Discovery:  pairingV2Discovery,
+		PairingV2HubService: pairingV2HubService,
 	}
 	if *headless {
 		application, runtimeErr := companionruntime.New(config)

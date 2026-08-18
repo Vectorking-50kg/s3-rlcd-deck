@@ -314,6 +314,44 @@ func TestCoordinatorCancellationClearsProvisionalTrust(t *testing.T) {
 	}
 }
 
+func TestCoordinatorStartsConfirmationAsynchronouslyAndCloseDrainsIt(t *testing.T) {
+	channel := newScriptedPairingChannel()
+	coordinator, trust, session := newCoordinatorFixture(t, channel)
+	started, err := coordinator.StartConfirm(session.Reference, "012345")
+	if err != nil || started.State != SessionAuthenticating {
+		t.Fatalf("StartConfirm() = %#v, %v", started, err)
+	}
+	select {
+	case <-channel.credentialsReceived:
+	case <-time.After(time.Second):
+		t.Fatal("asynchronous confirmation did not send credentials")
+	}
+	waitForCoordinatorState(t, coordinator, session.Reference, SessionProvingLink)
+	closeContext, cancelClose := context.WithTimeout(context.Background(), time.Second)
+	err = coordinator.Close(closeContext)
+	cancelClose()
+	if err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	view, err := coordinator.Status(session.Reference)
+	if err != nil || view.State != SessionFailed {
+		t.Fatalf("Status(after Close) = %#v, %v", view, err)
+	}
+	deviceID, _ := channel.proofIdentity()
+	_, valid, verifyErr := trust.VerifyProvisional(context.Background(), pairing.Authentication{
+		DeviceID:        deviceID,
+		Token:           base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x41}, 32)),
+		DeviceIdentity:  "ZGV2aWNlLWlkZW50aXR5LTE",
+		ProtocolVersion: pairing.ProtocolVersion,
+	})
+	if verifyErr != nil || valid {
+		t.Fatalf("provisional trust survived Close: %t, %v", valid, verifyErr)
+	}
+	if _, err = coordinator.Begin("anything"); !errors.Is(err, ErrCoordinatorClosed) {
+		t.Fatalf("Begin(after Close) error = %v", err)
+	}
+}
+
 func waitForCoordinatorState(
 	t *testing.T,
 	coordinator *Coordinator,

@@ -17,6 +17,7 @@ import (
 
 const (
 	PairingService = "_s3rlcd-pair._tcp"
+	HubService     = "_s3rlcd-hub._tcp"
 	PairingDomain  = "local"
 
 	defaultCandidateTTL  = 10 * time.Second

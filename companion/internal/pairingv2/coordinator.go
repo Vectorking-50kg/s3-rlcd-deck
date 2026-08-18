@@ -23,9 +23,10 @@ const (
 )
 
 var (
-	ErrSessionNotFound = errors.New("Pairing v2 session not found")
-	ErrSessionState    = errors.New("Pairing v2 session is not confirmable")
-	ErrPairingFailed   = errors.New("Pairing v2 transaction failed")
+	ErrSessionNotFound   = errors.New("Pairing v2 session not found")
+	ErrSessionState      = errors.New("Pairing v2 session is not confirmable")
+	ErrPairingFailed     = errors.New("Pairing v2 transaction failed")
+	ErrCoordinatorClosed = errors.New("Pairing v2 coordinator is closed")
 )
 
 type SessionState string
@@ -83,9 +84,14 @@ type Coordinator struct {
 	random           io.Reader
 	sessionTTL       time.Duration
 	linkProofTimeout time.Duration
+	operationContext context.Context
+	cancelOperations context.CancelFunc
 
-	mutex    sync.Mutex
-	sessions map[string]*sessionRecord
+	mutex      sync.Mutex
+	sessions   map[string]*sessionRecord
+	operations sync.WaitGroup
+	closed     bool
+	closeDone  chan struct{}
 }
 
 type sessionRecord struct {
@@ -125,6 +131,7 @@ func NewCoordinator(config CoordinatorConfig) (*Coordinator, error) {
 			return proofClient.Connect(ctx, route, code)
 		}
 	}
+	operationContext, cancelOperations := context.WithCancel(context.Background())
 	return &Coordinator{
 		discovery:        config.Discovery,
 		trust:            config.Trust,
@@ -134,15 +141,30 @@ func NewCoordinator(config CoordinatorConfig) (*Coordinator, error) {
 		random:           config.Random,
 		sessionTTL:       config.SessionTTL,
 		linkProofTimeout: config.LinkProofTimeout,
+		operationContext: operationContext,
+		cancelOperations: cancelOperations,
 		sessions:         make(map[string]*sessionRecord),
+		closeDone:        make(chan struct{}),
 	}, nil
 }
 
 func (coordinator *Coordinator) Scan(ctx context.Context) ([]Candidate, error) {
+	coordinator.mutex.Lock()
+	closed := coordinator.closed
+	coordinator.mutex.Unlock()
+	if closed {
+		return nil, ErrCoordinatorClosed
+	}
 	return coordinator.discovery.Scan(ctx)
 }
 
 func (coordinator *Coordinator) Begin(candidateReference string) (SessionView, error) {
+	coordinator.mutex.Lock()
+	closed := coordinator.closed
+	coordinator.mutex.Unlock()
+	if closed {
+		return SessionView{}, ErrCoordinatorClosed
+	}
 	selection, err := coordinator.discovery.Resolve(candidateReference)
 	if err != nil {
 		return SessionView{}, err
@@ -152,6 +174,9 @@ func (coordinator *Coordinator) Begin(candidateReference string) (SessionView, e
 
 	coordinator.mutex.Lock()
 	defer coordinator.mutex.Unlock()
+	if coordinator.closed {
+		return SessionView{}, ErrCoordinatorClosed
+	}
 	coordinator.pruneLocked(now)
 	if len(coordinator.sessions) >= maximumSessions {
 		return SessionView{}, errors.New("Pairing v2 session capacity reached")
@@ -231,33 +256,80 @@ func (coordinator *Coordinator) Cancel(reference string) (SessionView, error) {
 	return view, nil
 }
 
+// StartConfirm transfers the Pairing transaction to the Coordinator's bounded
+// lifecycle and returns immediately. HTTP request cancellation must not abort a
+// transaction after the browser has received an accepted response.
+func (coordinator *Coordinator) StartConfirm(reference string, code string) (SessionView, error) {
+	record, operationContext, cancel, view, err := coordinator.claimConfirm(
+		coordinator.operationContext,
+		reference,
+		code,
+	)
+	if err != nil {
+		return view, err
+	}
+	go func() {
+		defer coordinator.operations.Done()
+		_, _ = coordinator.finishConfirm(operationContext, cancel, record, code)
+	}()
+	return view, nil
+}
+
 func (coordinator *Coordinator) Confirm(
 	ctx context.Context,
 	reference string,
 	code string,
 ) (SessionView, error) {
-	if !validSixDigitCode(code) {
-		return SessionView{}, ErrPairingFailed
+	record, operationContext, cancel, view, err := coordinator.claimConfirm(ctx, reference, code)
+	if err != nil {
+		return view, err
 	}
-	operationContext, cancel := context.WithCancel(ctx)
+	defer coordinator.operations.Done()
+	return coordinator.finishConfirm(operationContext, cancel, record, code)
+}
+
+func (coordinator *Coordinator) claimConfirm(
+	parent context.Context,
+	reference string,
+	code string,
+) (*sessionRecord, context.Context, context.CancelFunc, SessionView, error) {
+	if !validSixDigitCode(code) {
+		return nil, nil, nil, SessionView{}, ErrPairingFailed
+	}
+	operationContext, cancel := context.WithCancel(parent)
 	coordinator.mutex.Lock()
+	if coordinator.closed {
+		coordinator.mutex.Unlock()
+		cancel()
+		return nil, nil, nil, SessionView{}, ErrCoordinatorClosed
+	}
 	record, exists := coordinator.sessions[reference]
 	if !exists {
 		coordinator.mutex.Unlock()
 		cancel()
-		return SessionView{}, ErrSessionNotFound
+		return nil, nil, nil, SessionView{}, ErrSessionNotFound
 	}
 	coordinator.expireLocked(record, coordinator.clock.Now().UTC())
 	if record.view.State != SessionAwaitingCode {
 		view := record.view
 		coordinator.mutex.Unlock()
 		cancel()
-		return view, ErrSessionState
+		return nil, nil, nil, view, ErrSessionState
 	}
 	record.view.State = SessionAuthenticating
 	record.cancel = cancel
+	coordinator.operations.Add(1)
+	view := record.view
 	coordinator.mutex.Unlock()
+	return record, operationContext, cancel, view, nil
+}
 
+func (coordinator *Coordinator) finishConfirm(
+	operationContext context.Context,
+	cancel context.CancelFunc,
+	record *sessionRecord,
+	code string,
+) (SessionView, error) {
 	err := coordinator.confirm(operationContext, record, code)
 	cancel()
 	coordinator.mutex.Lock()
@@ -274,6 +346,34 @@ func (coordinator *Coordinator) Confirm(
 		return view, errors.Join(ErrPairingFailed, err)
 	}
 	return view, nil
+}
+
+// Close cancels all in-flight transactions and waits for their secret-bearing
+// channels and provisional Trust entries to be cleared. A timed-out Close can
+// be retried with a fresh context.
+func (coordinator *Coordinator) Close(ctx context.Context) error {
+	coordinator.mutex.Lock()
+	if !coordinator.closed {
+		coordinator.closed = true
+		coordinator.cancelOperations()
+		for _, record := range coordinator.sessions {
+			if record.cancel != nil {
+				record.cancel()
+			}
+		}
+		go func() {
+			coordinator.operations.Wait()
+			close(coordinator.closeDone)
+		}()
+	}
+	closeDone := coordinator.closeDone
+	coordinator.mutex.Unlock()
+	select {
+	case <-closeDone:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (coordinator *Coordinator) confirm(
