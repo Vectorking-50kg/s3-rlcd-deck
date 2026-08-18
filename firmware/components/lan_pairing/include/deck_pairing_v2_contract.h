@@ -16,6 +16,8 @@ extern "C" {
 #define DECK_PAIRING_V2_HUB_ADDRESS_CAPACITY 22
 #define DECK_PAIRING_V2_TOKEN_CAPACITY 44
 #define DECK_PAIRING_V2_CERTIFICATE_DER_CAPACITY 1024
+#define DECK_PAIRING_V2_DEVICE_ID_CAPACITY 65
+#define DECK_PAIRING_V2_DEVICE_IDENTITY_CAPACITY 684
 
 typedef enum {
     DECK_PAIRING_V2_MESSAGE_INVALID = 0,
@@ -65,9 +67,20 @@ typedef struct {
 } deck_pairing_v2_commit_t;
 
 typedef struct {
+    char window_nonce[DECK_PAIRING_V2_ID_CAPACITY];
+    char companion_nonce[DECK_PAIRING_V2_ID_CAPACITY];
+    char deck_nonce[DECK_PAIRING_V2_ID_CAPACITY];
+    char device_id[DECK_PAIRING_V2_DEVICE_ID_CAPACITY];
+    char device_identity[DECK_PAIRING_V2_DEVICE_IDENTITY_CAPACITY];
+    char profile_id[DECK_PAIRING_V2_DIGEST_CAPACITY];
+    char transcript_sha256[DECK_PAIRING_V2_DIGEST_CAPACITY];
+} deck_pairing_v2_commit_ready_t;
+
+typedef struct {
     deck_pairing_v2_message_type_t type;
     deck_pairing_v2_common_t common;
     deck_pairing_v2_credentials_t credentials;
+    deck_pairing_v2_commit_ready_t commit_ready;
     deck_pairing_v2_commit_t commit;
     char state[16];
     char error_code[32];
@@ -83,6 +96,14 @@ bool deck_pairing_v2_contract_decode(
 );
 
 void deck_pairing_v2_contract_clear(deck_pairing_v2_message_t *message);
+
+/* Computes the canonical transcript bound by commit-ready and commit. */
+bool deck_pairing_v2_contract_transcript_sha256(
+    const deck_pairing_v2_message_t *credentials,
+    const deck_pairing_v2_message_t *commit_ready,
+    const deck_pairing_v2_crypto_t *crypto,
+    char output[DECK_PAIRING_V2_DIGEST_CAPACITY]
+);
 
 #ifdef __cplusplus
 }

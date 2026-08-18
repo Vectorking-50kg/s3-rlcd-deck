@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -243,6 +244,67 @@ func validateContractMessage(message Message) error {
 		return ErrMalformedContract
 	}
 	return nil
+}
+
+// TranscriptSHA256 computes the canonical digest that binds the PAKE session,
+// Companion credentials, and Deck identity to one transaction. The returned
+// digest must exactly match commit-ready, commit, status, and receipt messages.
+func TranscriptSHA256(credentials Credentials, ready CommitReady) (string, error) {
+	if validateContractMessage(&credentials) != nil || validateContractMessage(&ready) != nil ||
+		credentials.SessionID != ready.SessionID ||
+		credentials.TransactionID != ready.TransactionID ||
+		credentials.WindowNonce != ready.WindowNonce ||
+		credentials.CompanionNonce != ready.CompanionNonce ||
+		credentials.CertificateFingerprint != ready.ProfileID {
+		return "", ErrMalformedContract
+	}
+	certificate, err := base64.StdEncoding.Strict().DecodeString(credentials.CertificateDER)
+	if err != nil || len(certificate) == 0 || len(certificate) > MaximumCertificateDER {
+		clearBytes(certificate)
+		return "", ErrMalformedContract
+	}
+	defer clearBytes(certificate)
+
+	transcript := make([]byte, 0, MaximumContractMessage)
+	defer clearBytes(transcript)
+	transcript = append(transcript, "s3-rlcd-pairing-v2-transcript"...)
+	transcript = append(transcript, 0)
+	appendField := func(label string, value []byte) bool {
+		if len(value) > int(^uint32(0)) || len(transcript)+len(label)+5+len(value) > MaximumContractMessage {
+			return false
+		}
+		transcript = append(transcript, label...)
+		transcript = append(transcript, 0)
+		var length [4]byte
+		binary.BigEndian.PutUint32(length[:], uint32(len(value)))
+		transcript = append(transcript, length[:]...)
+		transcript = append(transcript, value...)
+		return true
+	}
+	appendUint32 := func(label string, value uint32) bool {
+		var encoded [4]byte
+		binary.BigEndian.PutUint32(encoded[:], value)
+		return appendField(label, encoded[:])
+	}
+	if !appendUint32("protocol_version", ContractVersion) ||
+		!appendField("session_id", []byte(credentials.SessionID)) ||
+		!appendField("transaction_id", []byte(credentials.TransactionID)) ||
+		!appendField("window_nonce", []byte(credentials.WindowNonce)) ||
+		!appendField("companion_nonce", []byte(credentials.CompanionNonce)) ||
+		!appendField("hub_service", []byte(credentials.HubService)) ||
+		!appendField("hub_address", []byte(credentials.HubAddress)) ||
+		!appendField("token", []byte(credentials.Token)) ||
+		!appendField("certificate_fingerprint", []byte(credentials.CertificateFingerprint)) ||
+		!appendField("certificate_der", certificate) ||
+		!appendUint32("device_link_protocol", credentials.DeviceLinkProtocol) ||
+		!appendField("deck_nonce", []byte(ready.DeckNonce)) ||
+		!appendField("device_id", []byte(ready.DeviceID)) ||
+		!appendField("device_identity", []byte(ready.DeviceIdentity)) ||
+		!appendField("profile_id", []byte(ready.ProfileID)) {
+		return "", ErrMalformedContract
+	}
+	digest := sha256.Sum256(transcript)
+	return "sha256:" + hex.EncodeToString(digest[:]), nil
 }
 
 func commonFieldsValid(messageType string, version uint32, sessionID, transactionID string) bool {

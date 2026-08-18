@@ -1,6 +1,7 @@
 #include "deck_pairing_v2_contract.h"
 
 #include <cstring>
+#include <new>
 
 namespace {
 
@@ -534,6 +535,111 @@ bool error_code(Span value)
            span_equal(value, "cancelled");
 }
 
+constexpr size_t kTranscriptCapacity = DECK_PAIRING_V2_MAX_DOCUMENT_BYTES;
+
+class TranscriptBuilder {
+public:
+    TranscriptBuilder(uint8_t *buffer, size_t capacity)
+        : buffer_(buffer), capacity_(capacity)
+    {
+    }
+
+    bool domain(const char *value)
+    {
+        return append(
+            reinterpret_cast<const uint8_t *>(value),
+            std::strlen(value) + 1U
+        );
+    }
+
+    bool field(const char *label, const uint8_t *value, size_t value_size)
+    {
+        if (label == nullptr || (value == nullptr && value_size != 0) || value_size > UINT32_MAX) {
+            return false;
+        }
+        const size_t label_size = std::strlen(label);
+        const uint32_t length = static_cast<uint32_t>(value_size);
+        const uint8_t encoded_length[4] = {
+            static_cast<uint8_t>((length >> 24U) & 0xffU),
+            static_cast<uint8_t>((length >> 16U) & 0xffU),
+            static_cast<uint8_t>((length >> 8U) & 0xffU),
+            static_cast<uint8_t>(length & 0xffU),
+        };
+        return append(reinterpret_cast<const uint8_t *>(label), label_size) &&
+               append(reinterpret_cast<const uint8_t *>("\0"), 1U) &&
+               append(encoded_length, sizeof(encoded_length)) && append(value, value_size);
+    }
+
+    bool text(const char *label, const char *value, size_t capacity)
+    {
+        if (value == nullptr || capacity == 0) {
+            return false;
+        }
+        size_t value_size = 0;
+        while (value_size < capacity && value[value_size] != '\0') {
+            ++value_size;
+        }
+        return value_size > 0 && value_size < capacity &&
+               field(label, reinterpret_cast<const uint8_t *>(value), value_size);
+    }
+
+    bool unsigned_integer(const char *label, uint32_t value)
+    {
+        const uint8_t encoded[4] = {
+            static_cast<uint8_t>((value >> 24U) & 0xffU),
+            static_cast<uint8_t>((value >> 16U) & 0xffU),
+            static_cast<uint8_t>((value >> 8U) & 0xffU),
+            static_cast<uint8_t>(value & 0xffU),
+        };
+        return field(label, encoded, sizeof(encoded));
+    }
+
+    const uint8_t *data() const { return buffer_; }
+    size_t size() const { return size_; }
+
+private:
+    bool append(const uint8_t *value, size_t value_size)
+    {
+        if ((value == nullptr && value_size != 0) || value_size > capacity_ - size_) {
+            return false;
+        }
+        if (value_size != 0) {
+            std::memcpy(buffer_ + size_, value, value_size);
+        }
+        size_ += value_size;
+        return true;
+    }
+
+    uint8_t *buffer_ = nullptr;
+    size_t capacity_ = 0;
+    size_t size_ = 0;
+};
+
+bool equal_bounded(const char *left, size_t left_capacity, const char *right, size_t right_capacity)
+{
+    size_t left_size = 0;
+    size_t right_size = 0;
+    while (left_size < left_capacity && left[left_size] != '\0') {
+        ++left_size;
+    }
+    while (right_size < right_capacity && right[right_size] != '\0') {
+        ++right_size;
+    }
+    return left_size < left_capacity && right_size < right_capacity &&
+           left_size == right_size && std::memcmp(left, right, left_size) == 0;
+}
+
+void encode_digest(const uint8_t digest_value[32], char output[DECK_PAIRING_V2_DIGEST_CAPACITY])
+{
+    constexpr char hexadecimal[] = "0123456789abcdef";
+    std::memcpy(output, "sha256:", 7U);
+    for (size_t index = 0; index < 32U; ++index) {
+        output[7U + index * 2U] = hexadecimal[digest_value[index] >> 4U];
+        output[8U + index * 2U] = hexadecimal[digest_value[index] & 0x0fU];
+    }
+    output[71] = '\0';
+}
+
 bool common(
     const Field *fields,
     size_t count,
@@ -648,7 +754,42 @@ bool validate_message(
                string_field(fields, count, "device_id", &id) && device_id(id) &&
                string_field(fields, count, "device_identity", &identity) && device_identity(identity) &&
                string_field(fields, count, "profile_id", &profile) && digest(profile) &&
-               string_field(fields, count, "transcript_sha256", &transcript) && digest(transcript);
+               string_field(fields, count, "transcript_sha256", &transcript) && digest(transcript) &&
+               copy_span(
+                   window,
+                   message->commit_ready.window_nonce,
+                   sizeof(message->commit_ready.window_nonce)
+               ) &&
+               copy_span(
+                   companion,
+                   message->commit_ready.companion_nonce,
+                   sizeof(message->commit_ready.companion_nonce)
+               ) &&
+               copy_span(
+                   deck,
+                   message->commit_ready.deck_nonce,
+                   sizeof(message->commit_ready.deck_nonce)
+               ) &&
+               copy_span(
+                   id,
+                   message->commit_ready.device_id,
+                   sizeof(message->commit_ready.device_id)
+               ) &&
+               copy_span(
+                   identity,
+                   message->commit_ready.device_identity,
+                   sizeof(message->commit_ready.device_identity)
+               ) &&
+               copy_span(
+                   profile,
+                   message->commit_ready.profile_id,
+                   sizeof(message->commit_ready.profile_id)
+               ) &&
+               copy_span(
+                   transcript,
+                   message->commit_ready.transcript_sha256,
+                   sizeof(message->commit_ready.transcript_sha256)
+               );
     }
     if (span_equal(message_type, "pairing.commit")) {
         static constexpr const char *names[] = {
@@ -768,4 +909,140 @@ void deck_pairing_v2_contract_clear(deck_pairing_v2_message_t *message)
     if (message != nullptr) {
         secure_clear(message, sizeof(*message));
     }
+}
+
+bool deck_pairing_v2_contract_transcript_sha256(
+    const deck_pairing_v2_message_t *credentials,
+    const deck_pairing_v2_message_t *commit_ready,
+    const deck_pairing_v2_crypto_t *crypto,
+    char output[DECK_PAIRING_V2_DIGEST_CAPACITY]
+)
+{
+    if (output != nullptr) {
+        secure_clear(output, DECK_PAIRING_V2_DIGEST_CAPACITY);
+    }
+    if (credentials == nullptr || commit_ready == nullptr || crypto == nullptr ||
+        crypto->sha256 == nullptr || output == nullptr ||
+        credentials->type != DECK_PAIRING_V2_MESSAGE_CREDENTIALS ||
+        commit_ready->type != DECK_PAIRING_V2_MESSAGE_COMMIT_READY ||
+        credentials->common.sequence != 1U || commit_ready->common.sequence != 2U ||
+        credentials->credentials.device_link_protocol != 1U ||
+        credentials->credentials.certificate_der_size == 0 ||
+        credentials->credentials.certificate_der_size > DECK_PAIRING_V2_CERTIFICATE_DER_CAPACITY ||
+        !equal_bounded(
+            credentials->common.session_id,
+            sizeof(credentials->common.session_id),
+            commit_ready->common.session_id,
+            sizeof(commit_ready->common.session_id)
+        ) ||
+        !equal_bounded(
+            credentials->common.transaction_id,
+            sizeof(credentials->common.transaction_id),
+            commit_ready->common.transaction_id,
+            sizeof(commit_ready->common.transaction_id)
+        ) ||
+        !equal_bounded(
+            credentials->credentials.window_nonce,
+            sizeof(credentials->credentials.window_nonce),
+            commit_ready->commit_ready.window_nonce,
+            sizeof(commit_ready->commit_ready.window_nonce)
+        ) ||
+        !equal_bounded(
+            credentials->credentials.companion_nonce,
+            sizeof(credentials->credentials.companion_nonce),
+            commit_ready->commit_ready.companion_nonce,
+            sizeof(commit_ready->commit_ready.companion_nonce)
+        ) ||
+        !equal_bounded(
+            credentials->credentials.certificate_fingerprint,
+            sizeof(credentials->credentials.certificate_fingerprint),
+            commit_ready->commit_ready.profile_id,
+            sizeof(commit_ready->commit_ready.profile_id)
+        )) {
+        return false;
+    }
+
+    uint8_t *serialized = new (std::nothrow) uint8_t[kTranscriptCapacity];
+    if (serialized == nullptr) {
+        return false;
+    }
+    TranscriptBuilder transcript(serialized, kTranscriptCapacity);
+    const bool encoded =
+        transcript.domain("s3-rlcd-pairing-v2-transcript") &&
+        transcript.unsigned_integer("protocol_version", DECK_PAIRING_V2_PROTOCOL_VERSION) &&
+        transcript.text("session_id", credentials->common.session_id, sizeof(credentials->common.session_id)) &&
+        transcript.text(
+            "transaction_id",
+            credentials->common.transaction_id,
+            sizeof(credentials->common.transaction_id)
+        ) &&
+        transcript.text(
+            "window_nonce",
+            credentials->credentials.window_nonce,
+            sizeof(credentials->credentials.window_nonce)
+        ) &&
+        transcript.text(
+            "companion_nonce",
+            credentials->credentials.companion_nonce,
+            sizeof(credentials->credentials.companion_nonce)
+        ) &&
+        transcript.text(
+            "hub_service",
+            credentials->credentials.hub_service,
+            sizeof(credentials->credentials.hub_service)
+        ) &&
+        transcript.text(
+            "hub_address",
+            credentials->credentials.hub_address,
+            sizeof(credentials->credentials.hub_address)
+        ) &&
+        transcript.text("token", credentials->credentials.token, sizeof(credentials->credentials.token)) &&
+        transcript.text(
+            "certificate_fingerprint",
+            credentials->credentials.certificate_fingerprint,
+            sizeof(credentials->credentials.certificate_fingerprint)
+        ) &&
+        transcript.field(
+            "certificate_der",
+            credentials->credentials.certificate_der,
+            credentials->credentials.certificate_der_size
+        ) &&
+        transcript.unsigned_integer(
+            "device_link_protocol",
+            credentials->credentials.device_link_protocol
+        ) &&
+        transcript.text(
+            "deck_nonce",
+            commit_ready->commit_ready.deck_nonce,
+            sizeof(commit_ready->commit_ready.deck_nonce)
+        ) &&
+        transcript.text(
+            "device_id",
+            commit_ready->commit_ready.device_id,
+            sizeof(commit_ready->commit_ready.device_id)
+        ) &&
+        transcript.text(
+            "device_identity",
+            commit_ready->commit_ready.device_identity,
+            sizeof(commit_ready->commit_ready.device_identity)
+        ) &&
+        transcript.text(
+            "profile_id",
+            commit_ready->commit_ready.profile_id,
+            sizeof(commit_ready->commit_ready.profile_id)
+        );
+    uint8_t digest_value[32]{};
+    const bool hashed = encoded && crypto->sha256(
+        crypto->context,
+        transcript.data(),
+        transcript.size(),
+        digest_value
+    );
+    if (hashed) {
+        encode_digest(digest_value, output);
+    }
+    secure_clear(digest_value, sizeof(digest_value));
+    secure_clear(serialized, kTranscriptCapacity);
+    delete[] serialized;
+    return hashed;
 }

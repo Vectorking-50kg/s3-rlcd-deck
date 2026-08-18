@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -146,5 +147,47 @@ func TestSharedPairingV2FixturesMatchGoContract(t *testing.T) {
 	if json.Unmarshal(schemaBytes, &schema) != nil || schema.Definitions["credentials"] == nil ||
 		schema.Definitions["commit_receipt"] == nil {
 		t.Fatal("Pairing v2 schema is missing authoritative message definitions")
+	}
+}
+
+func TestPairingV2TranscriptMatchesCrossEndKAT(t *testing.T) {
+	_, source, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("locate pairing v2 contract test")
+	}
+	fixtureDirectory := filepath.Join(
+		filepath.Clean(filepath.Join(filepath.Dir(source), "..", "..", "..")),
+		"protocol", "fixtures", "pairing-v2",
+	)
+	credentialsDocument, err := os.ReadFile(filepath.Join(fixtureDirectory, "valid-credentials.json"))
+	if err != nil {
+		t.Fatalf("read credentials fixture: %v", err)
+	}
+	readyDocument, err := os.ReadFile(filepath.Join(fixtureDirectory, "valid-commit-ready.json"))
+	if err != nil {
+		t.Fatalf("read commit-ready fixture: %v", err)
+	}
+	credentialsMessage, err := DecodeContractMessage(credentialsDocument)
+	if err != nil {
+		t.Fatalf("decode credentials: %v", err)
+	}
+	readyMessage, err := DecodeContractMessage(readyDocument)
+	if err != nil {
+		t.Fatalf("decode commit-ready: %v", err)
+	}
+	credentials := *credentialsMessage.(*Credentials)
+	ready := *readyMessage.(*CommitReady)
+	digest, err := TranscriptSHA256(credentials, ready)
+	if err != nil {
+		t.Fatalf("TranscriptSHA256() error = %v", err)
+	}
+	const expected = "sha256:ed73b99fc50c3d32bcb6404f42c11890585d2362af77b75578140dd1619d0493"
+	if digest != expected || digest != ready.TranscriptSHA256 {
+		t.Fatalf("transcript digest = %q, ready = %q", digest, ready.TranscriptSHA256)
+	}
+
+	ready.ProfileID = "sha256:" + strings.Repeat("0", 64)
+	if _, err = TranscriptSHA256(credentials, ready); !errors.Is(err, ErrMalformedContract) {
+		t.Fatalf("mismatched profile digest error = %v", err)
 	}
 }

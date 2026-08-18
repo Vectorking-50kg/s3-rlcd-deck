@@ -27,6 +27,15 @@ Unknown fields, wrong sequence, replay, incompatible major, non-private Hub addr
 base64, and unrecognized state/error values fail closed. The shared
 `fixtures/pairing-v2/manifest.json` is executed unchanged by Go and ESP-IDF Host tests.
 
+The transaction transcript starts with the ASCII domain `s3-rlcd-pairing-v2-transcript` plus a
+NUL byte. Each field is then encoded in the fixed order below as its ASCII label, a NUL byte, a
+four-byte big-endian value length, and the raw value bytes. Unsigned integers are four-byte
+big-endian values and `certificate_der` is the decoded DER rather than its JSON base64 text.
+The order is `protocol_version`, `session_id`, `transaction_id`, `window_nonce`,
+`companion_nonce`, `hub_service`, `hub_address`, `token`, `certificate_fingerprint`,
+`certificate_der`, `device_link_protocol`, `deck_nonce`, `device_id`, `device_identity`, and
+`profile_id`. Both ends compute lowercase `sha256:<hex>` over those bytes and reject any mismatch.
+
 ## AI Snapshot v1
 
 `schema/ai-snapshot-v1.schema.json` is the normalized `snapshot.ai` wire contract. Percentages
