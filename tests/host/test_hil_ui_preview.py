@@ -74,6 +74,52 @@ class PreviewConnection:
         return self.lines.pop(0) if self.lines else b""
 
 
+class GalleryConnection:
+    def __init__(self) -> None:
+        self.lines: list[bytes] = []
+        self.writes: list[bytes] = []
+        self.timeout = 0.0
+        self.completed_frames = 10
+
+    def write(self, value: bytes) -> None:
+        self.writes.append(value)
+        if value == MODULE.preview_command("clear"):
+            self.lines.append(
+                json.dumps(
+                    {
+                        "type": "ui_preview",
+                        "page": "live",
+                        "active": False,
+                        "accepted": True,
+                    }
+                ).encode()
+                + b"\n"
+            )
+        elif value == MODULE.HIL_READY and not self.lines:
+            self.lines.append(json.dumps(display_event(self.completed_frames)).encode() + b"\n")
+        elif value.startswith(b"DECK_UI_PREVIEW "):
+            page = value.decode("ascii").strip().split(" ", 1)[1]
+            self.completed_frames += 1
+            self.lines.append(json.dumps(display_event(self.completed_frames)).encode() + b"\n")
+            self.lines.append(
+                json.dumps(
+                    {
+                        "type": "ui_preview",
+                        "page": page,
+                        "active": True,
+                        "accepted": True,
+                    }
+                ).encode()
+                + b"\n"
+            )
+
+    def flush(self) -> None:
+        pass
+
+    def readline(self) -> bytes:
+        return self.lines.pop(0) if self.lines else b""
+
+
 class CaptureConnection:
     def __init__(self, frame: bytes, corrupt_crc: bool = False) -> None:
         self.frame = frame
@@ -141,6 +187,30 @@ for page in MODULE.PAGES:
         expected_writes.append(MODULE.preview_command(page))
     assert connection.writes == expected_writes
     assert connection.flushed
+
+assert len(MODULE.GALLERY_PAGES) == 17
+assert len(set(MODULE.GALLERY_PAGES)) == len(MODULE.GALLERY_PAGES)
+assert "clear" not in MODULE.GALLERY_PAGES
+gallery_connection = GalleryConnection()
+original_sleep = MODULE.time.sleep
+gallery_holds: list[float] = []
+MODULE.time.sleep = gallery_holds.append
+try:
+    gallery = MODULE.show_gallery(gallery_connection, 0.25, 4.0)
+finally:
+    MODULE.time.sleep = original_sleep
+assert [page for page, _ in gallery] == list(MODULE.GALLERY_PAGES)
+assert len(gallery_holds) == len(MODULE.GALLERY_PAGES)
+assert all(hold == 4.0 for hold in gallery_holds)
+assert gallery_connection.completed_frames == 10 + len(MODULE.GALLERY_PAGES)
+
+for invalid_hold in (0.0, -1.0, 60.1):
+    try:
+        MODULE.show_gallery(GalleryConnection(), 0.25, invalid_hold)
+    except MODULE.PreviewFailure as error:
+        assert "gallery hold" in str(error)
+    else:
+        raise AssertionError("invalid gallery hold must fail closed")
 
 try:
     MODULE.preview_command("secrets")

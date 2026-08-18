@@ -147,6 +147,7 @@ Deck 是放在桌面上的本地技术仪表，不是串口日志窗口。用户
 
 ```sh
 source /Users/xiaowang/.espressif/v6.0.2/esp-idf/export.sh
+python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --gallery --hold-seconds 4
 python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page board
 python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page pairing
 python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page pairing-authenticating
@@ -166,6 +167,11 @@ python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page offline
 python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page error
 python3 tools/hil_ui_preview.py --port /dev/cu.usbmodemXXXX --page clear
 ```
+
+实体屏光学验收优先使用 `--gallery`：开始录像后运行一次命令，工具会按上表顺序
+轮播全部 17 个状态，每页默认停留 4 秒，并在终端逐页输出完成帧号。轮播结束后
+最后一个错误页保持冻结，便于补拍；运行 `--page clear` 恢复实时界面。
+`--hold-seconds` 必须大于 0 且不超过 60 秒。
 
 增加 `--output /absolute/path/page.png` 可以把该固定页面最后一次成功送屏的
 15,000 字节 1bpp 帧解包为 400×300 PNG；文件已存在时必须显式加

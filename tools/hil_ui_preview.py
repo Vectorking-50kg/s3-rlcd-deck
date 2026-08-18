@@ -39,6 +39,7 @@ PAGES = (
     "error",
     "clear",
 )
+GALLERY_PAGES = tuple(page for page in PAGES if page != "clear")
 FATAL_MARKERS = (
     "task_wdt:",
     "guru meditation error",
@@ -183,6 +184,26 @@ def show_preview(connection: Any, page: str, timeout_seconds: float) -> int:
     raise PreviewFailure("UI preview was accepted but no completed display frame followed")
 
 
+def show_gallery(
+    connection: Any,
+    timeout_seconds: float,
+    hold_seconds: float,
+) -> list[tuple[str, int]]:
+    if hold_seconds <= 0 or hold_seconds > 60:
+        raise PreviewFailure("gallery hold must be greater than zero and at most 60 seconds")
+    completed: list[tuple[str, int]] = []
+    for page in GALLERY_PAGES:
+        completed_frames = show_preview(connection, page, timeout_seconds)
+        completed.append((page, completed_frames))
+        print(
+            f"UI gallery page ready: {len(completed)}/{len(GALLERY_PAGES)} "
+            f"page={page} completed_frames={completed_frames}",
+            flush=True,
+        )
+        time.sleep(hold_seconds)
+    return completed
+
+
 def valid_capture_begin(event: dict[str, Any]) -> bool:
     return (
         set(event)
@@ -318,11 +339,23 @@ def write_png(path: pathlib.Path, frame: bytes, overwrite: bool) -> None:
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Freeze a development Deck on one deterministic UI page for visual review."
+        description="Freeze or cycle deterministic development Deck UI pages for visual review."
     )
     parser.add_argument("--port", required=True, help="Deck USB serial port")
-    parser.add_argument("--page", required=True, choices=PAGES)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--page", choices=PAGES)
+    mode.add_argument(
+        "--gallery",
+        action="store_true",
+        help="Cycle every deterministic page once in the physical acceptance order",
+    )
     parser.add_argument("--timeout", type=float, default=12.0)
+    parser.add_argument(
+        "--hold-seconds",
+        type=float,
+        default=4.0,
+        help="Seconds to hold each --gallery page on the physical panel (default: 4)",
+    )
     parser.add_argument(
         "--output",
         type=pathlib.Path,
@@ -338,8 +371,8 @@ def parse_arguments() -> argparse.Namespace:
 
 def main() -> int:
     arguments = parse_arguments()
-    if arguments.output is not None and arguments.page == "clear":
-        print("UI preview failed: live UI capture is forbidden", file=sys.stderr)
+    if arguments.output is not None and (arguments.gallery or arguments.page == "clear"):
+        print("UI preview failed: gallery/live UI capture is forbidden", file=sys.stderr)
         return 2
     try:
         import serial
@@ -353,17 +386,31 @@ def main() -> int:
             timeout=0.25,
             write_timeout=0.25,
         ) as connection:
-            completed_frames = show_preview(connection, arguments.page, arguments.timeout)
-            if arguments.output is not None:
-                frame = capture_preview_frame(connection, arguments.timeout)
-                write_png(arguments.output, frame, arguments.overwrite)
+            if arguments.gallery:
+                gallery = show_gallery(
+                    connection,
+                    arguments.timeout,
+                    arguments.hold_seconds,
+                )
+                completed_frames = gallery[-1][1]
+            else:
+                completed_frames = show_preview(connection, arguments.page, arguments.timeout)
+                if arguments.output is not None:
+                    frame = capture_preview_frame(connection, arguments.timeout)
+                    write_png(arguments.output, frame, arguments.overwrite)
     except (OSError, serial.SerialException, PreviewFailure) as error:
         print(f"UI preview failed: {error}", file=sys.stderr)
         return 1
-    print(
-        f"UI preview ready: page={arguments.page} completed_frames={completed_frames}"
-        + (f" output={arguments.output}" if arguments.output is not None else "")
-    )
+    if arguments.gallery:
+        print(
+            f"UI gallery complete: pages={len(GALLERY_PAGES)} "
+            f"completed_frames={completed_frames}"
+        )
+    else:
+        print(
+            f"UI preview ready: page={arguments.page} completed_frames={completed_frames}"
+            + (f" output={arguments.output}" if arguments.output is not None else "")
+        )
     return 0
 
 
